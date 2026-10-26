@@ -124,6 +124,9 @@ use_spotifyd = false           # spotifyd is the player on this PC (set up with 
                                # counts as "this PC"; off = only the Spotify app on this computer does
 spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
 spotify_queue_tab = true       # the Queue tab in the library browser
+# [keys]                       # must come last in the file; see "Remapping keys" below
+# next = "j"
+# mute = ["w", "F5"]
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -215,6 +218,30 @@ The control row scales with the window and only ever draws whole buttons. When i
 Shuffle and repeat are read with `playerctl shuffle` / `playerctl loop` about every 2 s and shown as they are reported. Some players (Spotify desktop in particular) may ignore the write, in which case the button simply flips back on the next poll.
 
 The volume control follows the player: changes made elsewhere (media keys, the Spotify app) show up within a poll. It is hidden when the player doesn't report a volume.
+
+## Remapping keys
+
+The `[keys]` section of `config.toml` changes the keys of the main view, one line per action: `action = "key"`, or a list of keys. It has to come after every other setting in the file (a TOML section runs to the end of the file).
+
+```toml
+[keys]
+next = "j"                     # n no longer does anything; j plays the next track
+prev = "k"
+mute = ["w", "F5"]             # several keys for one action
+big_scale = "2"                # unshifted keys work on any layout
+```
+
+**Key syntax.** One character (`"n"`, `"T"`, `"["`, `"+"`; case matters, `"T"` is a capital T), or a name: `space`, `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`, `home`, `end`, `f1` … `f12`. Modifiers (`ctrl+x`, `alt+x`, `shift+x`) are not supported: the key handler ignores Ctrl and Alt, so use the plain key, a capital for Shift.
+
+**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
+
+**Rules.**
+- An entry **replaces** that action's default keys. An action you don't mention keeps its keys.
+- A problem never stops the program and never touches the other lines: an unknown action, a key that isn't one, a modifier, the same key twice in a list, an empty list, or a key that another action in the final table already uses each print a warning with the line number (`config.toml:3: [keys] next: 'p' is already bound to prev; keeping the default`) and that action keeps its default keys. Two actions can still swap keys (`next = "p"` with `prev = "n"`). When two entries want the same key, the earlier line keeps it.
+- `quit` and `help` can never lose their keys: an entry for them only **adds** keys, and no other action can take `q`, `Esc` or `?`. `Ctrl+C` always quits.
+- The library browser, the settings menu, the device list and the help overlay have their own fixed keys (listed in the help); only the main-view keys above are remappable.
+- The `?` overlay and the key hints in the footer show the keys you configured. `music_display --print-config` ends with a `[keys]` block of the effective bindings, every action with its keys, which is valid config to paste back.
+- The settings menu writes the file again when you change a setting: your `[keys]` lines are kept (as the same values, in alphabetical order), but comments in the file are not, as for every other setting.
 
 ## Metadata panel
 
