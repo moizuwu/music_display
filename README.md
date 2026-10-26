@@ -1,6 +1,6 @@
 # music_display
 
-Rust port of `music_display_2.fish`: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
+A terminal now-playing display: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
 
 ## Build
 
@@ -109,7 +109,7 @@ The volume control follows the player: changes made elsewhere (media keys, the S
 
 ## Metadata panel
 
-`Release Date` shows the full `YYYY-MM-DD` when the player reports it (otherwise the year from MusicBrainz/iTunes). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so with chords off — or a sheet without them — these fields are simply hidden. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
+`Release` shows the full `YYYY-MM-DD` when the player reports it (otherwise the year from MusicBrainz/iTunes). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so with chords off — or a sheet without them — these fields are simply hidden. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
 
 The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot show the **sounding** key (shapes + capo); the Capo row says which shapes you finger, e.g. `Capo 3  (shapes in C#m)`. Changing the capo with `[` / `]` re-spells the shapes (and the diagrams) but leaves the sounding key alone.
 
