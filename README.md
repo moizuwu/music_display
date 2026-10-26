@@ -157,7 +157,9 @@ spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as
 | `H` | play here: move Spotify playback from the phone / another device to this PC |
 | `q` / `Esc` | quit |
 
-Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 65% ] [ + ]` (dashes separate the groups; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+Mouse: click the progress bar to seek; click `[ shuf ]   [ rep ]   [ prev ]   [ pause ]   [ next ]   [ - ] [ 65% ] [ + ]` (three blank columns between buttons; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+
+The control row scales with the window and only ever draws whole buttons. When it gets narrow it gives up, in this order: the volume moves to its own row below the buttons; labels turn compact (`[sh] [rp] [<<] [|>] [>>]`, volume `[-] 65% [+]`); shuffle and repeat are dropped; the volume shrinks to `[-][+]` and then goes; last prev / next go, so play stays longest. Keyboard shortcuts work whatever is hidden. When the window is short, the controls and progress bar keep their rows first, then the metadata, and the cover shrinks or disappears before any of them. The key hints at the bottom of the library browser follow the same rule: whole hints are left out, never cut.
 
 Shuffle and repeat are read with `playerctl shuffle` / `playerctl loop` about every 2 s and shown as they are reported. Some players (Spotify desktop in particular) may ignore the write, in which case the button simply flips back on the next poll.
 

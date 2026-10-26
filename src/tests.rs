@@ -1569,3 +1569,162 @@ fn genius_lookup_with_fake_site_and_cache() {
 fn percent() {
     assert_eq!(util::percent_decode("/a%20b/c%C3%A9.jpg"), "/a b/cé.jpg");
 }
+
+#[test]
+fn control_row_never_draws_half_a_button() {
+    use ui::plan_controls;
+    for width in 0..=160u16 {
+        for shuffle in [None, Some(false), Some(true)] {
+            for rep in [None, Some(false), Some(true)] {
+                for (playing, volume, row_ok) in [(true, true, true), (false, true, false), (true, false, true), (false, false, false)] {
+                    let p = plan_controls(width, shuffle, rep, playing, volume, row_ok);
+                    let ctx = format!("w={width} sh={shuffle:?} rep={rep:?} play={playing} vol={volume} row={row_ok}");
+                    // every button is whole, inside the row, and none touches the next
+                    let mut end = 0u16;
+                    for b in &p.buttons {
+                        let w = b.label.chars().count() as u16;
+                        assert!(b.x >= end && b.x + w <= width, "{ctx}: {b:?}");
+                        end = b.x + w + 1;
+                    }
+                    if let Some((k, x)) = p.vol {
+                        assert!(volume && x + k.width() <= width, "{ctx}: volume {k:?} at {x}");
+                        if p.vol_row {
+                            assert!(row_ok, "{ctx}");
+                        } else {
+                            assert!(x >= end, "{ctx}: volume overlaps the buttons");
+                        }
+                    } else {
+                        assert!(!p.vol_row, "{ctx}");
+                    }
+                    // play stays longest; the whole transport group once it fits
+                    let ids: Vec<u8> = p.buttons.iter().map(|b| b.id).collect();
+                    if width >= 4 {
+                        assert!(ids.contains(&3), "{ctx}: no play button");
+                    }
+                    if width >= 16 {
+                        assert!(ids.contains(&2) && ids.contains(&4), "{ctx}");
+                    }
+                    // shuffle / repeat only exist for what the player reports
+                    assert!(!ids.contains(&0) || shuffle.is_some(), "{ctx}");
+                    assert!(!ids.contains(&1) || rep.is_some(), "{ctx}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn control_row_gives_up_in_a_fixed_order() {
+    use ui::{VolKind, plan_controls};
+    let ids = |p: &ui::ControlPlan| p.buttons.iter().map(|b| b.id).collect::<Vec<_>>();
+    let wide = plan_controls(120, Some(false), Some(false), true, true, true);
+    assert_eq!(ids(&wide), [0, 1, 2, 3, 4]);
+    assert_eq!(wide.vol.map(|v| v.0), Some(VolKind::Full));
+    assert!(!wide.vol_row);
+    assert!(wide.buttons[0].label.starts_with("[ shuf"));
+    // three blank columns between buttons
+    let (a, b) = (&wide.buttons[0], &wide.buttons[1]);
+    assert_eq!(b.x - (a.x + a.label.chars().count() as u16), 3);
+    // volume moves below the buttons before anything is shortened
+    let mid = plan_controls(60, Some(false), Some(false), true, true, true);
+    assert!(mid.vol_row && ids(&mid) == [0, 1, 2, 3, 4] && mid.buttons[2].label == "[ prev ]");
+    // then compact labels
+    let compact = plan_controls(40, Some(false), Some(false), true, true, true);
+    assert_eq!(compact.buttons[2].label, "[<<]");
+    // then shuffle / repeat go, the volume shrinks, and prev / play / next are kept longest
+    let small = plan_controls(20, Some(false), Some(false), true, true, false);
+    assert_eq!(ids(&small), [2, 3, 4]);
+    assert_eq!(small.vol, None);
+    assert_eq!(ids(&plan_controls(10, None, None, true, false, false)), [3, 4]);
+    assert_eq!(ids(&plan_controls(9, None, None, true, false, false)), [3]);
+    assert_eq!(ids(&plan_controls(4, None, None, false, false, false)), [3]);
+    assert!(plan_controls(3, None, None, false, false, false).buttons.is_empty());
+}
+
+#[test]
+fn left_panel_keeps_the_controls_when_short() {
+    for h in 0..=60u16 {
+        for meta in [0u16, 3, 7] {
+            for vol_row in [false, true] {
+                let l = ui::left_heights(h, meta, vol_row);
+                let sum = l.cover + l.gap_cover + l.meta + l.gap_meta + l.prog + l.gap_prog + l.btn + l.vol;
+                assert_eq!(sum, h, "h={h} meta={meta} {l:?}");
+                if h >= 1 {
+                    assert_eq!(l.btn, 1, "buttons first: h={h}");
+                }
+                // the cover is the first to go, then metadata
+                if l.meta < meta && meta > 0 {
+                    assert_eq!(l.cover, 0, "h={h} meta={meta} {l:?}");
+                }
+                if l.cover > 0 {
+                    assert!(l.meta == meta || meta == 0, "h={h} meta={meta} {l:?}");
+                }
+                assert!(l.vol == 0 || vol_row);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn control_row_survives_every_window_size() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let mut s = snap("Band", "Song", "LP");
+    s.shuffle = Some(true);
+    s.repeat = Some(player::Loop::None);
+    s.volume = Some(0.65);
+    s.player = "spotify".into();
+    for w in [10u16, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 100, 120] {
+        for h in [4u16, 5, 6, 8, 10, 12, 16, 20, 30, 40] {
+            let mut app = test_app();
+            app.apply(AppEvent::Player(Some(s.clone())));
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let area = Rect::new(0, 0, w, h);
+            let hits = &app.hits;
+            let rects = [
+                ("shuffle", hits.shuffle), ("repeat", hits.repeat), ("prev", hits.prev), ("play", hits.play),
+                ("next", hits.next), ("vol-", hits.vol_minus), ("vol%", hits.vol_pct), ("vol+", hits.vol_plus),
+            ];
+            let shown: Vec<_> = rects.iter().filter(|r| r.1.width > 0).collect();
+            for (name, r) in &shown {
+                assert!(area.contains(ratatui::layout::Position::new(r.x, r.y)) && r.right() <= w && r.bottom() <= h, "{w}x{h} {name} {r:?}");
+                // what is drawn under a hit area is a whole button: it starts with `[` and ends with `]`
+                let b = term.backend().buffer();
+                let text: String = (r.x..r.right()).map(|x| b[(x, r.y)].symbol()).collect();
+                if *name != "vol%" || text.starts_with('[') {
+                    assert!(text.starts_with('[') && text.ends_with(']'), "{w}x{h} {name}: {text:?}");
+                }
+            }
+            for (i, (an, a)) in shown.iter().enumerate() {
+                for (bn, b) in &shown[i + 1..] {
+                    let apart = a.y != b.y || a.right() <= b.x || b.right() <= a.x;
+                    assert!(apart, "{w}x{h}: {an} {a:?} overlaps {bn} {b:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn key_hints_drop_whole_items_never_cut_one() {
+    let items = [(3u8, "tab/1-5"), (1, "enter play"), (2, "→/← open/back"), (4, "a queue"), (5, "f like"), (1, "esc")];
+    let full = "tab/1-5 · enter play · →/← open/back · a queue · f like · esc";
+    assert_eq!(ui::fit_hints(&items, 200), full);
+    for w in 0..=full.chars().count() {
+        let got = ui::fit_hints(&items, w);
+        assert!(util::width(&got) <= w, "{w}: {got:?}");
+        // every shown piece is a whole item, in the original order
+        let pieces: Vec<&str> = if got.is_empty() { vec![] } else { got.split(" · ").collect() };
+        let mut at = 0;
+        for p in pieces {
+            at += items[at..].iter().position(|i| i.1 == p).expect(p) + 1;
+        }
+    }
+    // the highest number goes first, then the next
+    assert_eq!(ui::fit_hints(&items, 54), "tab/1-5 · enter play · →/← open/back · a queue · esc");
+    assert_eq!(ui::fit_hints(&items, 12), "enter play");
+    assert_eq!(ui::fit_hints(&items, 9), "esc");
+    assert_eq!(ui::fit_hints(&items, 2), "");
+    assert_eq!(ui::ellipsize("hello world", 8), "hello w…");
+    assert_eq!(ui::ellipsize("hi", 8), "hi");
+}
