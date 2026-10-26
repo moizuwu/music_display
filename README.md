@@ -18,15 +18,51 @@ music_display --spotify                                         # 3. run; `o` op
 
 Put `spotify = true` in the config file to make it the default.
 
-## Build
+## Install
+
+You need `playerctl` (it talks to your player), a C compiler and linker, and **Rust 1.90 or newer**; `cava` is optional (only for `--cava` / `c`). No OpenSSL or libchafa is needed (rustls + pure-Rust image decoding).
+
+**With cargo** (the binary goes to `~/.cargo/bin/music_display`):
+
+```sh
+cargo install --git https://github.com/moizuwu/music_display
+```
+
+**With the install script** (Arch, Debian / Ubuntu, Fedora and openSUSE families; builds from source and puts `music_display` and the short command `mdis` in `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/moizuwu/music_display/main/install.sh | bash
+```
+
+or, to read it before running it:
+
+```sh
+curl -fsSLo install.sh https://raw.githubusercontent.com/moizuwu/music_display/main/install.sh
+less install.sh
+bash install.sh --dry-run     # shows every step, changes nothing
+bash install.sh
+```
+
+What it does: installs only what is missing (asking first, with `sudo` or `doas`), offers rustup in your home directory when Rust is missing or older than 1.90, clones the source to `~/.local/share/music_display/src` and builds it with `cargo build --release --locked`. Re-running it updates the checkout with a fast-forward and rebuilds only if something changed; if the checkout has local changes or can't fast-forward it stops and leaves everything alone. It never overwrites a file or someone else's symlink named `music_display` or `mdis`.
+
+| option | effect |
+| --- | --- |
+| `--dry-run` | print the steps, change nothing |
+| `--yes` | answer yes to the questions (including the optional `cava`) |
+| `--no-deps` | install no packages and no Rust, only check they are there |
+| `--ref REF` | install this branch or tag instead of `main` |
+| `--force` | rebuild even when already up to date |
+| `--aur` | Arch: allow building a dependency from the AUR when it isn't in the official repos (needs `yay` or `paru`; `--yes` does not allow this). Normally never needed. |
+
+Other systems: install the packages above yourself, then use `cargo install` or build from source.
+
+## Build from source
 
 ```sh
 sudo pacman -S --needed rust playerctl cava   # cava is optional (only for --cava / `c`)
 cargo build --release
 install -Dm755 target/release/music_display ~/.local/bin/music_display
 ```
-
-No OpenSSL or libchafa needed (rustls + pure-Rust image decoding).
 
 ## Run
 
