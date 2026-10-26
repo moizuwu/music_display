@@ -546,9 +546,16 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
     );
 }
 
-/// Lines of the help overlay, generated from the key table the input handler uses.
-/// Returns the groups as separate blocks so they can be laid out in columns.
+/// The help overlay for the default key table.
+#[cfg(test)]
 pub fn help_blocks(th: &Theme) -> Vec<Vec<Line<'static>>> {
+    help_blocks_with(th, &crate::keymap::Keymap::default())
+}
+
+/// Lines of the help overlay, generated from the key table the input handler uses (with the
+/// user's `[keys]` overrides). Returns the groups as separate blocks so they can be laid out
+/// in columns.
+pub fn help_blocks_with(th: &Theme, keys: &crate::keymap::Keymap) -> Vec<Vec<Line<'static>>> {
     use crate::app::{BINDS, GROUPS, LIBRARY_KEYS, MOUSE};
     let head = |g: &str| {
         Line::styled(
@@ -566,7 +573,7 @@ pub fn help_blocks(th: &Theme) -> Vec<Vec<Line<'static>>> {
         .iter()
         .map(|g| {
             let mut v = vec![head(g)];
-            v.extend(BINDS.iter().filter(|b| b.group == *g).map(|b| row(b.keys, b.desc)));
+            v.extend(BINDS.iter().filter(|b| b.group == *g).map(|b| row(&keys.label(b.action), b.desc)));
             v.extend(MOUSE.iter().filter(|m| m.0 == *g).map(|m| row(m.1, m.2)));
             if *g == "Spotify" {
                 v.push(Line::styled("in the library", Style::new().fg(th.fade(0.45))));
@@ -581,7 +588,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     use ratatui::widgets::Clear;
     let area = f.area();
     let th = app.theme.clone();
-    let blocks = help_blocks(&th);
+    let blocks = help_blocks_with(&th, &app.keys);
     // Two columns (Playback+Lyrics | Chords+View) when there is room, else one list.
     let two = area.width >= 78;
     let cols: Vec<Vec<Line>> = if two {
@@ -2569,12 +2576,23 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
     let left = Line::from(spans);
     let note = app.note_text().map(|n| format!("{n} "));
+    // the first key of each action, as configured
+    use crate::app::Action as A;
+    let k = |a: A| app.keys.first(a);
+    let basics = format!(
+        "{} ⏯  {}/{}  {}/{} seek  {}/{} vol",
+        k(A::PlayPause), k(A::Next), k(A::Prev), k(A::SeekBack), k(A::SeekFwd), k(A::VolUp), k(A::VolDown)
+    );
+    let tail = format!("{} help  {} quit ", k(A::Help), k(A::Quit));
     let long = if app.spot.is_some() {
-        "space ⏯  n/p  ←/→ seek  +/- vol  o library  f like  g chords  ? help  q quit "
+        format!("{basics}  {} library  {} like  {} chords  {tail}", k(A::Library), k(A::Like), k(A::ToggleChords))
     } else {
-        "space ⏯  n/p  ←/→ seek  +/- vol  g chords  M min  D diagrams  ? help  q quit "
+        format!(
+            "{basics}  {} chords  {} min  {} diagrams  {tail}",
+            k(A::ToggleChords), k(A::Minimal), k(A::Diagrams)
+        )
     };
-    let short = "? help  q quit ";
+    let short = tail;
     let left_w = left.width() as u16;
     f.render_widget(Paragraph::new(left), area);
     if let Some(n) = note {

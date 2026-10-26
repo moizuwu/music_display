@@ -147,6 +147,8 @@ pub const MOUSE: &[(&str, &str, &str)] = &[
     ("Lyrics", "click a line", "seek to that line"),
 ];
 
+/// The action of `code` in the default table (tests; the program uses `App::keys`).
+#[cfg(test)]
 pub fn action_for(code: KeyCode) -> Option<Action> {
     BINDS
         .iter()
@@ -541,6 +543,8 @@ pub struct App {
     /// A short message in the footer (a Spotify command finished or failed).
     pub note: Option<(String, Instant)>,
     pub lib: Library,
+    /// The key table with the `[keys]` overrides of config.toml.
+    pub keys: crate::keymap::Keymap,
     /// The task polling `/me/player` while Spotify is on.
     spot_task: Option<JoinHandle<()>>,
     /// The browser login started from the settings menu, and what it says.
@@ -648,6 +652,7 @@ impl App {
             spot_status: None,
             note: None,
             lib: Library::new(),
+            keys: Default::default(),
             spot_task: None,
             login_task: None,
             login_msg: None,
@@ -1702,7 +1707,7 @@ impl App {
                 if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                     return false;
                 }
-                if let Some(a) = action_for(k.code) {
+                if let Some(a) = self.keys.action_for(k.code) {
                     return self.run(a);
                 }
             }

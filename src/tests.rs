@@ -3265,3 +3265,6 @@ async fn use_spotifyd_is_a_setting_and_gates_the_device_name() {
     assert!(!app.args.use_spotifyd);
     assert!(!app.spot.as_ref().unwrap().is_local("Living Room PC"));
 }
+
+// `[keys]` in config.toml: src/tests/keys_tests.rs
+mod keys_tests;
