@@ -141,6 +141,8 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 
 ## Notes
 
+- A song counts as the same track across its releases: first artist plus the bare title (no edition, live, remaster or guest suffixes; the album is ignored). If the player's strings change while the same item keeps playing (same track id, or the position running on at the same length), nothing is refetched and the panel keeps what it showed. With several players running, the one on screen is kept until it goes quiet or another starts playing while it doesn't.
+- `MUSIC_DISPLAY_DEBUG=1` appends every player snapshot to `~/.cache/music_display/snapshots.log` (or set it to a file path).
 - Colour files are checked in order: `~/.config/noctalia/colors.json`, `~/.cache/noctalia/colors.json`, `~/.config/matugen/colors.json`, `~/.cache/matugen/colors.json`, `~/.config/noctalia/theme.json`.
 - Cover art uses Kitty graphics when available, then Sixel / iTerm2, then unicode half-blocks. The bitmap is scaled to exactly fill its cell box.
 - If cava can't start or dies, the cava panel shows why (cava's own error message); press `c` twice to retry.

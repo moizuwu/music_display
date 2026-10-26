@@ -894,7 +894,7 @@ mod player {
     use tokio::sync::{Notify, mpsc::UnboundedSender};
 
     /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
-    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}";
+    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Status {
@@ -919,19 +919,22 @@ mod player {
         pub volume: Option<f64>,
         /// `xesam:url` — a `file://` path for locally played audio.
         pub url: String,
+        /// `mpris:trackid` — the player's own id for the item (Spotify track URI…).
+        pub track_id: String,
+        /// The MPRIS instance this came from (`spotify`, `vlc`…).
+        pub player: String,
     }
 
     impl Snapshot {
-        /// Identity of the track; changes ⇒ refetch year/lyrics. Case, spacing and
-        /// edition/remaster suffixes are ignored, so "Metallica" and "Metallica (Remastered
-        /// Deluxe Box Set)" are the same track and don't regenerate any state.
+        /// Identity of the track; changes ⇒ refetch year/lyrics. First artist and the bare
+        /// song title only: case, spacing, edition / remaster / live suffixes, guest credits
+        /// and the album are ignored, so every release of a song is the same track.
         pub fn key(&self) -> u64 {
-            let clean = |s: &str| crate::util::normalize_track(s);
+            let first_artist = self.artist.split(", ").next().unwrap_or(&self.artist);
             crate::util::fnv1a(&format!(
-                "{}\0{}\0{}",
-                clean(&self.artist),
-                clean(&self.title),
-                clean(&self.album)
+                "{}\0{}",
+                crate::util::normalize_track(first_artist),
+                crate::util::normalize_track(&crate::year::base_title(&self.title)),
             ))
         }
     }
@@ -975,6 +978,8 @@ mod player {
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 1.0)),
             url: url.to_string(),
+            track_id: f.get(12).map_or("", |v| v.trim()).to_string(),
+            player: f.get(13).map_or("", |v| v.trim()).to_string(),
         })
     }
 
@@ -4144,6 +4149,8 @@ mod app {
         pub browse: f64,
         browse_at: Instant,
         pub local_tags: std::collections::HashMap<String, tags::Tags>,
+        /// When the player we are showing last reported in.
+        player_seen: Instant,
         tags_asked: std::collections::HashSet<String>,
     }
 
@@ -4227,6 +4234,7 @@ mod app {
                 browse: 0.0,
                 browse_at: Instant::now(),
                 local_tags: Default::default(),
+                player_seen: Instant::now(),
                 tags_asked: Default::default(),
             };
             app.translate_on = app.args.translate;
@@ -4383,7 +4391,29 @@ mod app {
             if s.url.starts_with("file://") {
                 self.merge_local_tags(&mut s);
             }
-            let key = s.key();
+            if let Ok(path) = std::env::var("MUSIC_DISPLAY_DEBUG") {
+                use std::io::Write;
+                let path = if path == "1" { crate::util::cache_dir().join("snapshots.log") } else { path.into() };
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(f, "{:?}", s);
+                }
+            }
+            // Several players at once (`any`, a list): stay with the one being shown while it
+            // reports in, unless another one starts playing while ours doesn't.
+            if let Some(o) = &self.snap {
+                if !s.player.is_empty() && !o.player.is_empty() && s.player != o.player {
+                    let ours_quiet = self.player_seen.elapsed() > Duration::from_secs(3);
+                    let takeover = s.status == Status::Playing && o.status != Status::Playing;
+                    if !ours_quiet && !takeover {
+                        return;
+                    }
+                }
+            }
+            self.player_seen = Instant::now();
+            let mut key = s.key();
+            if key != self.track_key && self.same_recording(&s) {
+                key = self.track_key;
+            }
             let new_track = key != self.track_key;
             // Same track, different spelling of the strings (edition names, art): keep what
             // is already on screen and only fill in what was missing.
@@ -4515,6 +4545,25 @@ mod app {
             if changed {
                 self.dirty = true;
             }
+        }
+
+        /// A snapshot whose strings changed but that is still the item already playing: the
+        /// player's own id is unchanged, or the position runs on where it was (a real track
+        /// change starts near 0 or jumps) with the same length.
+        fn same_recording(&self, s: &Snapshot) -> bool {
+            let Some(o) = &self.snap else { return false };
+            if self.track_key == 0 || o.player != s.player {
+                return false;
+            }
+            if !s.track_id.is_empty() && s.track_id == o.track_id {
+                return true;
+            }
+            if !s.url.is_empty() && s.url == o.url {
+                return true;
+            }
+            let same_len = o.length > 0.0 && (o.length - s.length).abs() <= 1.0;
+            let runs_on = s.position > 2.0 && (self.position() - s.position).abs() < 1.5;
+            same_len && runs_on
         }
 
         /// Fill what the player left empty from the file's own tags; ask for them once.
@@ -7811,6 +7860,8 @@ mod tests {
             content_created: String::new(),
             volume: None,
             url: String::new(),
+            track_id: String::new(),
+            player: String::new(),
         }
     }
 
@@ -7959,6 +8010,54 @@ mod tests {
         assert_eq!(a.per_line[0].len(), 2);
         assert_eq!(a.gaps[0], vec![vec!["C", "G", "Am", "F"]]);
         assert!(a.gaps[1].is_empty());
+    }
+
+    fn test_app() -> app::App {
+        use clap::Parser;
+        let args = cli::Args::parse_from(["music_display"]);
+        let theme = theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx)
+    }
+
+    #[tokio::test]
+    async fn versions_of_a_playing_song_never_restart_it() {
+        let mut app = test_app();
+        let at = |mut s: player::Snapshot, pos: f64| {
+            s.position = pos;
+            s.player = "spotify".into();
+            s
+        };
+        app.apply(AppEvent::Player(Some(at(snap("Band", "Song", "Album"), 10.0))));
+        let key = app.snap.as_ref().unwrap().key();
+        // a new track resets the lyric offset, so a kept offset means nothing restarted
+        app.offset = 0.7;
+        // the player flips between releases the strings don't reveal as the same
+        for (i, (t, al)) in [
+            ("Song - Live at Wembley", "Live at Wembley"),
+            ("Song", "Greatest Hits"),
+            ("Song (feat. Guest)", "Album: Deluxe"),
+            ("Totally Different Name", "Album Super Deluxe Edition"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            app.apply(AppEvent::Player(Some(at(snap("Band", t, al), 10.2 + i as f64 * 0.2))));
+            let shown = app.snap.as_ref().unwrap();
+            assert_eq!((shown.title.as_str(), shown.album.as_str()), ("Song", "Album"), "{t}");
+            assert_eq!(app.offset, 0.7, "track restarted on {t}");
+        }
+        assert_eq!(app.snap.as_ref().unwrap().key(), key);
+        // a real next track (position back near 0) switches at once
+        app.apply(AppEvent::Player(Some(at(snap("Band", "Next One", "Album"), 0.3))));
+        assert_eq!(app.snap.as_ref().unwrap().title, "Next One");
+        assert_eq!(app.offset, 0.0);
+        // another player that isn't playing doesn't take over the display
+        let mut other = at(snap("Someone", "Video", ""), 50.0);
+        other.player = "firefox".into();
+        other.status = player::Status::Paused;
+        app.apply(AppEvent::Player(Some(other)));
+        assert_eq!(app.snap.as_ref().unwrap().title, "Next One");
     }
 
     enum R {
