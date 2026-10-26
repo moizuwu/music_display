@@ -185,8 +185,9 @@ pub struct Args {
     #[arg(long, default_value = "", value_name = "NAME")]
     pub spotify_device: String,
 
-    /// spotifyd is the player on this PC (set it up once with --setup); off = whatever
-    /// MPRIS player or device is playing [config: use_spotifyd]
+    /// spotifyd is the player on this PC (set it up once with --setup): its `spotify_device`
+    /// name then counts as "this PC". Off = only the Spotify app on this computer does
+    /// [config: use_spotifyd]
     #[arg(long)]
     pub use_spotifyd: bool,
 

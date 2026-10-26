@@ -120,7 +120,8 @@ spotify = false                # Spotify Web API features (see "Spotify" below)
 # spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
 spotify_device = ""            # only if you run spotifyd: its `device_name` (e.g. "Living Room PC"), so it
                                # counts as "this PC". Empty = just the Spotify app on this computer
-use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup)
+use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup): `spotify_device` then
+                               # counts as "this PC"; off = only the Spotify app on this computer does
 spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
 spotify_queue_tab = true       # the Queue tab in the library browser
 ```
@@ -167,7 +168,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | only if you run spotifyd: its Spotify Connect name (the `device_name` in its config, say `Living Room PC`), so it counts as "this PC". Default: empty, which matches only the Spotify app on this computer (named after the host name) and devices of type "Computer". |
-| `--use-spotifyd` | spotifyd is the player on this PC; `--setup` turns it on for you (see "Setup (spotifyd)" below). |
+| `--use-spotifyd` | spotifyd is the player on this PC: the `spotify_device` name then counts as "this PC" (for `H`, play and the device list). Off, only the Spotify app on this computer does. `--setup` turns it on for you (see "Setup (spotifyd)" below); also a row in the settings menu. |
 | `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
 | `--no-spotify-queue-tab` | hide the Queue tab of the library browser (config `spotify_queue_tab = false`; also in the settings menu). |
@@ -291,7 +292,7 @@ Optional. [spotifyd](https://github.com/Spotifyd/spotifyd) turns this PC into a 
 4. Writes `~/.config/spotifyd/spotifyd.conf` (just `device_name`) and the entries `spotify = true`, `spotify_client_id`, `spotify_device` and `use_spotifyd = true` to `config.toml`. The device name is asked for (default: your `spotify_device`, else `music_display`).
 5. Checks that spotifyd is running and that the device shows up in your Spotify devices, and says which of the two is missing if not.
 
-An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself; if it isn't running, start it (for example `spotifyd --no-daemon`, or enable its service) and the device appears in Spotify within a few seconds. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC; leave it off to use whatever player or device is playing.
+An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself; if it isn't running, start it (for example `spotifyd --no-daemon`, or enable its service) and the device appears in Spotify within a few seconds. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC, so `spotify_device` counts as "this PC"; leave it off if you only use the Spotify app or other devices.
 
 ## Local files
 

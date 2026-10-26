@@ -3246,3 +3246,22 @@ fn spotify_device_has_no_default_and_empty_is_valid_in_the_file() {
     config::apply(&mut a, &m, &path, true, &mut |x| w.push(x));
     assert_eq!(a.spotify_device, "My Speaker");
 }
+
+#[tokio::test]
+async fn use_spotifyd_is_a_setting_and_gates_the_device_name() {
+    let (mut app, cfg) = settings_app("usespotifyd");
+    app.args.spotify_device = "Living Room PC".into();
+    assert_eq!(app.setting_value(app::Setting::UseSpotifyd), "[ ]");
+    app.change_setting(app::Setting::UseSpotifyd, 1);
+    assert!(app.args.use_spotifyd);
+    assert_eq!(app.setting_value(app::Setting::UseSpotifyd), "[x]");
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["use_spotifyd"].as_bool(), Some(true));
+    // the running client only knows the name while spotifyd is in use
+    app.args.spotify = true;
+    app.start_spotify();
+    assert!(app.spot.as_ref().unwrap().is_local("Living Room PC"));
+    app.change_setting(app::Setting::UseSpotifyd, 1);
+    assert!(!app.args.use_spotifyd);
+    assert!(!app.spot.as_ref().unwrap().is_local("Living Room PC"));
+}

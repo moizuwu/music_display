@@ -245,6 +245,7 @@ pub enum Setting {
     SpotifyLogin,
     SpotifyLogout,
     SpotifyDevice,
+    UseSpotifyd,
     SpotifyButton,
     SpotifyQueueTab,
 }
@@ -315,6 +316,7 @@ impl Setting {
         Setting::SpotifyLogin,
         Setting::SpotifyLogout,
         Setting::SpotifyDevice,
+        Setting::UseSpotifyd,
         Setting::SpotifyButton,
         Setting::SpotifyQueueTab,
     ];
@@ -347,6 +349,7 @@ impl Setting {
             Setting::SpotifyLogin => "Log in",
             Setting::SpotifyLogout => "Log out",
             Setting::SpotifyDevice => "spotifyd device name",
+            Setting::UseSpotifyd => "Use spotifyd",
             Setting::SpotifyButton => "Library button (top left)",
             Setting::SpotifyQueueTab => "Queue tab in the library",
         }
@@ -380,6 +383,7 @@ impl Setting {
             Setting::SpotifyClientId => &["spotify_client_id"],
             Setting::SpotifyLogin | Setting::SpotifyLogout => &[],
             Setting::SpotifyDevice => &["spotify_device"],
+            Setting::UseSpotifyd => &["use_spotifyd"],
             Setting::SpotifyButton => &["spotify_button"],
             Setting::SpotifyQueueTab => &["spotify_queue_tab"],
         }
@@ -1379,6 +1383,7 @@ impl App {
                 _ if self.args.spotify_device.is_empty() => "none".into(),
                 _ => self.args.spotify_device.clone(),
             },
+            Setting::UseSpotifyd => onoff(self.args.use_spotifyd),
             Setting::SpotifyButton => onoff(!self.args.no_spotify_button),
             Setting::SpotifyQueueTab => onoff(!self.args.no_spotify_queue_tab),
         }
@@ -1505,6 +1510,11 @@ impl App {
             }
             Setting::SpotifyLogin => self.toggle_login(),
             Setting::SpotifyLogout => self.logout_spotify(),
+            Setting::UseSpotifyd => {
+                self.args.use_spotifyd = !self.args.use_spotifyd;
+                // the running client matches "this PC" by this name: rebuild it
+                self.restart_spotify();
+            }
             Setting::SpotifyButton => self.args.no_spotify_button = !self.args.no_spotify_button,
             Setting::SpotifyQueueTab => {
                 self.args.no_spotify_queue_tab = !self.args.no_spotify_queue_tab;
@@ -1565,6 +1575,7 @@ impl App {
             ("volume_step", I(self.vol_step as i64)),
             ("spotify", B(self.args.spotify)),
             ("spotify_device", S(self.args.spotify_device.clone())),
+            ("use_spotifyd", B(self.args.use_spotifyd)),
             ("spotify_button", B(!self.args.no_spotify_button)),
             ("spotify_queue_tab", B(!self.args.no_spotify_queue_tab)),
         ]
@@ -2015,7 +2026,9 @@ impl App {
             return;
         }
         let id = self.args.spotify_client_id.clone().unwrap_or_default();
-        let api = spotify::Api::new(self.client.clone(), &id, &self.args.spotify_device);
+        // spotifyd's Connect name only counts as "this PC" when spotifyd is in use
+        let daemon = if self.args.use_spotifyd { self.args.spotify_device.as_str() } else { "" };
+        let api = spotify::Api::new(self.client.clone(), &id, daemon);
         api.mpris.store(self.mpris_present, std::sync::atomic::Ordering::Relaxed);
         self.spot_status = (!spotify::logged_in())
             .then(|| "not logged in: Settings (s) › Log in, or run music_display --spotify-login".to_string());
