@@ -2,6 +2,22 @@
 
 A terminal now-playing display: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
 
+- Works with any MPRIS player (Spotify, spotifyd, VLC, mpv, …) through `playerctl`.
+- Synced lyrics from lrclib.net, optional translation, big-font active line.
+- Guitar chords from your own sheets or Ultimate Guitar, with transpose, capo and diagrams.
+- Optional Spotify integration (`--spotify`): browse your playlists, Liked Songs, albums and artists, play, queue, like and add to playlists, and see and control what plays on your phone. Needs a one-time login, see [Spotify](#spotify).
+
+### Quick start with Spotify
+
+```sh
+# 1. at https://developer.spotify.com/dashboard: create an app, add the redirect URI
+#    http://127.0.0.1:8897/callback and copy its Client ID
+music_display --spotify-client-id <Client ID> --spotify-login   # 2. log in once in the browser
+music_display --spotify                                         # 3. run; `o` opens the library
+```
+
+Put `spotify = true` in the config file to make it the default.
+
 ## Build
 
 ```sh
@@ -22,6 +38,7 @@ music_display --chords --chords-ug     # chords above the lyrics (local sheets, 
 music_display --minimal                # teleprompter: title + lyrics + thin progress bar
 music_display --terminal-colors        # use the terminal's own theme
 music_display --print-config           # show the effective configuration and exit
+music_display --spotify                # + Spotify library (o), like (f), play here (H), phone playback
 ```
 
 Press `?` inside the app for the full list of keys and mouse actions (it is generated from the same table the key handler uses).
@@ -63,6 +80,9 @@ translate_fallback_url = "https://libretranslate.com/translate"
 minimal_view = false           # start in the minimal view
 hide_color_warning = false     # hide "(no usable colour file)" in the footer
 mouse = true                   # false = don't capture the mouse
+spotify = false                # Spotify Web API features (see "Spotify" below)
+# spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
+spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as "this PC"
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -98,6 +118,15 @@ mouse = true                   # false = don't capture the mouse
 | `--volume-step N` | percent per volume change. |
 | `--no-mouse` | don't capture the mouse. |
 
+### Spotify
+
+| flag | effect |
+| --- | --- |
+| `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
+| `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
+| `--spotify-device NAME` | Spotify Connect name of spotifyd on this PC (its `device_name`, default `Desktop (spotifyd)`). |
+| `--spotify-login` / `--spotify-logout` | log in in the browser and save the token / forget it, then exit. |
+
 ## Keys
 
 | key | action |
@@ -123,6 +152,9 @@ mouse = true                   # false = don't capture the mouse
 | `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
+| `o` | Spotify library browser (`--spotify`, see below) |
+| `f` | like / unlike the song playing (`♥` / `♡` beside the title) |
+| `H` | play here: move Spotify playback from the phone / another device to this PC |
 | `q` / `Esc` | quit |
 
 Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 65% ] [ + ]` (dashes separate the groups; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
@@ -147,6 +179,36 @@ Items that no source provides are skipped and the rest move up; on a panel too n
 `Tuning` (shown while chords are on) is the song's original guitar tuning (Standard, Drop D, Half Step Down…) from Ultimate Guitar's page metadata or a `{tuning: …}` line in a ChordPro file; it is also shown in the chord diagram panel title.
 
 The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot show the **sounding** key (shapes + capo); the Capo row says which shapes you finger, e.g. `Capo 3  (shapes in C#m)`. Changing the capo with `[` / `]` re-spells the shapes (and the diagrams) but leaves the sounding key alone.
+
+## Spotify
+
+With `--spotify` (or `spotify = true`) the app talks to the Spotify Web API itself, no other program or helper needed.
+
+**Setup, once:**
+
+1. Create an app at <https://developer.spotify.com/dashboard> and add the redirect URI `http://127.0.0.1:8897/callback` exactly.
+2. `music_display --spotify-client-id <Client ID> --spotify-login` opens the browser (if it doesn't, the link is printed). After you allow access the token is saved in `~/.local/state/music_display/spotify/token.json` (mode 600), together with the Client ID, so later runs only need `--spotify`. The token refreshes itself; `--spotify-logout` deletes it.
+
+The login uses PKCE: no client secret is needed or stored. In development mode Spotify only lets the users you add under the app's *User Management* log in, so add your own account there if the login is refused. The login waits 3 minutes for the browser; if port 8897 is taken it says so. Until you are logged in, `o` / `f` / `H` show "not logged in: run music_display --spotify-login".
+
+**Library browser (`o`).** Tabs: Recent · Playlists · Liked · Albums · Artists.
+
+| key | action |
+| --- | --- |
+| `Tab` / `Shift-Tab`, `1`–`5` | switch tab |
+| `↑` / `↓`, `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, wheel | move |
+| `Enter` / `space` | play: a song plays in its list (album, playlist, Liked Songs) from that song on; an album / playlist / artist plays itself |
+| `→` / `l` | open an album, your own playlist, an artist (albums and singles, newest first) or Liked Songs (`›` marks what opens) |
+| `←` / `h` / `Backspace` | back |
+| `a` | add the song to the queue |
+| `A` | add the song to one of your playlists (a list of them opens; `Enter` adds) |
+| `f` | like the song |
+| `r` | reload the list |
+| `Esc` / `q` / `o` | close |
+
+Lists are loaded when first shown and kept while the app runs. Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
+
+**Other devices.** When no MPRIS player is running (the phone plays, or Spotify runs elsewhere), the app shows what Spotify says plays, with lyrics, cover and chords as usual, and every control (play / pause, next / previous, seek, volume, shuffle, repeat) goes to that device through the API; the footer says `on <device>`. It polls every 1.5 s while that plays (3 s paused, 5 s while an MPRIS player is on screen). `H` moves playback to this PC (the Spotify app when open, else spotifyd, matched by `spotify_device`), and the MPRIS player takes over from there. Play with nothing active anywhere carries on here from where Spotify last stopped, or starts the last played song.
 
 ## Local files
 
