@@ -48,6 +48,7 @@ lyric_pad = 0                  # 0..10 blank columns on each side of the lyrics
 big_scale = 1                  # 1..3, size of the big-font line
 chords = false
 chords_ug = false
+member_parts = false           # experimental: show who sings each line (Genius, unofficial)
 # chords_dir = "~/.local/share/music_display/chords"
 chords_context = 99            # 99 = chords on every line; N = active line + N upcoming
 volume_step = 5                # percent per + / - / wheel notch
@@ -83,7 +84,7 @@ mouse = true                   # false = don't capture the mouse
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
-| `--big-lyrics` | render the active line in a 5×7 half-block font (also `b`). |
+| `--big-lyrics` | render the active line in a 5×7 half-block font (also `b`). Latin and Hangul (composed from jamo) are drawn big; a compact 3×5 font is used when the panel is too narrow, and other scripts fall back to bold text. Chords show above the neighbouring lines (and intro / break chords) as in the normal layout. |
 | `--minimal` | start in the minimal teleprompter view (also `M`). |
 | `--interlude-secs N` | a silence between two lyric lines longer than N seconds shows `[ Instrumental / Solo ]` (with a countdown) while it lasts; also before the first and after the last line. |
 | `--lyrics-retries N` | retries after a failed lyrics request (timeouts, 429 with `Retry-After`, disconnects, 5xx), 0.5 s / 1 s / 2 s backoff. |
@@ -91,6 +92,7 @@ mouse = true                   # false = don't capture the mouse
 | `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
 | `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords are hidden while a translation is shown. |
+| `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |
 | `--no-mouse` | don't capture the mouse. |
 
@@ -100,6 +102,8 @@ mouse = true                   # false = don't capture the mouse
 | --- | --- |
 | `space` | play / pause |
 | `n` / `p` | next / previous |
+| `z` | shuffle on / off (only for players that report it) |
+| `r` | repeat: off → playlist → track → off (`rep 1` = track) |
 | `←` / `→` | seek −5 s / +5 s |
 | `+` / `-` | volume up / down (`volume_step`, default 5 %) |
 | `m` | mute / restore |
@@ -119,13 +123,24 @@ mouse = true                   # false = don't capture the mouse
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `q` / `Esc` | quit |
 
-Mouse: click the progress bar to seek; click `[ prev ] [ pause ] [ next ]`; `[ - ] [ 65% ] [ + ]` change the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] [ prev ] [ pause ] [ next ]` (shuffle and repeat are lit while on and hidden when the player reports neither); `[ - ] [ 65% ] [ + ]` change the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+
+Shuffle and repeat are read with `playerctl shuffle` / `playerctl loop` about every 2 s and shown as they are reported. Some players (Spotify desktop in particular) may ignore the write, in which case the button simply flips back on the next poll.
 
 The volume control follows the player: changes made elsewhere (media keys, the Spotify app) show up within a poll. It is hidden when the player doesn't report a volume.
 
 ## Metadata panel
 
-Rows: `Track No | Tuning`, `Release | Capo`, `BPM | Key` (without a capo the tuning takes the Capo slot; hidden items leave no gap). The playback time sits inside the progress bar: elapsed on the left, total on the right. `Release` shows the full `YYYY-MM-DD` when the player or MusicBrainz/iTunes has it (otherwise the year). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so they come from the sheet: with `chords_ug` on the sheet is fetched even while chords are hidden, and a sheet that states no key gets one estimated from its chords. Without a sheet these fields are simply hidden. The `Key` shown is the song's own key and never changes with `t` / `T`; only the chord letters do. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
+Track, Artist and Album take a full row each. Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
+
+```
+Track No  01-03                Tuning: Drop D
+Release   1991-08-12           Capo: 2 (Am)
+                               BPM: 120
+                               Key: E Minor / 9A
+```
+
+Items that no source provides are skipped and the rest move up; on a panel too narrow for two columns the right-hand items follow below, indented under the values. The playback time sits inside the progress bar: elapsed on the left, total on the right. `Release` shows the full `YYYY-MM-DD` when the player or MusicBrainz/iTunes has it (otherwise the year). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so they come from the sheet: with `chords_ug` on the sheet is fetched even while chords are hidden, and a sheet that states no key gets one estimated from its chords. Without a sheet these fields are simply hidden. The `Key` shown is the song's own key and never changes with `t` / `T`; only the chord letters do. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
 
 `Tuning` (shown while chords are on) is the song's original guitar tuning (Standard, Drop D, Half Step Down…) from Ultimate Guitar's page metadata or a `{tuning: …}` line in a ChordPro file; it is also shown in the chord diagram panel title.
 
@@ -149,3 +164,9 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 - Two editions of the same track ("Metallica" vs "Metallica (Remastered Deluxe Box Set)", different casing) are the same track: no flicker, no refetch.
 - Lyrics: "lyrics unavailable (network error / rate limited / server error)" only appears after every attempt of every fallback (exact match → artist + cleaned title → search) has failed; a real "no lyrics" answer is reported as such, and cached for a few days.
 - Caches: `~/.cache/music_display/` (years, lyrics, chords, per-track capo; errors are never cached), cover downloads in `/tmp/music_display/`.
+
+## Korean lyrics and member parts
+
+**Hangul preferred.** When the title or artist contains Hangul, or a lyrics candidate is mostly (30 % or more) Hangul, lyrics in Hangul are ranked above romanized ones (synced still beats plain). A romanized hit from the exact lookup is not final in that case: the search step still runs and a Hangul candidate replaces it if one exists.
+
+**Member parts (experimental).** With `member_parts = true` / `--member-parts` the song is looked up on Genius (unauthenticated search, then the song page; the title and artist must match closely). Section headers such as `[Verse 1: Jimin]`, `[Chorus: Jungkook, V]` and `[Pre-Chorus: RM & SUGA]` give the members for the lines below them, and those lines are matched in order onto the synced lyrics. The active line and its neighbours get a dim `[Jimin]` tag, each member in a stable colour of the terminal palette (normal scrolling layout; not in the big-font layout). Lines that can't be matched (for example romanized vs. Hangul wording) are left untagged. Results are cached per track (misses for 7 days); failures are silent. This scrapes a website that has no public API, so it can stop working at any time.
