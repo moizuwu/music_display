@@ -186,6 +186,9 @@ pub fn apply(
     // (line, message): reported in file order, not the table's alphabetical order
     let mut problems: Vec<(usize, String)> = Vec::new();
     for (name, v) in &table {
+        if name == "keys" {
+            continue; // the [keys] section is read by keymap::load
+        }
         let line = line_of(&raw, name);
         let Some(key) = KEYS.iter().find(|k| k.name == name) else {
             problems.push((line, format!("{}: unknown key '{name}' (ignored)", at(name))));
@@ -210,8 +213,9 @@ pub fn apply(
     true
 }
 
-/// Write `values` into the config file at `path`, keeping every other key already in it
-/// (comments in the file are not preserved). Creates the folder if needed.
+/// Write `values` into the config file at `path`, keeping every other key already in it,
+/// including the `[keys]` section (comments in the file are not preserved, and the keys come
+/// back in alphabetical order). Creates the folder if needed.
 pub fn save(path: &Path, values: &[(&str, toml::Value)]) -> std::io::Result<()> {
     // A file with a syntax error is left alone rather than overwritten with just our keys.
     let mut table: toml::Table = match std::fs::read_to_string(path) {

@@ -165,6 +165,11 @@ pub enum AppEvent {
 mod app;
 
 // ════════════════════════════════════════════════════════════════════════════
+// Key table + the [keys] section of config.toml
+// ════════════════════════════════════════════════════════════════════════════
+mod keymap;
+
+// ════════════════════════════════════════════════════════════════════════════
 // Big block font for the active lyric line (5×7 pixels, drawn with half blocks)
 // ════════════════════════════════════════════════════════════════════════════
 mod bigfont;
@@ -192,8 +197,10 @@ async fn main() -> Result<()> {
     let found = config::apply(&mut args, &matches, &cfg_path, explicit, &mut |w| {
         eprintln!("music_display: {w}")
     });
+    let keys = keymap::load(&cfg_path, &mut |w| eprintln!("music_display: {w}"));
     if args.print_config {
         print!("{}", config::render(&args, &cfg_path, found));
+        print!("{}", keys.render());
         return Ok(());
     }
     if args.setup {
@@ -250,6 +257,7 @@ async fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     let mut app = app::App::new(args, theme, picker, tx.clone());
+    app.keys = keys;
 
     // Player workers: periodic poll + instant change stream.
     tokio::spawn(app.ctl.clone().poll_loop(tx.clone()));
