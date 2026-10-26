@@ -1,6 +1,6 @@
 # music_display
 
-Rust port of `music_display_2.fish`: cover art, metadata, clickable controls, synced lyrics and cava in one zero-flicker TUI.
+cover art, metadata, clickable controls, synced lyrics and cava in one zero-flicker TUI.
 
 ## Build
 
