@@ -51,7 +51,7 @@ ask() {
     ask_strict "$1"
 }
 
-# Like ask, but --yes does not count (AUR builds).
+# Like ask, but --yes does not count.
 ask_strict() {
     local a=""
     if [ "$DRY" = 1 ]; then say "$1 [y/N] (dry run: would ask)"; return 0; fi
@@ -145,9 +145,14 @@ install_with_pm() {
     esac
 }
 
-# A package the official repos don't have: AUR helper (yay, paru), only with an explicit yes.
+# A package the official repos don't have: built from the AUR with yay / paru, but ONLY when
+# --aur is given (never offered as a question, never implied by --yes).
 aur_install() {
     local p="$1" helper="" h
+    if [ "$AUR" != 1 ]; then
+        warn "$p is not in the official repos. It would come from the AUR: a package built on this machine from a PKGBUILD written by a third party. Not building it: pass --aur to allow that, or install it yourself (https://aur.archlinux.org/packages/$p)."
+        return 1
+    fi
     for h in yay paru; do
         if have "$h"; then helper="$h"; break; fi
     done
@@ -155,13 +160,7 @@ aur_install() {
         warn "$p is not in the official repos and neither yay nor paru is installed. Get it yourself, e.g. from https://aur.archlinux.org/packages/$p"
         return 1
     fi
-    say "$p is not in the official repos. It would come from the AUR: a package built on this machine from a PKGBUILD written by a third party."
-    if [ "$AUR" = 1 ]; then
-        say "(--aur given)"
-    elif ! ask_strict "Build $p from the AUR with $helper?"; then
-        warn "skipped $p (pass --aur to allow AUR builds)"
-        return 1
-    fi
+    say "$p is not in the official repos: building it from the AUR with $helper (--aur given), a PKGBUILD written by a third party."
     local extra=()
     # no sudo on this machine: tell the helper to use doas
     if [ "$(id -u)" != 0 ] && ! have sudo && have doas; then extra=(--sudo doas); fi
