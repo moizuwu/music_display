@@ -10,6 +10,8 @@
 //!   * cover art via Kitty / Sixel / iTerm2 graphics (halfblock fallback) or coloured ASCII,
 //!     duotone-tinted; optional UI accent taken from the cover (`--cover-theme`)
 //!   * optional mono cava visualiser as a third column or under the lyrics
+//!   * optional guitar chords (`g`) from local ChordPro / plain-text sheets, matched onto the
+//!     synced lyrics line by line; transposable
 //!   * clickable progress bar + transport buttons, runtime panel toggles
 //!
 //! Architecture: one `tokio` select loop owns all UI state (`App`). Every slow thing
@@ -106,6 +108,32 @@ mod cli {
         /// Render the active lyric line in a big block font (toggle with `b`)
         #[arg(long)]
         pub big_lyrics: bool,
+
+        /// Show guitar chords above the lyrics (toggle with `g`). Sheets are read from
+        /// --chords-dir as `Artist - Title.cho` (ChordPro) or `.txt` (chords over lyrics)
+        #[arg(long)]
+        pub chords: bool,
+
+        /// Folder with your chord sheets [default: ~/.local/share/music_display/chords]
+        #[arg(long, value_name = "DIR")]
+        pub chords_dir: Option<PathBuf>,
+
+        /// Also look chords up on Ultimate Guitar when there is no local sheet (unofficial,
+        /// opt-in; results are cached)
+        #[arg(long)]
+        pub chords_ug: bool,
+
+        /// Diagnose the Ultimate Guitar lookup for one song, print the steps and exit
+        #[arg(long, num_args = 2, value_names = ["ARTIST", "TITLE"])]
+        pub chords_probe: Option<Vec<String>>,
+
+        /// With --chords-probe: save the raw pages here (to use as test fixtures)
+        #[arg(long, value_name = "DIR")]
+        pub probe_save: Option<PathBuf>,
+
+        /// How many upcoming lyric lines show chords besides the active one
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=99))]
+        pub chords_context: u16,
 
         /// Blank rows between lyric lines (0-3)
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=3))]
@@ -524,10 +552,7 @@ mod player {
     impl Snapshot {
         /// Identity of the track; changes ⇒ refetch year/lyrics.
         pub fn key(&self) -> u64 {
-            let artist = self.artist.trim().to_lowercase();
-            let title = crate::year::clean(&self.title).trim().to_lowercase();
-            let album = crate::year::clean(&self.album).trim().to_lowercase();
-            crate::util::fnv1a(&format!("{}\0{}\0{}", artist, title, album))
+            crate::util::fnv1a(&format!("{}\0{}\0{}", self.artist, self.title, self.album))
         }
     }
 
@@ -1458,6 +1483,956 @@ mod cava {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Guitar chords: sheet model, parsers, transpose, matching onto synced lyrics
+// ════════════════════════════════════════════════════════════════════════════
+mod chords {
+    use std::path::{Path, PathBuf};
+
+    /// One line of a chord sheet. `chords` are `(char column in text, chord name)`.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct SheetLine {
+        pub text: String,
+        pub chords: Vec<(usize, String)>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Sheet {
+        /// Where it came from (file name), for the footer.
+        pub source: String,
+        pub capo: u8,
+        pub lines: Vec<SheetLine>,
+    }
+
+    impl Sheet {
+        pub fn chord_count(&self) -> usize {
+            self.lines.iter().map(|l| l.chords.len()).sum()
+        }
+        /// Flat keys (Bb, Eb…) in the sheet → show transposed chords with flats too.
+        pub fn prefers_flats(&self) -> bool {
+            self.lines
+                .iter()
+                .flat_map(|l| l.chords.iter())
+                .any(|(_, c)| {
+                    let b = c.as_bytes();
+                    b.len() > 1 && b[1] == b'b' && b[0].is_ascii_uppercase()
+                })
+        }
+    }
+
+    // ── chord recognition ──────────────────────────────────────────────────
+    fn root_len(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        if b.is_empty() || !(b'A'..=b'G').contains(&b[0]) {
+            return None;
+        }
+        Some(if b.len() > 1 && (b[1] == b'#' || b[1] == b'b') {
+            2
+        } else {
+            1
+        })
+    }
+
+    /// `Am7`, `F#m`, `Bb/D`, `Gsus4`, `Cadd9`, `E7b9`, `D(add9)`, `N.C.` is *not* a chord.
+    pub fn is_chord(tok: &str) -> bool {
+        let (main, bass) = match tok.split_once('/') {
+            Some((m, b)) => (m, Some(b)),
+            None => (tok, None),
+        };
+        if let Some(b) = bass {
+            if root_len(b) != Some(b.len()) {
+                return false;
+            }
+        }
+        let Some(n) = root_len(main) else { return false };
+        let mut rest = &main[n..];
+        const WORDS: [&str; 8] = ["maj", "min", "dim", "aug", "sus", "add", "no", "M"];
+        while !rest.is_empty() {
+            if let Some(w) = WORDS.iter().find(|w| rest.starts_with(**w)) {
+                rest = &rest[w.len()..];
+                continue;
+            }
+            let c = rest.chars().next().unwrap();
+            if c.is_ascii_digit() || matches!(c, 'm' | '+' | '-' | '°' | 'ø' | '#' | 'b' | '(' | ')' | ',')
+            {
+                rest = &rest[c.len_utf8()..];
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Shift one chord by `n` semitones (root and bass note).
+    pub fn transpose(chord: &str, n: i32, flats: bool) -> String {
+        if n.rem_euclid(12) == 0 {
+            return chord.to_string();
+        }
+        let shift = |note: &str| -> String {
+            const SHARP: [&str; 12] = [
+                "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+            ];
+            const FLAT: [&str; 12] = [
+                "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
+            ];
+            let base = match note.as_bytes()[0] {
+                b'C' => 0,
+                b'D' => 2,
+                b'E' => 4,
+                b'F' => 5,
+                b'G' => 7,
+                b'A' => 9,
+                _ => 11,
+            };
+            let acc = match note.as_bytes().get(1) {
+                Some(b'#') => 1,
+                Some(b'b') => -1,
+                _ => 0,
+            };
+            let i = (base + acc + n).rem_euclid(12) as usize;
+            (if flats { FLAT[i] } else { SHARP[i] }).to_string()
+        };
+        let (main, bass) = match chord.split_once('/') {
+            Some((m, b)) => (m, Some(b)),
+            None => (chord, None),
+        };
+        let Some(r) = root_len(main) else {
+            return chord.to_string();
+        };
+        let mut out = shift(&main[..r]);
+        out.push_str(&main[r..]);
+        if let Some(b) = bass {
+            out.push('/');
+            out.push_str(&if root_len(b).is_some() { shift(b) } else { b.to_string() });
+        }
+        out
+    }
+
+    // ── parsing ────────────────────────────────────────────────────────────
+    fn strip_tags(s: &str) -> String {
+        s.replace("[ch]", "")
+            .replace("[/ch]", "")
+            .replace("[tab]", "")
+            .replace("[/tab]", "")
+            .replace('\r', "")
+    }
+
+    fn parse_capo(line: &str) -> Option<u8> {
+        let l = line.trim().to_lowercase();
+        let rest = l.strip_prefix("capo")?;
+        let digits: String = rest
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok().filter(|n| *n <= 12)
+    }
+
+    /// `[Verse 1]`, `Chorus:`, `Intro (2x)` — but not a lyric like "Bridge over troubled water".
+    fn is_section(line: &str) -> bool {
+        let t = line
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']' || c == '(' || c == ')')
+            .trim_end_matches(':')
+            .to_lowercase();
+        if t.is_empty() || t.chars().count() > 32 {
+            return false;
+        }
+        const KINDS: [&str; 14] = [
+            "verse",
+            "chorus",
+            "bridge",
+            "intro",
+            "outro",
+            "pre-chorus",
+            "prechorus",
+            "interlude",
+            "solo",
+            "instrumental",
+            "refrain",
+            "hook",
+            "coda",
+            "tag",
+        ];
+        let mut it = t.split_whitespace();
+        let Some(first) = it.next() else { return false };
+        if !KINDS.contains(&first.trim_end_matches(':')) {
+            return false;
+        }
+        it.all(|w| {
+            w.chars().any(|c| c.is_ascii_digit()) || w == "x" || w.starts_with('(') || w == "play"
+        })
+    }
+
+    fn is_tab_line(line: &str) -> bool {
+        line.contains("--") && line.contains('|')
+    }
+
+    fn tokens_with_pos(line: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        let mut start: Option<usize> = None;
+        let mut cur = String::new();
+        for (i, c) in line.chars().chain(std::iter::once(' ')).enumerate() {
+            if c.is_whitespace() {
+                if let Some(s) = start.take() {
+                    out.push((s, std::mem::take(&mut cur)));
+                }
+            } else {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                cur.push(c);
+            }
+        }
+        out
+    }
+
+    fn chord_tokens(line: &str) -> Option<Vec<(usize, String)>> {
+        let toks = tokens_with_pos(line);
+        // `|` bar lines and `x2` repeat marks may sit among the chords.
+        let toks: Vec<_> = toks
+            .into_iter()
+            .filter(|(_, t)| !matches!(t.as_str(), "|" | "||" | "-" | "/" | "%") && !is_repeat(t))
+            .collect();
+        (!toks.is_empty() && toks.iter().all(|(_, t)| is_chord(t))).then_some(toks)
+    }
+
+    fn is_repeat(t: &str) -> bool {
+        let t = t.to_lowercase();
+        let t = t.trim_matches(|c| c == '(' || c == ')');
+        (t.starts_with('x') && t[1..].chars().all(|c| c.is_ascii_digit()) && t.len() > 1)
+            || (t.ends_with('x') && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit()) && t.len() > 1)
+    }
+
+    /// Chords written above the words they belong to (the common plain-text format).
+    pub fn parse_text(src: &str) -> Sheet {
+        let src = strip_tags(src);
+        let lines: Vec<&str> = src.lines().map(str::trim_end).collect();
+        let mut sheet = Sheet::default();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            i += 1;
+            if line.trim().is_empty() || is_section(line) || is_tab_line(line) {
+                continue;
+            }
+            if let Some(c) = parse_capo(line) {
+                sheet.capo = c;
+                continue;
+            }
+            if let Some(chords) = chord_tokens(line) {
+                let next = lines.get(i).copied().unwrap_or("");
+                let usable = !next.trim().is_empty()
+                    && !is_section(next)
+                    && !is_tab_line(next)
+                    && chord_tokens(next).is_none();
+                if usable {
+                    sheet.lines.push(SheetLine {
+                        text: next.to_string(),
+                        chords,
+                    });
+                    i += 1;
+                } else {
+                    sheet.lines.push(SheetLine {
+                        text: String::new(),
+                        chords,
+                    });
+                }
+            } else {
+                sheet.lines.push(SheetLine {
+                    text: line.to_string(),
+                    chords: Vec::new(),
+                });
+            }
+        }
+        sheet
+    }
+
+    /// ChordPro: `[Am]Hello [G]world`, `{capo: 2}`, `{comment: …}`.
+    pub fn parse_chordpro(src: &str) -> Sheet {
+        let mut sheet = Sheet::default();
+        for raw in src.replace('\r', "").lines() {
+            let line = raw.trim_end();
+            let t = line.trim();
+            if t.starts_with('#') || t.is_empty() {
+                continue;
+            }
+            if let Some(d) = t.strip_prefix('{') {
+                let d = d.trim_end_matches('}');
+                if let Some((k, v)) = d.split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("capo") {
+                        sheet.capo = v.trim().parse().ok().filter(|n| *n <= 12).unwrap_or(0);
+                    }
+                }
+                continue;
+            }
+            if is_section(t) {
+                continue;
+            }
+            let mut text = String::new();
+            let mut col = 0usize;
+            let mut chords = Vec::new();
+            let mut it = line.chars().peekable();
+            while let Some(c) = it.next() {
+                if c == '[' {
+                    let mut inner = String::new();
+                    let mut closed = false;
+                    for d in it.by_ref() {
+                        if d == ']' {
+                            closed = true;
+                            break;
+                        }
+                        inner.push(d);
+                    }
+                    if closed && is_chord(&inner) {
+                        chords.push((col, inner));
+                    } else {
+                        text.push('[');
+                        text.push_str(&inner);
+                        col += 1 + inner.chars().count();
+                        if closed {
+                            text.push(']');
+                            col += 1;
+                        }
+                    }
+                } else {
+                    text.push(c);
+                    col += 1;
+                }
+            }
+            sheet.lines.push(SheetLine { text, chords });
+        }
+        sheet
+    }
+
+    /// Pick the format: inline `[Am]` chords → ChordPro, otherwise chords-over-lyrics.
+    pub fn parse_auto(src: &str) -> Sheet {
+        let src = strip_tags(src);
+        let inline = src.lines().any(|l| {
+            l.match_indices('[').any(|(i, _)| {
+                l[i + 1..]
+                    .split_once(']')
+                    .is_some_and(|(inner, after)| is_chord(inner) && !after.trim().is_empty())
+            })
+        });
+        if inline { parse_chordpro(&src) } else { parse_text(&src) }
+    }
+
+    // ── local files ────────────────────────────────────────────────────────
+    pub const EXTS: [&str; 6] = ["cho", "chopro", "chordpro", "crd", "pro", "txt"];
+
+    pub fn default_dir() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("music_display")
+            .join("chords")
+    }
+
+    fn key(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    /// Find `Artist - Title.<ext>` (or just `Title.<ext>`) in `dir`, ignoring case,
+    /// punctuation, "(Remastered)" suffixes and extra artists.
+    pub fn find_local(dir: &Path, artist: &str, title: &str) -> Option<PathBuf> {
+        let cleaned = crate::year::clean(title);
+        let first = artist.split(", ").next().unwrap_or(artist);
+        let mut wanted = vec![];
+        for t in [title, cleaned.as_str()] {
+            for a in [artist, first] {
+                wanted.push(key(&format!("{a}{t}")));
+                wanted.push(key(&format!("{t}{a}")));
+            }
+            wanted.push(key(t));
+        }
+        let mut best: Option<(usize, PathBuf)> = None;
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            let p = e.path();
+            let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let Some(rank) = EXTS.iter().position(|x| x.eq_ignore_ascii_case(ext)) else {
+                continue;
+            };
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if wanted.contains(&key(stem)) && best.as_ref().is_none_or(|(r, _)| rank < *r) {
+                best = Some((rank, p));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Read + parse a local sheet. `None` when missing or it has too few chords to be real.
+    pub async fn load_local(dir: PathBuf, artist: String, title: String) -> Option<Sheet> {
+        let path = find_local(&dir, &artist, &title)?;
+        let bytes = tokio::fs::read(&path).await.ok()?;
+        let src = String::from_utf8_lossy(&bytes);
+        let ext = path.extension()?.to_str()?.to_lowercase();
+        let mut sheet = if ext == "txt" {
+            parse_auto(&src)
+        } else {
+            parse_chordpro(&src)
+        };
+        // A .cho file may still contain chords-over-lyrics; fall back if it parsed to nothing.
+        if sheet.chord_count() == 0 {
+            sheet = parse_auto(&src);
+        }
+        if sheet.chord_count() < 4 {
+            return None;
+        }
+        sheet.source = path.file_name()?.to_string_lossy().into_owned();
+        Some(sheet)
+    }
+
+    /// ChordPro text for the cache (round-trips through [`parse_chordpro`]).
+    pub fn to_chordpro(s: &Sheet) -> String {
+        let mut out = String::new();
+        if s.capo > 0 {
+            out.push_str(&format!("{{capo: {}}}\n", s.capo));
+        }
+        for l in &s.lines {
+            let mut cs = l.chords.clone();
+            cs.sort_by_key(|c| c.0);
+            let chars: Vec<char> = l.text.chars().collect();
+            let mut pos = 0usize;
+            for (col, name) in cs {
+                while pos < col {
+                    out.push(chars.get(pos).copied().unwrap_or(' '));
+                    pos += 1;
+                }
+                out.push_str(&format!("[{name}]"));
+            }
+            out.extend(chars.iter().skip(pos));
+            out.push('\n');
+        }
+        out
+    }
+
+    // ── matching a sheet onto synced lyrics ────────────────────────────────
+    /// Lowercase, letters/digits only, single spaces.
+    pub fn norm(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            if c.is_alphanumeric() {
+                out.extend(c.to_lowercase());
+            } else if c.is_whitespace() || matches!(c, '-' | '/' | ',' | '.' | '!' | '?' | ';' | ':') {
+                out.push(' ');
+            } // apostrophes etc. vanish: "don't" → "dont"
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    pub fn dice(a: &str, b: &str) -> f32 {
+        if a.is_empty() || b.is_empty() {
+            return 0.0;
+        }
+        let grams = |s: &str| -> std::collections::HashMap<(char, char), u32> {
+            let v: Vec<char> = s.chars().collect();
+            let mut m = std::collections::HashMap::new();
+            for w in v.windows(2) {
+                *m.entry((w[0], w[1])).or_insert(0) += 1;
+            }
+            m
+        };
+        let (ga, gb) = (grams(a), grams(b));
+        let (na, nb): (u32, u32) = (ga.values().sum(), gb.values().sum());
+        if na == 0 || nb == 0 {
+            return if a == b { 1.0 } else { 0.0 };
+        }
+        let common: u32 = ga
+            .iter()
+            .map(|(k, v)| (*v).min(gb.get(k).copied().unwrap_or(0)))
+            .sum();
+        2.0 * common as f32 / (na + nb) as f32
+    }
+
+    /// `(start char, length)` of each whitespace-separated word.
+    pub fn words_pos(s: &str) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut start = None;
+        let mut n = 0;
+        for (i, c) in s.chars().chain(std::iter::once(' ')).enumerate() {
+            if c.is_whitespace() {
+                if let Some(st) = start.take() {
+                    out.push((st, n));
+                    n = 0;
+                }
+            } else {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                n += 1;
+            }
+        }
+        out
+    }
+
+    /// Move a chord column from the sheet's wording onto the lyric's wording, anchored to
+    /// the word it sits on (so small wording differences don't misplace it).
+    fn map_col(col: usize, sheet_text: &str, lyric: &str) -> usize {
+        let sw = words_pos(sheet_text);
+        let lw = words_pos(lyric);
+        let lyric_len = lyric.chars().count();
+        if lw.is_empty() {
+            return 0;
+        }
+        let Some(w) = sw.iter().position(|(s, l)| col < s + l) else {
+            return lyric_len; // past the last word
+        };
+        let off = col.saturating_sub(sw[w].0);
+        let w2 = if sw.len() == lw.len() {
+            w
+        } else {
+            (w * lw.len() / sw.len()).min(lw.len() - 1)
+        };
+        lw[w2].0 + off.min(lw[w2].1)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Aligned {
+        /// Per lyric line: chords with columns relative to the single-spaced lyric text.
+        pub per_line: Vec<Vec<(usize, String)>>,
+        pub matched: usize,
+        pub total: usize,
+        pub flats: bool,
+    }
+
+    impl Aligned {
+        pub fn percent(&self) -> u32 {
+            (self.matched * 100).checked_div(self.total).unwrap_or(0) as u32
+        }
+        /// Below this the chords would more often be wrong than right, so none are shown.
+        pub fn usable(&self) -> bool {
+            self.total > 0 && self.matched * 100 >= self.total * 40
+        }
+    }
+
+    pub fn align(sheet: &Sheet, lyrics: &[(f64, String)]) -> Aligned {
+        let sung: Vec<(usize, String)> = sheet
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let n = norm(&l.text);
+                (!n.is_empty()).then_some((i, n))
+            })
+            .collect();
+        let mut out = Aligned {
+            per_line: vec![Vec::new(); lyrics.len()],
+            flats: sheet.prefers_flats(),
+            ..Default::default()
+        };
+        let mut j = 0usize;
+        for (li, (_, text)) in lyrics.iter().enumerate() {
+            let n = norm(text);
+            if n.is_empty() {
+                continue;
+            }
+            out.total += 1;
+
+            // 1. next few sheet lines in order
+            let mut best: Option<(usize, f32)> = None;
+            for (k, (_, s)) in sung.iter().enumerate().skip(j).take(10) {
+                let d = dice(&n, s);
+                if d >= 0.55 && best.is_none_or(|(_, b)| d > b) {
+                    best = Some((k, d));
+                }
+            }
+            let mut advance = true;
+            // 2. anywhere (a chorus the sheet writes once but the song repeats)
+            if best.is_none() {
+                for (k, (_, s)) in sung.iter().enumerate() {
+                    let d = dice(&n, s);
+                    if d >= 0.75 && best.is_none_or(|(_, b)| d > b) {
+                        best = Some((k, d));
+                    }
+                }
+                advance = false;
+            }
+            let Some((k, _)) = best else { continue };
+            if advance {
+                j = k + 1;
+            }
+            out.matched += 1;
+            let line = &sheet.lines[sung[k].0];
+            let lyric_norm = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut cs: Vec<(usize, String)> = line
+                .chords
+                .iter()
+                .map(|(c, name)| (map_col(*c, &line.text, &lyric_norm), name.clone()))
+                .collect();
+            cs.sort_by_key(|c| c.0);
+            out.per_line[li] = cs;
+        }
+        if !out.usable() {
+            for l in &mut out.per_line {
+                l.clear();
+            }
+        }
+        out
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Ultimate Guitar lookup (opt-in: --chords-ug). Unofficial: the site has no public API, so
+// this reads the JSON blob embedded in its pages and is written to fail soft.
+// ════════════════════════════════════════════════════════════════════════════
+mod ug {
+    use crate::chords::{self, Sheet};
+    use crate::util::{cache_dir, fnv1a, now_secs};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    pub const BASE: &str = "https://www.ultimate-guitar.com";
+    // UG answers non-browser agents with 403, so this looks like a normal browser.
+    const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+    const NEG_TTL: u64 = 7 * 24 * 3600;
+    const MAX_FAILS: u32 = 3;
+    const MIN_CHORDS: usize = 8;
+
+    /// Consecutive hard failures (blocked / format changed / network). Three in a row
+    /// switch the provider off for the rest of the session.
+    static FAILS: AtomicU32 = AtomicU32::new(0);
+    /// `--chords-probe --probe-save DIR`: keep every page we fetch.
+    pub static SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+    pub enum Outcome {
+        Found(Sheet),
+        NotFound,
+        Error(String),
+    }
+
+    // ── page parsing ───────────────────────────────────────────────────────
+    pub fn unescape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(i) = rest.find('&') {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            let Some(end) = rest.find(';').filter(|e| *e <= 10) else {
+                out.push('&');
+                rest = &rest[1..];
+                continue;
+            };
+            let ent = &rest[1..end];
+            let ch = match ent {
+                "quot" => Some('"'),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "apos" => Some('\''),
+                "nbsp" => Some(' '),
+                _ => ent
+                    .strip_prefix("#x")
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
+                    .and_then(char::from_u32),
+            };
+            match ch {
+                Some(c) => {
+                    out.push(c);
+                    rest = &rest[end + 1..];
+                }
+                None => {
+                    out.push('&');
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The `data-content` JSON of the `js-store` element.
+    pub fn extract_store(html: &str) -> Option<Value> {
+        let at = html.find("js-store")?;
+        let tag_start = html[..at].rfind('<')?;
+        let tag_end = at + html[at..].find('>')?;
+        let tag = &html[tag_start..tag_end];
+        let k = tag.find("data-content=\"")? + "data-content=\"".len();
+        let raw = &tag[k..k + tag[k..].find('"')?];
+        serde_json::from_str(&unescape(raw)).ok()
+    }
+
+    /// First value stored under `key` anywhere in the document — survives UG moving things.
+    pub fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+        match v {
+            Value::Object(m) => m
+                .get(key)
+                .filter(|x| !x.is_null())
+                .or_else(|| m.values().find_map(|x| find_key(x, key))),
+            Value::Array(a) => a.iter().find_map(|x| find_key(x, key)),
+            _ => None,
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Cand {
+        pub url: String,
+        pub artist: String,
+        pub song: String,
+        pub rating: f64,
+        pub votes: f64,
+        pub score: f64,
+    }
+
+    /// Chord pages for this song, best first: rating × ln(votes), after checking that the
+    /// title and artist really are the ones we asked for.
+    pub fn candidates(store: &Value, artist: &str, title: &str) -> Vec<Cand> {
+        let Some(Value::Array(results)) = find_key(store, "results") else {
+            return vec![];
+        };
+        let want_t = chords::norm(&crate::year::clean(title));
+        let want_a = chords::norm(artist.split(", ").next().unwrap_or(artist));
+        let mut out: Vec<Cand> = results
+            .iter()
+            .filter_map(|r| {
+                let url = r.get("tab_url")?.as_str()?.to_string();
+                if r.get("type").and_then(Value::as_str).is_some_and(|t| t != "Chords") {
+                    return None;
+                }
+                let song = r.get("song_name").and_then(Value::as_str).unwrap_or("").to_string();
+                let art = r.get("artist_name").and_then(Value::as_str).unwrap_or("").to_string();
+                let (st, sa) = (chords::norm(&crate::year::clean(&song)), chords::norm(&art));
+                let title_ok = chords::dice(&want_t, &st) >= 0.8;
+                let artist_ok = sa.contains(&want_a) || want_a.contains(&sa) || chords::dice(&want_a, &sa) >= 0.7;
+                if !title_ok || !artist_ok {
+                    return None;
+                }
+                let rating = r.get("rating").and_then(Value::as_f64).unwrap_or(0.0);
+                let votes = r.get("votes").and_then(Value::as_f64).unwrap_or(0.0);
+                Some(Cand {
+                    url,
+                    artist: art,
+                    song,
+                    rating,
+                    votes,
+                    score: rating * (1.0 + votes).ln(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out.truncate(3);
+        out
+    }
+
+    /// A chord page → sheet (`None` if it has too few chords to be a real chord sheet).
+    pub fn sheet_from_store(store: &Value) -> Option<Sheet> {
+        let content = find_key(store, "wiki_tab")
+            .and_then(|w| w.get("content"))
+            .and_then(Value::as_str)?;
+        let mut sheet = chords::parse_text(content);
+        if sheet.capo == 0 {
+            sheet.capo = find_key(store, "capo")
+                .and_then(Value::as_u64)
+                .filter(|c| (1..=12).contains(c))
+                .unwrap_or(0) as u8;
+        }
+        (sheet.chord_count() >= MIN_CHORDS).then(|| {
+            sheet.source = "ultimate-guitar".into();
+            sheet
+        })
+    }
+
+    // ── network ────────────────────────────────────────────────────────────
+    async fn get(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<String, String> {
+        let r = c
+            .get(url)
+            .query(query)
+            .header(reqwest::header::USER_AGENT, UA)
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.8")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("network error ({})", e.without_url()))?;
+        let st = r.status();
+        if !st.is_success() {
+            return Err(format!("HTTP {} from ultimate-guitar", st.as_u16()));
+        }
+        let body = r.text().await.map_err(|e| format!("read error ({e})"))?;
+        if let Some(dir) = SAVE_DIR.get() {
+            let name = format!("{:016x}.html", fnv1a(url) ^ fnv1a(&format!("{query:?}")));
+            let _ = std::fs::write(dir.join(name), &body);
+        }
+        Ok(body)
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct CacheEntry {
+        kind: String, // found | none
+        chordpro: String,
+        saved: u64,
+    }
+
+    fn cache_path(artist: &str, title: &str) -> PathBuf {
+        cache_dir().join(format!("chords-ug-{:016x}.json", fnv1a(&format!("{artist}\0{title}"))))
+    }
+
+    fn fail(msg: String) -> Outcome {
+        FAILS.fetch_add(1, Ordering::Relaxed);
+        Outcome::Error(msg)
+    }
+
+    pub fn disabled() -> bool {
+        FAILS.load(Ordering::Relaxed) >= MAX_FAILS
+    }
+
+    #[cfg(test)]
+    pub fn reset_breaker() {
+        FAILS.store(0, Ordering::Relaxed);
+    }
+
+    /// Cache → search → fetch the best page(s). At most 1 search + 3 page requests, and
+    /// only for tracks that aren't cached. Errors are never cached.
+    pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Outcome {
+        let path = cache_path(artist, title);
+        if let Ok(txt) = tokio::fs::read_to_string(&path).await {
+            if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
+                if e.kind == "found" {
+                    let mut s = chords::parse_chordpro(&e.chordpro);
+                    if s.chord_count() >= MIN_CHORDS {
+                        s.source = "ultimate-guitar (cached)".into();
+                        return Outcome::Found(s);
+                    }
+                } else if now_secs().saturating_sub(e.saved) < NEG_TTL {
+                    return Outcome::NotFound;
+                }
+            }
+        }
+        if disabled() {
+            return Outcome::Error("ultimate-guitar switched off after repeated failures".into());
+        }
+
+        let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
+        let html = match get(c, &format!("{base}/search.php"), &[("search_type", "title"), ("value", &q)]).await {
+            Ok(h) => h,
+            Err(e) => return fail(e),
+        };
+        let Some(store) = extract_store(&html) else {
+            return fail("ultimate-guitar page format not recognised (blocked or changed)".into());
+        };
+        let cands = candidates(&store, artist, title);
+        let mut sheet = None;
+        for cand in &cands {
+            let url = if cand.url.starts_with('/') {
+                format!("{base}{}", cand.url)
+            } else {
+                cand.url.clone()
+            };
+            let html = match get(c, &url, &[]).await {
+                Ok(h) => h,
+                Err(e) => return fail(e),
+            };
+            let Some(page) = extract_store(&html) else {
+                return fail("ultimate-guitar tab page format not recognised".into());
+            };
+            if let Some(s) = sheet_from_store(&page) {
+                sheet = Some(s);
+                break;
+            }
+        }
+        FAILS.store(0, Ordering::Relaxed);
+        let entry = match &sheet {
+            Some(s) => CacheEntry { kind: "found".into(), chordpro: chords::to_chordpro(s), saved: now_secs() },
+            None => CacheEntry { kind: "none".into(), chordpro: String::new(), saved: now_secs() },
+        };
+        if let Ok(j) = serde_json::to_string(&entry) {
+            let _ = tokio::fs::write(&path, j).await;
+        }
+        match sheet {
+            Some(s) => Outcome::Found(s),
+            None => Outcome::NotFound,
+        }
+    }
+
+    /// Local folder first, then (if enabled) Ultimate Guitar.
+    pub async fn resolve(
+        c: reqwest::Client,
+        dir: PathBuf,
+        use_ug: bool,
+        artist: String,
+        title: String,
+    ) -> Result<Option<Sheet>, String> {
+        if let Some(s) = chords::load_local(dir, artist.clone(), title.clone()).await {
+            return Ok(Some(s));
+        }
+        if !use_ug {
+            return Ok(None);
+        }
+        match lookup(&c, BASE, &artist, &title).await {
+            Outcome::Found(s) => Ok(Some(s)),
+            Outcome::NotFound => Ok(None),
+            Outcome::Error(e) => Err(e),
+        }
+    }
+
+    /// `music_display --chords-probe "Artist" "Title"`: show each step so a broken lookup
+    /// can be diagnosed (add `--probe-save DIR` to keep the raw pages as test fixtures).
+    pub async fn probe(c: &reqwest::Client, artist: &str, title: &str, save: Option<PathBuf>) {
+        println!("probe: {artist} — {title}");
+        if let Some(d) = save {
+            let _ = std::fs::create_dir_all(&d);
+            println!("saving raw pages to {}", d.display());
+            let _ = SAVE_DIR.set(d);
+        }
+        let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
+        println!("1. search \"{q}\"");
+        let html = match get(c, &format!("{BASE}/search.php"), &[("search_type", "title"), ("value", &q)]).await {
+            Ok(h) => h,
+            Err(e) => return println!("   FAILED: {e}"),
+        };
+        println!("   {} bytes", html.len());
+        let Some(store) = extract_store(&html) else {
+            return println!("   FAILED: no js-store data-content JSON in the page (blocked, captcha, or format changed)");
+        };
+        let all = match find_key(&store, "results") {
+            Some(Value::Array(a)) => a.len(),
+            _ => 0,
+        };
+        println!("   js-store parsed; {all} results in total");
+        let cands = candidates(&store, artist, title);
+        if cands.is_empty() {
+            return println!("   no chord pages matching this artist/title");
+        }
+        for (i, cd) in cands.iter().enumerate() {
+            println!("   [{i}] {} — {}  rating {:.2}  votes {}  score {:.1}\n       {}", cd.artist, cd.song, cd.rating, cd.votes, cd.score, cd.url);
+        }
+        for (i, cd) in cands.iter().enumerate() {
+            println!("2. fetch [{i}]");
+            let url = if cd.url.starts_with('/') { format!("{BASE}{}", cd.url) } else { cd.url.clone() };
+            let html = match get(c, &url, &[]).await {
+                Ok(h) => h,
+                Err(e) => return println!("   FAILED: {e}"),
+            };
+            let Some(page) = extract_store(&html) else {
+                return println!("   FAILED: tab page has no js-store JSON");
+            };
+            let has_wiki = find_key(&page, "wiki_tab").is_some();
+            println!("   wiki_tab present: {has_wiki}");
+            match sheet_from_store(&page) {
+                Some(s) => {
+                    println!("   OK: {} chords on {} lines, capo {}", s.chord_count(), s.lines.len(), s.capo);
+                    for l in s.lines.iter().take(8) {
+                        let cs: Vec<_> = l.chords.iter().map(|(c, n)| format!("{n}@{c}")).collect();
+                        println!("   | {:<40} {}", l.text.trim(), cs.join(" "));
+                    }
+                    return;
+                }
+                None => println!("   rejected (fewer than {MIN_CHORDS} recognisable chords)"),
+            }
+        }
+        println!("no usable sheet among the candidates");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Application state + event handling
 // ════════════════════════════════════════════════════════════════════════════
 pub enum AppEvent {
@@ -1473,6 +2448,10 @@ pub enum AppEvent {
     Cover {
         url: String,
         loaded: Option<cover::Loaded>,
+    },
+    Chords {
+        key: u64,
+        sheet: Result<Option<chords::Sheet>, String>,
     },
     Cava(Vec<u16>),
     /// Informational status while cava has produced nothing yet.
@@ -1543,6 +2522,15 @@ mod app {
         }
     }
 
+    pub enum ChordsState {
+        /// Chords off, or nothing playing.
+        Idle,
+        Fetching,
+        Missing,
+        Failed(String),
+        Ready,
+    }
+
     /// Click targets recorded during the last render.
     #[derive(Default)]
     pub struct Hits {
@@ -1573,6 +2561,13 @@ mod app {
         pub lyrics: LyricsState,
         pub cover: CoverState,
         pub offset: f64,
+
+        pub chords_on: bool,
+        pub chords_state: ChordsState,
+        sheet: Option<chords::Sheet>,
+        pub aligned: Option<chords::Aligned>,
+        /// Semitones the displayed chords are shifted by.
+        pub transpose: i32,
 
         pub show_lyrics: bool,
         pub show_cava: bool,
@@ -1617,6 +2612,11 @@ mod app {
                 show_lyrics: !args.nolyrics,
                 show_cava: false,
                 offset: args.offset,
+                chords_on: args.chords,
+                chords_state: ChordsState::Idle,
+                sheet: None,
+                aligned: None,
+                transpose: 0,
                 placement,
                 big_lyrics: args.big_lyrics,
                 base_primary: theme.primary,
@@ -1688,6 +2688,26 @@ mod app {
                 AppEvent::Lyrics { key, lyrics } if key == self.track_key => {
                     self.lyrics = LyricsState::Ready(lyrics);
                     self.snap_scroll = true;
+                    self.realign();
+                    self.dirty = true;
+                }
+                AppEvent::Chords { key, sheet } if key == self.track_key => {
+                    match sheet {
+                        Ok(Some(s)) => {
+                            self.sheet = Some(s);
+                            self.chords_state = ChordsState::Ready;
+                        }
+                        Ok(None) => {
+                            self.sheet = None;
+                            self.chords_state = ChordsState::Missing;
+                        }
+                        Err(e) => {
+                            self.sheet = None;
+                            self.chords_state = ChordsState::Failed(e);
+                        }
+                    }
+                    self.realign();
+                    self.snap_scroll = true;
                     self.dirty = true;
                 }
                 AppEvent::Cover { url, loaded } if url == self.art_url => {
@@ -1752,6 +2772,10 @@ mod app {
                 self.offset = self.args.offset;
                 self.snap_scroll = true;
                 self.lyric_scroll = 0.0;
+                self.sheet = None;
+                self.aligned = None;
+                self.transpose = 0;
+                self.chords_state = ChordsState::Idle;
 
                 // Year: metadata first, network fallback in background.
                 self.year = match year::from_content_created(&s.content_created) {
@@ -1777,6 +2801,10 @@ mod app {
                     let lyrics = lyrics::fetch(c, a, t, al, len).await;
                     let _ = tx.send(AppEvent::Lyrics { key, lyrics });
                 }));
+            }
+
+            if new_track && self.chords_on {
+                self.fetch_chords(key, &s.artist, &s.title);
             }
 
             if new_art {
@@ -1809,6 +2837,47 @@ mod app {
             self.snap = Some(s);
             if changed {
                 self.dirty = true;
+            }
+        }
+
+        fn fetch_chords(&mut self, key: u64, artist: &str, title: &str) {
+            self.chords_state = ChordsState::Fetching;
+            let dir = self
+                .args
+                .chords_dir
+                .clone()
+                .unwrap_or_else(chords::default_dir);
+            let (tx, a, t) = (self.tx.clone(), artist.to_string(), title.to_string());
+            let (c, use_ug) = (self.client.clone(), self.args.chords_ug);
+            self.tasks.push(tokio::spawn(async move {
+                let sheet = ug::resolve(c, dir, use_ug, a, t).await;
+                let _ = tx.send(AppEvent::Chords { key, sheet });
+            }));
+        }
+
+        /// Match the sheet onto the synced lyrics (cheap; redone when either side changes).
+        fn realign(&mut self) {
+            self.aligned = match (&self.sheet, &self.lyrics) {
+                (Some(sh), LyricsState::Ready(Lyrics::Synced(l))) => Some(chords::align(sh, l)),
+                _ => None,
+            };
+        }
+
+        pub fn sheet_info(&self) -> Option<(&str, u8)> {
+            self.sheet.as_ref().map(|s| (s.source.as_str(), s.capo))
+        }
+
+        fn toggle_chords(&mut self) {
+            self.chords_on = !self.chords_on;
+            self.snap_scroll = true;
+            if self.chords_on {
+                self.show_lyrics = true;
+                if matches!(self.chords_state, ChordsState::Idle) {
+                    if let Some(s) = &self.snap {
+                        let (a, t, key) = (s.artist.clone(), s.title.clone(), self.track_key);
+                        self.fetch_chords(key, &a, &t);
+                    }
+                }
             }
         }
 
@@ -1864,6 +2933,9 @@ mod app {
                         self.big_lyrics = !self.big_lyrics;
                         self.snap_scroll = true;
                     }
+                    KeyCode::Char('g') => self.toggle_chords(),
+                    KeyCode::Char('t') => self.transpose = (self.transpose + 1).rem_euclid(12),
+                    KeyCode::Char('T') => self.transpose = (self.transpose - 1).rem_euclid(12),
                     _ => {}
                 },
                 Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) => {
@@ -2197,7 +3269,7 @@ mod ui {
     use crate::player::Status;
     use crate::theme::Theme;
     use crate::util::fmt_time;
-    use crate::{bigfont, cover};
+    use crate::{bigfont, chords, cover};
     use image::imageops::FilterType;
     use ratatui::Frame;
     use ratatui::buffer::Buffer;
@@ -2526,7 +3598,7 @@ mod ui {
 
     // ── lyrics ──────────────────────────────────────────────────────────────
     /// Greedy word-wrap by display width.
-    fn wrap(text: &str, width: usize) -> Vec<String> {
+    pub fn wrap(text: &str, width: usize) -> Vec<String> {
         if width == 0 {
             return vec![];
         }
@@ -2565,6 +3637,59 @@ mod ui {
         out
     }
 
+    /// Same wrapping as [`wrap`] but returns `(start, end)` char ranges into `norm` (the
+    /// single-spaced text), so chord columns can be mapped onto the wrapped rows.
+    pub fn wrap_ranges(norm: &str, width: usize) -> Vec<(usize, usize)> {
+        let chars: Vec<char> = norm.chars().collect();
+        let cw = |c: char| Span::raw(c.to_string()).width();
+        let mut rows: Vec<(usize, usize)> = Vec::new();
+        let (mut start, mut end, mut cur_w) = (0usize, 0usize, 0usize);
+        for (s, len) in chords::words_pos(norm) {
+            let ww: usize = chars[s..s + len].iter().map(|c| cw(*c)).sum();
+            if cur_w > 0 && cur_w + 1 + ww > width {
+                rows.push((start, end));
+                cur_w = 0;
+            }
+            if ww > width {
+                for (k, c) in chars[s..s + len].iter().enumerate() {
+                    if cur_w + cw(*c) > width && cur_w > 0 {
+                        rows.push((start, end));
+                        cur_w = 0;
+                    }
+                    if cur_w == 0 {
+                        start = s + k;
+                    }
+                    end = s + k + 1;
+                    cur_w += cw(*c);
+                }
+                continue;
+            }
+            if cur_w == 0 {
+                start = s;
+            }
+            end = s + len;
+            cur_w += if cur_w > 0 { 1 + ww } else { ww };
+        }
+        if cur_w > 0 || rows.is_empty() {
+            rows.push((start, end));
+        }
+        rows
+    }
+
+    /// `Am   G   C` with each chord at its column; neighbours are pushed apart, never overlap.
+    fn chord_line(cs: &[(usize, String)], n: i32, flats: bool) -> String {
+        let mut s = String::new();
+        let mut w = 0usize;
+        for (col, name) in cs {
+            let name = chords::transpose(name, n, flats);
+            let at = (*col).max(if w > 0 { w + 1 } else { 0 });
+            s.push_str(&" ".repeat(at - w));
+            w = at + name.chars().count();
+            s.push_str(&name);
+        }
+        s
+    }
+
     fn centered_msg(f: &mut Frame, area: Rect, msgs: &[(&str, Style)]) {
         let start = area.y + area.height.saturating_sub(msgs.len() as u16) / 2;
         for (i, (m, s)) in msgs.iter().enumerate() {
@@ -2592,7 +3717,15 @@ mod ui {
     /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
     /// middle of the panel (big font if it fits, otherwise bold wrapped text), with the lines
     /// before and after stacked outward from it.
-    fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, lines: &[String], c: usize, gap: usize) {
+    fn draw_focus(
+        f: &mut Frame,
+        inner: Rect,
+        th: &Theme,
+        lines: &[String],
+        c: usize,
+        gap: usize,
+        chord_summary: Option<String>,
+    ) {
         let width = inner.width as usize;
         let big = bigfont::render(&lines[c], width, 3)
             .filter(|rows| rows.len() as u16 + 4 <= inner.height);
@@ -2622,6 +3755,14 @@ mod ui {
 
         for (i, row) in stage.iter().take(sh as usize).enumerate() {
             put(f, top as i32 + i as i32, row, stage_style);
+        }
+        if let Some(cs) = chord_summary {
+            put(
+                f,
+                top as i32 - 1,
+                &cs,
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+            );
         }
 
         // Earlier lines, nearest first, growing upward.
@@ -2707,28 +3848,84 @@ mod ui {
             0
         };
 
+        let aligned: Option<chords::Aligned> = (app.chords_on && !plain)
+            .then(|| app.aligned.clone())
+            .flatten()
+            .filter(|a| a.usable());
+        let tr = app.transpose;
+
         // Big-font mode uses the fixed "focus" layout instead of the scrolling one.
         if app.big_lyrics && !plain {
             if let Some(c) = current {
                 app.lyric_scroll_target = app.lyric_scroll; // nothing left to animate
-                draw_focus(f, inner, &th, &lines, c, gap);
+                let summary = aligned.as_ref().and_then(|a| a.per_line.get(c)).and_then(|cs| {
+                    (!cs.is_empty()).then(|| {
+                        let mut names: Vec<String> = cs
+                            .iter()
+                            .map(|(_, n)| chords::transpose(n, tr, aligned.as_ref().is_some_and(|a| a.flats)))
+                            .collect();
+                        names.dedup();
+                        names.join("   ")
+                    })
+                });
+                draw_focus(f, inner, &th, &lines, c, gap, summary);
                 return;
             }
         }
 
         // Wrap into rows, remembering which source line each row belongs to. Spacing rows
         // belong to the line above them but hold no text.
-        let mut rows: Vec<(usize, String)> = Vec::new();
+        // A chord row (`chord_x` = its left offset inside the panel) sits right above each
+        // wrapped text row that carries chords; whether it is *drawn* depends on the active
+        // line, but the row is always reserved so the layout doesn't jump on every line change.
+        struct Row {
+            li: usize,
+            text: String,
+            chord_x: Option<usize>,
+        }
+        let width = inner.width as usize;
+        let flats = aligned.as_ref().is_some_and(|a| a.flats);
+        let mut rows: Vec<Row> = Vec::new();
         let mut starts = Vec::with_capacity(lines.len());
         let mut ends = Vec::with_capacity(lines.len());
         for (i, l) in lines.iter().enumerate() {
             starts.push(rows.len());
-            for r in wrap(l, inner.width as usize) {
-                rows.push((i, r));
+            let line_chords = aligned
+                .as_ref()
+                .and_then(|a| a.per_line.get(i))
+                .filter(|c| !c.is_empty());
+            match line_chords {
+                None => {
+                    for r in wrap(l, width) {
+                        rows.push(Row { li: i, text: r, chord_x: None });
+                    }
+                }
+                Some(cs) => {
+                    let norm = l.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let chars: Vec<char> = norm.chars().collect();
+                    let ranges = wrap_ranges(&norm, width);
+                    let mut per_row: Vec<Vec<(usize, String)>> = vec![Vec::new(); ranges.len()];
+                    for (c, name) in cs {
+                        let r = ranges.iter().rposition(|(s, _)| *s <= *c).unwrap_or(0);
+                        per_row[r].push((c.saturating_sub(ranges[r].0), name.clone()));
+                    }
+                    for ((rs, re), here) in ranges.iter().zip(per_row) {
+                        let text: String = chars[*rs..*re].iter().collect();
+                        if !here.is_empty() {
+                            let x = width.saturating_sub(Span::raw(&text).width()) / 2;
+                            rows.push(Row {
+                                li: i,
+                                text: chord_line(&here, tr, flats),
+                                chord_x: Some(x),
+                            });
+                        }
+                        rows.push(Row { li: i, text, chord_x: None });
+                    }
+                }
             }
             ends.push(rows.len());
             for _ in 0..gap {
-                rows.push((i, String::new()));
+                rows.push(Row { li: i, text: String::new(), chord_x: None });
             }
         }
         if rows.is_empty() {
@@ -2788,8 +3985,35 @@ mod ui {
             if idx < 0 || idx as usize >= rows.len() {
                 continue;
             }
-            let (li, text) = &rows[idx as usize];
+            let Row { li, text, chord_x } = &rows[idx as usize];
             if text.is_empty() {
+                continue;
+            }
+            if let Some(x) = chord_x {
+                let cur_i = current.map_or(-1, |c| c as i64);
+                let d = *li as i64 - cur_i;
+                if d < 0 || d > app.args.chords_context as i64 {
+                    continue;
+                }
+                let style = if d == 0 && current.is_some() {
+                    Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(th.accent_fade(0.35))
+                };
+                let w = Span::raw(text.as_str()).width() as u16;
+                let mut xs = inner.x + *x as u16;
+                if xs + w > inner.right() {
+                    xs = inner.right().saturating_sub(w).max(inner.x);
+                }
+                f.render_widget(
+                    Paragraph::new(Line::styled(text.as_str(), style)),
+                    Rect {
+                        x: xs,
+                        y: inner.y + y,
+                        width: w.min(inner.right() - xs),
+                        height: 1,
+                    },
+                );
                 continue;
             }
             let style = match current {
@@ -2873,7 +4097,35 @@ mod ui {
         } else {
             th.source.clone()
         };
-        let left = Line::from(vec![
+        let chords_info = if app.chords_on {
+            use crate::app::ChordsState as CS;
+            let t = match (&app.chords_state, &app.aligned) {
+                (CS::Idle, _) => "chords: waiting for a track".to_string(),
+                (CS::Fetching, _) => "chords: looking…".to_string(),
+                (CS::Missing, _) => "chords: no sheet found for this track".to_string(),
+                (CS::Failed(e), _) => format!("chords: {e}"),
+                (CS::Ready, None) => "chords: found, but there are no synced lyrics to place them on".into(),
+                (CS::Ready, Some(a)) if !a.usable() => {
+                    format!("chords: weak match ({}%) — hidden", a.percent())
+                }
+                (CS::Ready, Some(a)) => {
+                    let (src, capo) = app.sheet_info().unwrap_or(("", 0));
+                    let mut t = format!("chords: {src} {}%", a.percent());
+                    if capo > 0 {
+                        t.push_str(&format!(" · capo {capo}"));
+                    }
+                    if app.transpose != 0 {
+                        let n = if app.transpose > 6 { app.transpose - 12 } else { app.transpose };
+                        t.push_str(&format!(" · {n:+}"));
+                    }
+                    t
+                }
+            };
+            Some(t)
+        } else {
+            None
+        };
+        let mut spans = vec![
             Span::styled(" ◆ ", Style::new().fg(th.primary())),
             Span::styled(source, dim),
             Span::styled("  │  ", Style::new().fg(th.fade(0.7))),
@@ -2885,8 +4137,13 @@ mod ui {
                     dim
                 },
             ),
-        ]);
-        let hints = "space ⏯  n/p  ←/→ seek  ,/. sync  l lyrics  b big  c cava  q quit ";
+        ];
+        if let Some(c) = chords_info {
+            spans.push(Span::styled("  │  ", Style::new().fg(th.fade(0.7))));
+            spans.push(Span::styled(c, Style::new().fg(th.accent_fade(0.2))));
+        }
+        let left = Line::from(spans);
+        let hints = "space ⏯  n/p  ←/→ seek  ,/. sync  l lyrics  b big  g chords  t/T key  c cava  q quit ";
         let left_w = left.width() as u16;
         f.render_widget(Paragraph::new(left), area);
         if left_w + hints.chars().count() as u16 + 2 <= area.width {
@@ -2904,6 +4161,11 @@ mod ui {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = cli::Args::parse();
+    if let Some(p) = &args.chords_probe {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
+        ug::probe(&client, &p[0], &p[1], args.probe_save.clone()).await;
+        return Ok(());
+    }
     let theme = theme::load(&args);
 
     // ratatui::init = raw mode + alternate screen + a panic hook that restores both.
@@ -3211,6 +4473,242 @@ mod tests {
         assert!(c.contains("channels = mono"));
         assert!(c.contains("bars = 48"));
         assert!(c.contains("method = raw") && c.contains("data_format = ascii"));
+    }
+
+    #[test]
+    fn chord_recognition_and_transpose() {
+        for ok in ["A", "Am", "F#m7", "Bb/D", "Gsus4", "Cadd9", "E7b9", "D(add9)", "Cmaj7", "G/B", "Em7"] {
+            assert!(chords::is_chord(ok), "{ok}");
+        }
+        for bad in ["Hello", "I", "And", "Bridge", "Hm", "N.C.", "x2", "A/", "Dog"] {
+            assert!(!chords::is_chord(bad), "{bad}");
+        }
+        assert_eq!(chords::transpose("Am7", 2, false), "Bm7");
+        assert_eq!(chords::transpose("C/E", 1, false), "C#/F");
+        assert_eq!(chords::transpose("C/E", 1, true), "Db/F");
+        assert_eq!(chords::transpose("Bb", 2, true), "C");
+        assert_eq!(chords::transpose("E", 12, false), "E");
+        assert_eq!(chords::transpose("G", 7, false), "D");
+    }
+
+    const OVER: &str = "[Verse 1]\nCapo 2\n   Am        G\nHello darkness my old friend\n   C         E7\nI've come to talk with you again\n\n[Chorus]\n   F      G\nSing along tonight\n\nBridge over troubled water\n";
+
+    #[test]
+    fn parses_chords_over_lyrics() {
+        let s = chords::parse_text(OVER);
+        assert_eq!(s.capo, 2);
+        assert_eq!(s.lines.len(), 4, "{:?}", s.lines);
+        assert_eq!(s.lines[0].text, "Hello darkness my old friend");
+        assert_eq!(s.lines[0].chords, vec![(3, "Am".to_string()), (13, "G".to_string())]);
+        assert_eq!(s.lines[2].chords.len(), 2);
+        // a lyric that merely starts with a section word stays a lyric
+        assert_eq!(s.lines[3].text, "Bridge over troubled water");
+        assert!(s.lines[3].chords.is_empty());
+        // UG-style tags and tab lines are cleaned
+        let ug = chords::parse_text("[Verse]\n[ch]Am[/ch]   [ch]G[/ch]\nhello there\ne|---0---|\n");
+        assert_eq!(ug.lines.len(), 1);
+        assert_eq!(ug.chord_count(), 2);
+    }
+
+    #[test]
+    fn parses_chordpro_and_autodetects() {
+        let src = "{title: x}\n{capo: 3}\n# comment\n[Am]Hello dar[G]kness\n[Chorus]\n[C] [G]\nplain [text] here\n";
+        let s = chords::parse_chordpro(src);
+        assert_eq!(s.capo, 3);
+        assert_eq!(s.lines[0].text, "Hello darkness");
+        assert_eq!(s.lines[0].chords, vec![(0, "Am".to_string()), (9, "G".to_string())]);
+        assert_eq!(s.lines[1].text, " ");
+        assert_eq!(s.lines[1].chords.len(), 2);
+        assert_eq!(s.lines[2].text, "plain [text] here");
+        assert_eq!(chords::parse_auto(src).lines[0].chords.len(), 2);
+        assert_eq!(chords::parse_auto(OVER).lines.len(), 4);
+    }
+
+    fn lrc(lines: &[&str]) -> Vec<(f64, String)> {
+        lines.iter().enumerate().map(|(i, l)| (i as f64, l.to_string())).collect()
+    }
+
+    #[test]
+    fn aligns_sheet_to_synced_lyrics() {
+        let sheet = chords::parse_text(OVER);
+        // chorus appears twice in the song but once in the sheet; wording differs a little
+        let l = lrc(&[
+            "Hello darkness, my old friend",
+            "♪",
+            "I've come to talk with you again",
+            "Sing along tonight",
+            "Hello darkness, my old friend",
+            "Sing along tonight",
+        ]);
+        let a = chords::align(&sheet, &l);
+        assert_eq!((a.matched, a.total), (5, 5), "{a:?}");
+        assert!(a.usable());
+        assert!(a.per_line[1].is_empty());
+        // "Am" over "Hello" → col 0; "G" over "my"/"old" region, anchored to a word
+        assert_eq!(a.per_line[0][0], (3, "Am".into())); // col 3 is inside "Hello"
+        assert_eq!(a.per_line[0].len(), 2);
+        // repeated chorus line and repeated verse line (global fallback) get chords again
+        assert_eq!(a.per_line[3].len(), 2);
+        assert_eq!(a.per_line[5].len(), 2);
+        assert_eq!(a.per_line[4].len(), 2);
+        // unrelated lyrics → nothing is shown
+        let bad = chords::align(&sheet, &lrc(&["completely different words here", "nothing alike at all", "zzz qqq"]));
+        assert!(!bad.usable() && bad.per_line.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn wrap_ranges_matches_wrap() {
+        for text in [
+            "hello darkness my old friend",
+            "a verylongtokenthatmustbebroken here and there",
+            "one",
+            "",
+        ] {
+            for w in [5usize, 8, 12, 40] {
+                let rows = ui::wrap(text, w);
+                let chars: Vec<char> = text.chars().collect();
+                let r2: Vec<String> = ui::wrap_ranges(text, w)
+                    .iter()
+                    .map(|(s, e)| chars[*s..*e].iter().collect())
+                    .collect();
+                assert_eq!(rows, r2, "{text:?} @ {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn finds_local_sheets() {
+        let dir = tmp("chords");
+        std::fs::write(
+            dir.join("The Sound Of Silence - Simon & Garfunkel.txt"),
+            "x",
+        )
+        .unwrap();
+        std::fs::write(dir.join("simon garfunkel - the sound of silence.cho"), "[Am]a [G]b [C]c [F]d").unwrap();
+        let hit = chords::find_local(&dir, "Simon & Garfunkel", "The Sound of Silence - Remastered").unwrap();
+        assert_eq!(hit.extension().unwrap(), "cho"); // .cho outranks .txt
+        assert!(chords::find_local(&dir, "Nobody", "Nothing").is_none());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let sheet = rt
+            .block_on(chords::load_local(dir.clone(), "Simon & Garfunkel".into(), "The Sound of Silence".into()))
+            .unwrap();
+        assert_eq!(sheet.chord_count(), 4);
+        assert!(sheet.source.ends_with(".cho"));
+    }
+
+    fn ug_page(json: &serde_json::Value) -> String {
+        let esc = json.to_string().replace('&', "&amp;").replace('"', "&quot;").replace('\'', "&#039;");
+        format!("<html><body><div class=\"js-store\" data-content=\"{esc}\"></div></body></html>")
+    }
+
+    /// Tiny HTTP server: `routes` maps a path fragment to (status, body); counts requests.
+    fn fake_site(routes: Vec<(&'static str, u16, String)>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h2 = hits.clone();
+        std::thread::spawn(move || {
+            for mut st in l.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = st.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first = req.lines().next().unwrap_or("").to_string();
+                h2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (code, body) = routes
+                    .iter()
+                    .find(|(frag, _, _)| first.contains(frag))
+                    .map(|(_, c, b)| (*c, b.clone()))
+                    .unwrap_or((404, String::new()));
+                let _ = write!(st, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (base, hits)
+    }
+
+    #[test]
+    fn ultimate_guitar_provider_with_fake_site() {
+        assert_eq!(ug::unescape("a &quot;b&quot; &amp; c &#039;d&#x27; &bogus; &"), "a \"b\" & c 'd' &bogus; &");
+
+        let tab = "[Verse 1]\n[ch]Am[/ch]        [ch]G[/ch]\nHello darkness my old friend\n[ch]C[/ch]         [ch]F[/ch]\nI've come to talk with you again\n[ch]Am[/ch]        [ch]G[/ch]\nBecause a vision softly creeping\n[ch]C[/ch]         [ch]F[/ch]\nLeft its seeds while I was sleeping\n";
+        let search = serde_json::json!({"store":{"page":{"data":{"results":[
+            {"song_name":"The Sound of Silence","artist_name":"Simon & Garfunkel","type":"Tabs","tab_url":"/tab/x/tabs-1","rating":5.0,"votes":9999},
+            {"song_name":"The Sound of Silence (Live)","artist_name":"Someone Else","type":"Chords","tab_url":"/tab/y/chords-2","rating":5.0,"votes":9999},
+            {"song_name":"The Sound of Silence","artist_name":"Simon & Garfunkel","type":"Chords","tab_url":"/tab/z/chords-3","rating":4.1,"votes":50},
+            {"song_name":"The Sound of Silence","artist_name":"Simon & Garfunkel","type":"Chords","tab_url":"/tab/z/chords-4","rating":4.8,"votes":4000}
+        ]}}}});
+        let page = |content: &str| ug_page(&serde_json::json!({"store":{"page":{"data":{"tab_view":{"wiki_tab":{"content":content},"meta":{"capo":3}}}}}}));
+
+        let store = ug::extract_store(&ug_page(&search)).unwrap();
+        let c = ug::candidates(&store, "Simon & Garfunkel", "The Sound of Silence - Remastered");
+        assert_eq!(c.len(), 2, "tabs and other artists are filtered: {c:?}");
+        assert!(c[0].url.ends_with("chords-4"), "best rated × votes first");
+
+        // best page is junk (no chords) → falls through to the next candidate
+        let (base, hits) = fake_site(vec![
+            ("chords-4", 200, page("just words, no chords here\nat all\n")),
+            ("chords-3", 200, page(tab)),
+            ("search.php", 200, ug_page(&search)),
+        ]);
+        let client = reqwest::Client::new();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (artist, title) = ("Simon & Garfunkel", "The Sound of Silence UGTEST");
+        // title differs slightly from the fixture, so use a title that matches it exactly:
+        let _ = title;
+        let title = "The Sound of Silence";
+        let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{artist}\0{title}")))));
+        ug::reset_breaker();
+        let out = rt.block_on(ug::lookup(&client, &base, artist, title));
+        let ug::Outcome::Found(sheet) = out else { panic!("expected a sheet") };
+        assert_eq!(sheet.chord_count(), 8);
+        assert_eq!(sheet.capo, 3, "capo comes from the page metadata");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3, "search + 2 tab pages");
+        // second lookup: from the cache, zero requests
+        let again = rt.block_on(ug::lookup(&client, &base, artist, title));
+        let ug::Outcome::Found(s2) = again else { panic!("cached sheet") };
+        assert_eq!(s2.chord_count(), 8);
+        assert!(s2.source.contains("cached") && s2.capo == 3);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{artist}\0{title}")))));
+
+        // blocked (403) three times in a row → provider switches itself off, no more requests
+        let (base2, hits2) = fake_site(vec![("search.php", 403, "no".into())]);
+        ug::reset_breaker();
+        for i in 0..3 {
+            let t = format!("Blocked Song {i}");
+            let o = rt.block_on(ug::lookup(&client, &base2, "Nobody", &t));
+            assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("403")));
+        }
+        let o = rt.block_on(ug::lookup(&client, &base2, "Nobody", "Blocked Song 9"));
+        assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("switched off")));
+        assert_eq!(hits2.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // page without js-store (captcha / redesign) is an error, never a cached "not found"
+        let (base3, _) = fake_site(vec![("search.php", 200, "<html>captcha</html>".into())]);
+        ug::reset_breaker();
+        let o = rt.block_on(ug::lookup(&client, &base3, "Nobody", "Format Change"));
+        assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("not recognised")));
+
+        // no matching chord page → NotFound (and cached as such)
+        let empty = ug_page(&serde_json::json!({"store":{"page":{"data":{"results":[]}}}}));
+        let (base4, _) = fake_site(vec![("search.php", 200, empty)]);
+        ug::reset_breaker();
+        let o = rt.block_on(ug::lookup(&client, &base4, "Nobody", "Truly Unknown Song"));
+        assert!(matches!(o, ug::Outcome::NotFound));
+        let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a("Nobody\0Truly Unknown Song"))));
+        ug::reset_breaker();
+    }
+
+    #[test]
+    fn chordpro_cache_round_trip() {
+        let s = chords::parse_text(OVER);
+        let back = chords::parse_chordpro(&chords::to_chordpro(&s));
+        assert_eq!(back.capo, s.capo);
+        assert_eq!(back.lines.len(), s.lines.len());
+        for (a, b) in s.lines.iter().zip(&back.lines) {
+            assert_eq!(a.text.trim(), b.text.trim());
+            assert_eq!(a.chords.iter().map(|c| &c.1).collect::<Vec<_>>(), b.chords.iter().map(|c| &c.1).collect::<Vec<_>>());
+        }
     }
 
     #[test]
