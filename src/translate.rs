@@ -26,9 +26,34 @@ pub fn detected(v: &Value) -> Option<String> {
     v.get(2).and_then(Value::as_str).map(base_code)
 }
 
-/// `zh-CN` → `zh`, case-insensitive.
+/// `zh-CN` → `zh`, case-insensitive; the old ISO codes Google still answers with become
+/// the current ones (`iw` → `he`, `jw` → `jv`, `in` → `id`, `ji` → `yi`, `mo` → `ro`).
 pub fn base_code(c: &str) -> String {
-    c.split(['-', '_']).next().unwrap_or(c).trim().to_lowercase()
+    let b = c.split(['-', '_']).next().unwrap_or(c).trim().to_lowercase();
+    match b.as_str() {
+        "iw" => "he".into(),
+        "jw" => "jv".into(),
+        "in" => "id".into(),
+        "ji" => "yi".into(),
+        "mo" => "ro".into(),
+        _ => b,
+    }
+}
+
+/// Shown in the lyrics title while the song's language can't be told and its language is on the
+/// never-translate list: nothing is translated, the check is retried.
+pub const HELD: &str = "translation held: language not detected yet, retrying";
+/// The same, once the retries ran out.
+pub const HELD_FINAL: &str = "translation held: language not detected (rate-limited?)";
+/// Prefix of the message for a song whose language is on the never-translate list.
+pub const SKIPPED: &str = "never translated";
+
+pub fn is_held(e: &str) -> bool {
+    e == HELD
+}
+
+pub fn is_skipped(e: &str) -> bool {
+    e.starts_with(SKIPPED)
 }
 
 /// Why one request failed: `Limited` / `Net` switch to the fallback, `Other` is retried.
@@ -59,6 +84,12 @@ pub fn parse_dict(v: &Value) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// The source language `dict-chrome-ex` names: `{"sentences":[…],"src":"sv"}`. The array shapes
+/// carry none.
+pub fn dict_lang(v: &Value) -> Option<String> {
+    v.get("src").and_then(Value::as_str).map(base_code).filter(|c| !c.is_empty())
+}
+
 fn classify(e: &reqwest::Error) -> Fail {
     if e.is_timeout() || e.is_connect() || e.is_request() { Fail::Net } else { Fail::Other }
 }
@@ -85,19 +116,23 @@ async fn get(c: &reqwest::Client, url: &str, client: &str, lang: &str, text: &st
     }
 }
 
-/// `gtx`, then `dict-chrome-ex` when the first is limited or unreachable.
-async fn google(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Result<(String, Option<String>), Fail> {
-    let (u1, u2) = match &cfg.google_base {
+fn google_urls(cfg: &Cfg) -> (String, String) {
+    match &cfg.google_base {
         Some(b) => (b.clone(), format!("{b}/dict")),
         None => (GTX.to_string(), DICT.to_string()),
-    };
+    }
+}
+
+/// `gtx`, then `dict-chrome-ex` when the first is limited or unreachable.
+async fn google(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Result<(String, Option<String>), Fail> {
+    let (u1, u2) = google_urls(cfg);
     match get(c, &u1, "gtx", lang, text).await.map(|v| (parse(&v), detected(&v))) {
         Ok((Some(t), det)) => return Ok((t, det)),
         Ok((None, _)) | Err(Fail::Other) => {}
         Err(_) => {}
     }
     match get(c, &u2, "dict-chrome-ex", lang, text).await {
-        Ok(v) => parse_dict(&v).map(|t| (t, None)).ok_or(Fail::Other),
+        Ok(v) => parse_dict(&v).map(|t| (t, dict_lang(&v))).ok_or(Fail::Other),
         Err(e) => Err(e),
     }
 }
@@ -154,6 +189,38 @@ async fn line(c: &reqwest::Client, cfg: &Cfg, use_fallback: &AtomicBool, lang: &
     libre(c, cfg, lang, t).await.map(|(x, det)| keep_skipped(cfg, det, x, &l))
 }
 
+/// What names the song's language: a sample of its lines through the same backends, in the same
+/// order (`gtx`, `dict-chrome-ex`, LibreTranslate), stopping at the first that says. `None` when
+/// none could.
+async fn detect(c: &reqwest::Client, cfg: &Cfg, lang: &str, sample: &str) -> Option<String> {
+    let (u1, u2) = google_urls(cfg);
+    if let Ok(v) = get(c, &u1, "gtx", lang, sample).await {
+        if let Some(d) = detected(&v).filter(|d| !d.is_empty()) {
+            return Some(d);
+        }
+    }
+    if let Ok(v) = get(c, &u2, "dict-chrome-ex", lang, sample).await {
+        if let Some(d) = dict_lang(&v) {
+            return Some(d);
+        }
+    }
+    if cfg.fallback {
+        return libre(c, cfg, lang, sample).await.and_then(|(_, d)| d).filter(|d| !d.is_empty());
+    }
+    None
+}
+
+/// The first few real lines of the song, one request's worth.
+fn sample(src: &[String]) -> String {
+    let lines: Vec<&str> = src
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && *l != "♪")
+        .take(8)
+        .collect();
+    lines.join("\n").chars().take(600).collect()
+}
+
 /// The original line when its language is on the skip list, else the translation.
 fn keep_skipped(cfg: &Cfg, detected: Option<String>, translated: String, original: &str) -> String {
     match detected {
@@ -163,8 +230,23 @@ fn keep_skipped(cfg: &Cfg, detected: Option<String>, translated: String, origina
 }
 
 /// Translate every line (order preserved; a line that fails keeps its original text).
-/// Returns the lines and which backend did the work. `Err` only when nearly everything failed.
+/// Returns the lines and which backend did the work. `Err` when nearly everything failed, and
+/// for a song whose language is on the skip list ([`is_skipped`]) or can't be told while the
+/// list is in use ([`is_held`]): those make no per-line requests at all.
+///
+/// With a skip list the song's language is asked once, from a sample, before any line is sent.
 pub async fn lines(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -> Result<(Vec<String>, &'static str), String> {
+    // legacy codes (`iw`, `zh-CN`) in the list meet the codes the services answer with
+    let skip: Vec<String> = cfg.skip.iter().map(|s| base_code(s)).filter(|s| !s.is_empty()).collect();
+    let cfg = &Cfg { skip: skip.clone(), ..cfg.clone() };
+    let sample = sample(src);
+    if !skip.is_empty() && !sample.is_empty() {
+        match detect(c, cfg, lang, &sample).await {
+            Some(d) if skip.contains(&d) => return Err(format!("{SKIPPED} ({d})")),
+            Some(_) => {}
+            None => return Err(HELD.into()),
+        }
+    }
     let use_fallback = AtomicBool::new(false);
     let out: Vec<Option<String>> =
         futures::stream::iter(src.iter().cloned().map(|l| line(c, cfg, &use_fallback, lang, l)))

@@ -620,6 +620,8 @@ async fn translation_falls_back_to_libretranslate_on_429() {
 #[tokio::test]
 async fn skipped_languages_are_left_as_written() {
     let (site, _log) = scripted_site(vec![
+        // the song as a whole (both lines sent as one sample) is detected as Spanish: not blocked
+        ("q=hej%0Ahola", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["hello","hej hola"]],null,"es"]"#.into())]),
         ("tl=en&q=hej", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["hello","hej"]],null,"sv"]"#.into())]),
         ("tl=en&q=hola", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["hello","hola"]],null,"es"]"#.into())]),
     ]);
@@ -634,6 +636,129 @@ async fn skipped_languages_are_left_as_written() {
     assert_eq!(out, vec!["hej", "hello"]);
     assert_eq!(translate::base_code("SV"), "sv");
     assert_eq!(translate::base_code("zh-CN"), "zh");
+}
+
+const JSON_HDR: &str = "Content-Type: application/json\r\n";
+
+fn hits(log: &std::sync::Mutex<Vec<String>>, frag: &str) -> usize {
+    log.lock().unwrap().iter().filter(|l| l.contains(frag)).count()
+}
+
+fn skip_cfg(site: &str, skip: &[&str], fallback: bool) -> translate::Cfg {
+    translate::Cfg {
+        google_base: Some(format!("{site}/g")),
+        fallback,
+        fallback_url: format!("{site}/libre"),
+        skip: skip.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn blocked_language_is_kept_when_google_is_limited_and_dict_answers() {
+    // gtx says 429, the dict endpoint translates and names the source language
+    let (site, log) = scripted_site(vec![
+        ("/g/dict", vec![R::Http(200, JSON_HDR, r#"{"sentences":[{"trans":"hello"}],"src":"sv"}"#.into())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+    ]);
+    let src = vec!["hej".to_string(), "♪".to_string(), "hallå".to_string()];
+    let r = translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &["sv"], false), "en", &src).await;
+    assert!(r.as_ref().is_err_and(|e| translate::is_skipped(e)), "{r:?}");
+    // detection cost the two requests; no line was sent after it
+    assert_eq!(hits(&log, "/g"), 2);
+}
+
+#[tokio::test]
+async fn blocked_song_makes_one_request_under_normal_google() {
+    let (site, log) = scripted_site(vec![(
+        "/g?",
+        vec![R::Http(200, JSON_HDR, r#"[[["hello","hej"]],null,"sv"]"#.into())],
+    )]);
+    let src: Vec<String> = (0..20).map(|i| format!("rad {i}")).collect();
+    let cfg = skip_cfg(&site, &["SV"], true);
+    let r = translate::lines(&reqwest::Client::new(), &cfg, "en", &src).await;
+    assert!(r.is_err_and(|e| translate::is_skipped(&e)));
+    assert_eq!(log.lock().unwrap().len(), 1);
+    // the list changed: the same song is evaluated again and now translated
+    let none = skip_cfg(&site, &[], true);
+    let (out, _) = translate::lines(&reqwest::Client::new(), &none, "en", &src).await.unwrap();
+    assert!(out.iter().all(|l| l == "hello"));
+}
+
+#[tokio::test]
+async fn blocked_language_under_libretranslate() {
+    let (site, log) = scripted_site(vec![
+        ("/g/dict", vec![R::Http(429, "", String::new())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+        (
+            "/libre",
+            vec![R::Http(200, JSON_HDR, r#"{"translatedText":"hello","detectedLanguage":{"language":"sv"}}"#.into())],
+        ),
+    ]);
+    let src = vec!["hej".to_string(), "hej igen".to_string()];
+    let r = translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &["sv"], true), "en", &src).await;
+    assert!(r.is_err_and(|e| translate::is_skipped(&e)));
+    assert_eq!(hits(&log, "/libre"), 1);
+    // a language that is not on the list is translated
+    let (out, backend) = translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &["fi"], true), "en", &src).await.unwrap();
+    assert_eq!((backend, out), ("libretranslate", vec!["hello".to_string(), "hello".to_string()]));
+}
+
+#[tokio::test]
+async fn unknown_language_holds_the_translation() {
+    // nothing can name the language: not translated, not silently "not blocked"
+    let (site, log) = scripted_site(vec![
+        ("/g/dict", vec![R::Http(200, JSON_HDR, r#"{"sentences":[{"trans":"hello"}]}"#.into())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+        ("/libre", vec![R::Http(200, JSON_HDR, r#"{"translatedText":"hello"}"#.into())]),
+    ]);
+    let src = vec!["hej".to_string(), "hallå".to_string()];
+    for fallback in [false, true] {
+        log.lock().unwrap().clear();
+        let r = translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &["sv"], fallback), "en", &src).await;
+        assert!(r.is_err_and(|e| translate::is_held(&e)), "fallback {fallback}");
+        assert_eq!(hits(&log, "/g"), 2, "no per-line requests, fallback {fallback}");
+    }
+    // without a skip list nothing is held back and no detection request is made
+    log.lock().unwrap().clear();
+    assert!(translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &[], false), "en", &src).await.is_ok());
+}
+
+#[test]
+fn language_codes_are_normalised() {
+    assert_eq!(translate::base_code("iw"), "he");
+    assert_eq!(translate::base_code("IW"), "he");
+    assert_eq!(translate::base_code("jw"), "jv");
+    assert_eq!(translate::base_code("in"), "id");
+    assert_eq!(translate::base_code("zh-CN"), "zh");
+    assert_eq!(translate::base_code("zh_TW"), "zh");
+    assert_eq!(translate::base_code(" Sv "), "sv");
+}
+
+#[tokio::test]
+async fn legacy_codes_on_the_list_match_what_google_detects() {
+    // the list says iw (old Hebrew code), Google answers he
+    let (site, _log) = scripted_site(vec![(
+        "/g?",
+        vec![R::Http(200, JSON_HDR, r#"[[["hello","שלום"]],null,"he"]"#.into())],
+    )]);
+    let src = vec!["שלום".to_string()];
+    let r = translate::lines(&reqwest::Client::new(), &skip_cfg(&site, &["iw"], false), "en", &src).await;
+    assert!(r.is_err_and(|e| translate::is_skipped(&e)));
+}
+
+#[tokio::test]
+async fn changing_the_skip_list_forgets_old_translations() {
+    let mut app = test_app();
+    // no song has played yet, so the track key is still 0
+    app.translations.insert((0, app.args.translate_lang.clone()), vec!["x".into()]);
+    app.translate_on = true;
+    assert!(app.translation().is_some());
+    app.toggle_skip("sv");
+    assert_eq!(app.skip_langs(), vec!["sv"]);
+    assert!(app.translation().is_none());
+    app.toggle_skip("SV");
+    assert!(app.skip_langs().is_empty());
 }
 
 #[test]

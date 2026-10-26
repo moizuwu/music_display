@@ -68,6 +68,11 @@ macro_rules! bind {
     };
 }
 
+/// Language check kept failing for a song on a never-translate list: asked again this often,
+/// this many times.
+const HOLD_RETRY_SECS: u64 = 20;
+const HOLD_RETRIES: u32 = 6;
+
 pub const GROUPS: [&str; 5] = ["Playback", "Lyrics", "Chords", "View", "Spotify"];
 
 pub const BINDS: &[Bind] = &[
@@ -485,6 +490,8 @@ pub struct App {
     pub translate_state: TranslateState,
     /// The (song, language) request currently running, so toggling doesn't duplicate it.
     translate_inflight: Option<(u64, String)>,
+    /// The task doing it, stopped when the song or the never-translate list changes.
+    translate_task: Option<JoinHandle<()>>,
     /// Translations kept for the session, per song and language.
     pub translations: std::collections::HashMap<(u64, String), Vec<String>>,
     /// Test hook: alternative translate endpoint.
@@ -593,6 +600,7 @@ impl App {
             translate_on: false,
             translate_state: TranslateState::Idle,
             translate_inflight: None,
+            translate_task: None,
             translations: Default::default(),
             translate_base: None,
             translate_backend: "google",
@@ -745,6 +753,7 @@ impl App {
                 self.dirty = true;
             }
             AppEvent::Translated { key, lang, lines } => {
+                let held_msg = lines.as_ref().err().cloned();
                 match lines {
                     Ok((l, backend)) => {
                         self.translations.insert((key, lang.clone()), l);
@@ -755,7 +764,9 @@ impl App {
                     }
                     Err(_) => {}
                 }
-                if self.translate_inflight.as_ref() == Some(&(key, lang.clone())) {
+                // a held song keeps its request: the task retries the language check itself
+                let held = held_msg.as_deref().is_some_and(translate::is_held);
+                if !held && self.translate_inflight.as_ref() == Some(&(key, lang.clone())) {
                     self.translate_inflight = None;
                 }
                 if key == self.track_key && lang == self.args.translate_lang {
@@ -864,6 +875,9 @@ impl App {
             self.chords_state = ChordsState::Idle;
             self.translate_state = TranslateState::Idle;
             self.translate_inflight = None;
+            if let Some(t) = self.translate_task.take() {
+                t.abort();
+            }
 
             // Year: metadata first, network fallback in background.
             self.year = match year::from_content_created(&s.content_created) {
@@ -1186,6 +1200,10 @@ impl App {
         if !self.translate_on || self.translation().is_some() {
             return;
         }
+        // its language is on the never-translate list: settled until the list or the song changes
+        if matches!(&self.translate_state, TranslateState::Failed(e) if translate::is_skipped(e)) {
+            return;
+        }
         let Some(lines) = self.lyric_lines().filter(|l| !l.is_empty()) else {
             return;
         };
@@ -1204,9 +1222,30 @@ impl App {
             fallback_key: self.args.translate_fallback_key.clone(),
             skip: self.skip_langs(),
         };
-        self.tasks.push(tokio::spawn(async move {
-            let lines = translate::lines(&c, &cfg, &lang, &lines).await;
-            let _ = tx.send(AppEvent::Translated { key, lang, lines });
+        if let Some(t) = self.translate_task.take() {
+            t.abort();
+        }
+        self.translate_task = Some(tokio::spawn(async move {
+            // language not detectable (rate-limited) while the never-translate list is in use:
+            // say so once, then ask again every HOLD_RETRY_SECS
+            let mut told = false;
+            for attempt in 1..=HOLD_RETRIES {
+                let mut r = translate::lines(&c, &cfg, &lang, &lines).await;
+                if r.as_ref().is_err_and(|e| translate::is_held(e)) {
+                    if attempt < HOLD_RETRIES {
+                        if !told {
+                            told = true;
+                            let held = Err(translate::HELD.to_string());
+                            let _ = tx.send(AppEvent::Translated { key, lang: lang.clone(), lines: held });
+                        }
+                        tokio::time::sleep(Duration::from_secs(HOLD_RETRY_SECS)).await;
+                        continue;
+                    }
+                    r = Err(translate::HELD_FINAL.to_string());
+                }
+                let _ = tx.send(AppEvent::Translated { key, lang, lines: r });
+                return;
+            }
         }));
     }
 
@@ -1232,7 +1271,7 @@ impl App {
     }
 
     /// Add / remove one language from the never-translate list.
-    fn toggle_skip(&mut self, code: &str) {
+    pub fn toggle_skip(&mut self, code: &str) {
         let mut all = self.skip_langs();
         let code = translate::base_code(code);
         match all.iter().position(|c| *c == code) {
@@ -1245,6 +1284,9 @@ impl App {
         // what was translated under the old list is stale
         self.translations.clear();
         self.translate_inflight = None;
+        if let Some(t) = self.translate_task.take() {
+            t.abort(); // its answer was made under the old list
+        }
         self.translate_state = TranslateState::Idle;
         self.snap_scroll = true;
         self.ensure_translation();
