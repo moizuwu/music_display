@@ -83,6 +83,7 @@ mouse = true                   # false = don't capture the mouse
 spotify = false                # Spotify Web API features (see "Spotify" below)
 # spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
 spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as "this PC"
+use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup)
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -125,6 +126,8 @@ spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | Spotify Connect name of spotifyd on this PC (its `device_name`, default `Desktop (spotifyd)`). |
+| `--use-spotifyd` | spotifyd is the player on this PC; `--setup` turns it on for you (see "Setup (spotifyd)" below). |
+| `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--spotify-login` / `--spotify-logout` | log in in the browser and save the token / forget it, then exit. |
 
 ## Keys

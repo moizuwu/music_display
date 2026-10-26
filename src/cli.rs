@@ -184,9 +184,20 @@ pub struct Args {
     #[arg(long, default_value = "Desktop (spotifyd)", value_name = "NAME")]
     pub spotify_device: String,
 
+    /// spotifyd is the player on this PC (set it up once with --setup); off = whatever
+    /// MPRIS player or device is playing [config: use_spotifyd]
+    #[arg(long)]
+    pub use_spotifyd: bool,
+
     /// Log in to Spotify in the browser, save the token and exit [no config key]
     #[arg(long)]
     pub spotify_login: bool,
+
+    /// One-time guided setup for spotifyd: check it is installed, `spotifyd authenticate`, the
+    /// browser login, write spotifyd.conf and the config entries (backups first), then check
+    /// the device shows up, and exit [no config key]
+    #[arg(long)]
+    pub setup: bool,
 
     /// Forget the saved Spotify token and exit [no config key]
     #[arg(long)]

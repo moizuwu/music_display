@@ -61,6 +61,7 @@ pub const KEYS: &[Key] = &[
     k!("spotify", Kind::Bool, "spotify"),
     k!("spotify_client_id", Kind::Str, "spotify_client_id"),
     k!("spotify_device", Kind::Str, "spotify_device"),
+    k!("use_spotifyd", Kind::Bool, "use_spotifyd"),
 ];
 
 pub fn default_path() -> PathBuf {
@@ -146,6 +147,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "spotify" => args.spotify = b(),
         "spotify_client_id" => args.spotify_client_id = Some(st()),
         "spotify_device" => args.spotify_device = st(),
+        "use_spotifyd" => args.use_spotifyd = b(),
         _ => {}
     }
 }
@@ -277,5 +279,6 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
         None => line("# spotify_client_id", "\"…\"  # your Spotify app's Client ID".into()),
     }
     line("spotify_device", q(&args.spotify_device));
+    line("use_spotifyd", args.use_spotifyd.to_string());
     o
 }
