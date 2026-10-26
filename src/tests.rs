@@ -1887,3 +1887,92 @@ fn hangul_lines_use_the_fine_font_and_fall_back() {
     assert_eq!(ui::big_stage("안녕", 80, 30, 2, 0).unwrap().len(), 12);
     assert!(bigfont::render_compact("안녕", 60, 3).is_none());
 }
+
+#[test]
+fn chords_sit_above_their_glyphs_in_the_big_layout() {
+    use clap::Parser;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let args = cli::Args::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    // H(6) I(6) space(3) T(6): "T" starts at column 15, "I" at 6
+    let lines: Vec<String> = vec!["HI TO".to_string()];
+    let aligned = chords::Aligned {
+        per_line: vec![vec![(0, "Am".into()), (1, "G".into()), (3, "C".into())]],
+        matched: 1,
+        total: 1,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![]],
+    };
+    let fc = ui::Focus {
+        lines: &lines,
+        current: Some(0),
+        gap: 0,
+        scale: 1,
+        chords: Some(&aligned),
+        tr: 0,
+        flats: false,
+        context: 99,
+        in_break: false,
+        members: &[],
+        reserve_tag: false,
+    };
+    let (w, h) = (40u16, 12u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut hits = Vec::new();
+    term.draw(|f| hits = ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc)).unwrap();
+    let b = term.backend().buffer();
+    let screen: Vec<String> = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect()).collect();
+    let stage = screen.iter().position(|r| r.contains('█') || r.contains('▀') || r.contains('▄')).unwrap();
+    // "HI TO" is 6+6+3+6+5 = 26 columns wide, centred in 40: starts at column 7
+    let left = (40 - 26) / 2;
+    let chord_row = &screen[stage - 1];
+    assert_eq!(chord_row.find("Am"), Some(left), "{screen:#?}");
+    // G sits over the I (6 columns on); C over the T (15 on)
+    assert_eq!(chord_row.chars().position(|c| c == 'G'), Some(left + 6), "{chord_row:?}");
+    assert_eq!(chord_row.chars().position(|c| c == 'C'), Some(left + 15), "{chord_row:?}");
+    assert_eq!(hits[stage - 1], Some(0), "the chord row belongs to the active line");
+    // a chord on the space goes over the next glyph (T), one past the end over the last
+    let space = chords::Aligned { per_line: vec![vec![(2, "Em".into()), (9, "F".into())]], ..aligned.clone() };
+    let fc2 = ui::Focus { chords: Some(&space), ..fc };
+    term.draw(|f| { ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc2); }).unwrap();
+    let b = term.backend().buffer();
+    let row: String = (0..w).map(|x| b[(x, stage as u16 - 1)].symbol()).collect();
+    assert_eq!(row.find("Em"), Some(left + 15), "{row:?}");
+    assert!(row.contains('F'), "{row:?}");
+    // wrapped pieces get their own chord row, in the blank row above each piece
+    let wrap_lines: Vec<String> = vec!["HI TO GO".to_string()];
+    let wrapped = chords::Aligned {
+        per_line: vec![vec![(0, "Am".into()), (6, "G".into())]],
+        matched: 1,
+        total: 1,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![]],
+    };
+    let fc3 = ui::Focus { lines: &wrap_lines, chords: Some(&wrapped), ..fc2 };
+    let (w, h) = (30u16, 16u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| { ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc3); }).unwrap();
+    let b = term.backend().buffer();
+    let screen: Vec<String> = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect()).collect();
+    let am = screen.iter().position(|r| r.contains("Am")).unwrap();
+    let g = screen.iter().position(|r| r.contains('G') && !r.contains('█')).unwrap();
+    assert!(g > am + 4, "second piece, lower down: Am row {am}, G row {g}");
+    assert!(screen[g].trim() == "G", "{:?}", screen[g]);
+}
+
+#[test]
+fn hangul_chords_follow_the_wide_glyphs() {
+    let r = bigfont::render_map("안녕 하", 60, 3, 1, bigfont::Font::Fine).unwrap();
+    // 안 at 0, 녕 at 13, space 4, 하 at 13 + 13 + 4 = 30
+    assert_eq!(r.chunks.len(), 1);
+    assert_eq!(r.chunks[0].cols, [(0, 0), (1, 13), (3, 30)]);
+    assert_eq!(r.chunks[0].width, 12 + 1 + 12 + 1 + 4 + 12);
+    assert_eq!(r.column_of(1), Some((0, 13)));
+    assert_eq!(r.column_of(2), Some((0, 30)), "a space goes to the next glyph");
+    assert_eq!(r.column_of(99), Some((0, 30)), "past the end: the last glyph");
+    // scaled: columns scale too; "…" maps all three dots to the one source character
+    let r = bigfont::render_map("A…B", 60, 3, 2, bigfont::Font::Normal).unwrap();
+    assert_eq!(r.chunks[0].cols, [(0, 0), (1, 12), (1, 24), (1, 36), (2, 48)]);
+}

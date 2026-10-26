@@ -1397,17 +1397,22 @@ pub fn chord_line(cs: &[(usize, String)], text: &[char], limit: usize, n: i32, f
         text.iter().take(col).map(|c| crate::util::cw(*c)).sum::<usize>()
             + col.saturating_sub(text.len())
     };
+    let items: Vec<(usize, String)> = cs.iter().map(|(col, name)| (cell(*col), chords::transpose(name, n, flats))).collect();
+    place_chords(&items, limit)
+}
+
+/// Chord names (already transposed) at their cell columns, left to right: neighbours are
+/// pushed apart so they never overlap, and a chord that would run past `limit` is pulled
+/// left on its own, instead of the whole row shifting off its words.
+pub fn place_chords(items: &[(usize, String)], limit: usize) -> String {
     let mut s = String::new();
     let mut w = 0usize;
-    for (col, name) in cs {
-        let name = chords::transpose(name, n, flats);
+    for (cell, name) in items {
         let floor = if w > 0 { w + 1 } else { 0 };
-        // a chord that would run past the panel edge is pulled left on its own,
-        // instead of the whole row shifting off its words
-        let at = cell(*col).min(limit.saturating_sub(crate::util::width(&name))).max(floor);
+        let at = (*cell).min(limit.saturating_sub(crate::util::width(name))).max(floor);
         s.push_str(&" ".repeat(at - w));
-        w = at + crate::util::width(&name);
-        s.push_str(&name);
+        w = at + crate::util::width(name);
+        s.push_str(name);
     }
     s
 }
@@ -1536,14 +1541,16 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     // which lyric line each panel row belongs to (chord rows and the intro belong to none)
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
     let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
-    let (stage, stage_style, stage_li): (Vec<String>, Style, Option<usize>) = match c {
+    type Stage = (Vec<String>, Style, Option<usize>, Option<bigfont::Rendered>);
+    let (stage, stage_style, stage_li, map): Stage = match c {
         Some(c) => match big_stage_map(&lines[c], width, inner.height, fc.scale, tag_rows) {
-            Some(r) => (r.rows, Style::new().fg(th.primary()), Some(c)),
-            None => (wrap(&lines[c], width), bold, Some(c)),
+            Some(r) => (r.rows.clone(), Style::new().fg(th.primary()), Some(c), Some(r)),
+            None => (wrap(&lines[c], width), bold, Some(c), None),
         },
         None => (
             fc.chords.map_or_else(Vec::new, |a| a.intro.iter().map(|n| names(n)).collect()),
             bold,
+            None,
             None,
         ),
     };
@@ -1575,16 +1582,33 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     for (i, row) in stage.iter().take(sh as usize).enumerate() {
         put(f, top as i32 + i as i32, stage_li, row, stage_style);
     }
-    // summary of the active line's chords above the big text
+    // the active line's chords: each above its own glyph when the big font draws it (one row
+    // above every wrapped piece, in the blank row between pieces), else a summary above
     if let Some(c) = c {
-        let summary = fc.chords.and_then(|a| a.per_line.get(c)).filter(|cs| !cs.is_empty()).map(|cs| {
+        let line_chords = fc.chords.and_then(|a| a.per_line.get(c)).filter(|cs| !cs.is_empty());
+        let mut has_summary = false;
+        if let (Some(cs), Some(r)) = (line_chords, &map) {
+            let mut per_piece: Vec<Vec<(usize, String)>> = vec![Vec::new(); r.chunks.len()];
+            for (idx, name) in cs {
+                if let Some((k, col)) = r.column_of(*idx) {
+                    per_piece[k].push((col, chords::transpose(name, fc.tr, fc.flats)));
+                }
+            }
+            for (k, items) in per_piece.iter().enumerate().filter(|(_, i)| !i.is_empty()) {
+                let piece = &r.chunks[k];
+                let x = width.saturating_sub(piece.width) / 2;
+                let y = top as i32 + piece.row as i32 - 1;
+                put_at(f, y, x, &place_chords(items, width - x), bold);
+                if y >= inner.y as i32 && y < inner.bottom() as i32 {
+                    hits.borrow_mut()[(y - inner.y as i32) as usize] = Some(c);
+                }
+                has_summary |= k == 0;
+            }
+        } else if let Some(cs) = line_chords {
             let mut v: Vec<String> = cs.iter().map(|(_, n)| chords::transpose(n, fc.tr, fc.flats)).collect();
             v.dedup();
-            v.join("   ")
-        });
-        let has_summary = summary.is_some();
-        if let Some(cs) = summary {
-            put(f, top as i32 - 1, Some(c), &cs, bold);
+            put(f, top as i32 - 1, Some(c), &v.join("   "), bold);
+            has_summary = true;
         }
         // who sings it: one dim row right above the big text, or above the chord summary
         let y = top as i32 - 1 - has_summary as i32;

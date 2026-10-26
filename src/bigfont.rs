@@ -816,7 +816,6 @@ pub fn render_compact(text: &str, max_cols: usize, max_chunks: usize) -> Option<
 
 /// One wrapped piece of a rendered line.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the chord alignment that follows
 pub struct Chunk {
     /// Index of its first row in [`Rendered::rows`].
     pub row: usize,
@@ -828,7 +827,6 @@ pub struct Chunk {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // `chunks` is read by the chord alignment that follows
 pub struct Rendered {
     pub rows: Vec<String>,
     pub chunks: Vec<Chunk>,
@@ -837,7 +835,6 @@ pub struct Rendered {
 impl Rendered {
     /// Where a chord attached to source character `idx` goes: (piece, column). A chord on
     /// whitespace takes the next glyph; past the end it takes the last one.
-    #[allow(dead_code)]
     pub fn column_of(&self, idx: usize) -> Option<(usize, usize)> {
         let mut last = None;
         for (k, ch) in self.chunks.iter().enumerate() {
