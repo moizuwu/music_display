@@ -159,15 +159,75 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(lines), list);
 
     let hint = match (&app.lib.note, &app.lib.picker) {
-        (Some(n), _) => n.clone(),
-        (None, Some(_)) => "enter add · esc back".to_string(),
-        (None, None) => "tab/1-5 · enter play · →/← open/back · a queue · A add · f like · r reload · esc".to_string(),
+        (Some(n), _) => ellipsize(n, width),
+        (None, Some(_)) => fit_hints(&[(1, "enter add"), (1, "esc back")], width),
+        // lowest number = kept longest
+        (None, None) => fit_hints(
+            &[
+                (3, "tab/1-5"),
+                (1, "enter play"),
+                (2, "→/← open/back"),
+                (4, "a queue"),
+                (4, "A add"),
+                (5, "f like"),
+                (5, "r reload"),
+                (1, "esc"),
+            ],
+            width,
+        ),
     };
-    let hint: String = hint.chars().take(width).collect();
     f.render_widget(
         Paragraph::new(Line::styled(hint, dim)).alignment(Alignment::Center),
         Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
     );
+}
+
+/// Key hints joined with ` · ` into `width` columns by dropping whole items, never cutting one:
+/// the item with the highest priority number goes first (the later one on a tie). Nothing that
+/// fits gives an empty string. Items stay in the order given.
+pub fn fit_hints(items: &[(u8, &str)], width: usize) -> String {
+    let mut keep = vec![true; items.len()];
+    loop {
+        let line = items
+            .iter()
+            .zip(&keep)
+            .filter(|(_, k)| **k)
+            .map(|(i, _)| i.1)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if !line.is_empty() && crate::util::width(&line) <= width {
+            return line;
+        }
+        let Some(drop) = (0..items.len()).filter(|i| keep[*i]).max_by_key(|i| (items[*i].0, *i)) else {
+            // even one item doesn't fit joined with the rest: show the most important that fits alone
+            return items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| crate::util::width(i.1) <= width)
+                .min_by_key(|(n, i)| (i.0, *n))
+                .map(|(_, i)| i.1.to_string())
+                .unwrap_or_default();
+        };
+        keep[drop] = false;
+    }
+}
+
+/// `text` shortened to `width` columns with a trailing `…` (display width, not characters).
+pub fn ellipsize(text: &str, width: usize) -> String {
+    if crate::util::width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if crate::util::width(&out) + crate::util::width(&c.to_string()) + 1 > width {
+            break;
+        }
+        out.push(c);
+    }
+    if width > 0 {
+        out.push('…');
+    }
+    out
 }
 
 fn draw_settings(f: &mut Frame, app: &mut App) {
@@ -814,56 +874,33 @@ fn draw_left(f: &mut Frame, app: &mut App, area: Rect) {
     let pos = app.position();
     let meta_lines = meta_lines(app, &snap, inner.width.saturating_sub(2) as usize);
 
-    // Volume sits beside the transport buttons when it fits, else on its own row below.
-    let width = inner.width.saturating_sub(2);
-    let vol_shown = app.volume.is_some();
-    let pct_txt = if app.muted() {
-        "[ MUTE ]".to_string()
-    } else {
-        format!("[ {}% ]", app.volume_pct().unwrap_or(0))
-    };
-    let vol_w = 5 + 1 + 8 + 1 + 5; // "[ - ] [ 100% ] [ + ]"
-    let rep_lbl = match snap.repeat {
-        Some(crate::player::Loop::Track) => "[ rep 1 ]",
-        _ => "[ rep ]",
-    };
-    // shuffle / repeat buttons exist only for what the player reports
-    let mut labels: Vec<(&str, u8)> = Vec::new();
-    if snap.shuffle.is_some() {
-        labels.push(("[ shuf ]", 0));
-    }
-    if snap.repeat.is_some() {
-        labels.push((rep_lbl, 1));
-    }
-    let play_lbl = if snap.status == Status::Playing {
-        "[ pause ]"
-    } else {
-        "[ play ]"
-    };
-    labels.extend([("[ prev ]", 2), (play_lbl, 3), ("[ next ]", 4)]);
-    let gap = 1u16;
-    // `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 100% ] [ + ]`: a dash
-    // (with a space each side) sets the groups apart
-    let modes = labels.iter().filter(|l| l.1 < 2).count() as u16;
-    let total: u16 = labels.iter().map(|l| l.0.chars().count() as u16).sum::<u16>()
-        + gap * (labels.len() as u16 - 1)
-        + if modes > 0 { 2 } else { 0 };
-    let vol_inline = vol_shown && total as usize + 3 + vol_w <= width as usize;
-    let vol_row = vol_shown && !vol_inline;
-    let [cover_a, _, meta_a, _, prog_a, _, btn_a, vol_a] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(meta_lines.len() as u16),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(vol_row as u16),
-    ])
-    .areas(inner.inner(ratatui::layout::Margin {
+    let area_in = inner.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 0,
-    }));
+    });
+    let plan = plan_controls(
+        area_in.width,
+        snap.shuffle,
+        snap.repeat.map(|r| r == crate::player::Loop::Track),
+        snap.status == Status::Playing,
+        app.volume.is_some(),
+        area_in.height >= 4,
+    );
+    let heights = left_heights(area_in.height, meta_lines.len() as u16, plan.vol_row);
+    let mut y = area_in.y;
+    let mut take = |h: u16| {
+        let r = Rect { x: area_in.x, y, width: area_in.width, height: h };
+        y += h;
+        r
+    };
+    let cover_a = take(heights.cover);
+    take(heights.gap_cover);
+    let meta_a = take(heights.meta);
+    take(heights.gap_meta);
+    let prog_a = take(heights.prog);
+    take(heights.gap_prog);
+    let btn_a = take(heights.btn);
+    let vol_a = take(heights.vol);
 
     // Cover
     if cover_a.height >= 3 {
@@ -874,52 +911,43 @@ fn draw_left(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(meta_lines), meta_a);
 
     // Progress bar
-    app.hits.progress = timed_bar(f, &th, prog_a, pos, snap.length);
+    app.hits.progress = if prog_a.height > 0 {
+        timed_bar(f, &th, prog_a, pos, snap.length)
+    } else {
+        Rect::default()
+    };
 
-    // Buttons
-    let full = if vol_inline { total + 3 + vol_w as u16 } else { total };
-    let mut x = btn_a.x + btn_a.width.saturating_sub(full) / 2;
-    let transport_start = x;
+    // Buttons: whole buttons only, and each hit area is exactly what is drawn
     app.hits.shuffle = Rect::default();
     app.hits.repeat = Rect::default();
-    let sep = Style::new().fg(th.fade(0.5));
-    for (l, id) in &labels {
-        let w = l.chars().count() as u16;
-        if *id == 2 && modes > 0 {
-            // x already includes one gap after the last mode button
-            f.render_widget(
-                Paragraph::new(Span::styled("-", sep)),
-                Rect { x: x.min(btn_a.right().saturating_sub(1)), y: btn_a.y, width: 1, height: 1 },
-            );
-            x = x.saturating_add(2);
+    app.hits.prev = Rect::default();
+    app.hits.play = Rect::default();
+    app.hits.next = Rect::default();
+    if btn_a.height > 0 {
+        for b in &plan.buttons {
+            let w = b.label.chars().count() as u16;
+            let r = Rect { x: btn_a.x + b.x, y: btn_a.y, width: w, height: 1 };
+            let on = match b.id {
+                0 => snap.shuffle == Some(true),
+                1 => snap.repeat.is_some_and(|r| r != crate::player::Loop::None),
+                _ => false,
+            };
+            let style = if b.id == 3 || on {
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+            } else if b.id < 2 {
+                Style::new().fg(th.fade(0.5))
+            } else {
+                Style::new().fg(th.text())
+            };
+            f.render_widget(Paragraph::new(Span::styled(b.label.clone(), style)), r);
+            match b.id {
+                0 => app.hits.shuffle = r,
+                1 => app.hits.repeat = r,
+                2 => app.hits.prev = r,
+                3 => app.hits.play = r,
+                _ => app.hits.next = r,
+            }
         }
-        let r = Rect {
-            x,
-            y: btn_a.y,
-            width: w.min(btn_a.right().saturating_sub(x)),
-            height: 1,
-        };
-        let on = match id {
-            0 => snap.shuffle == Some(true),
-            1 => snap.repeat.is_some_and(|r| r != crate::player::Loop::None),
-            _ => false,
-        };
-        let style = if *id == 3 || on {
-            Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
-        } else if *id < 2 {
-            Style::new().fg(th.fade(0.5))
-        } else {
-            Style::new().fg(th.text())
-        };
-        f.render_widget(Paragraph::new(Span::styled(*l, style)), r);
-        match id {
-            0 => app.hits.shuffle = r,
-            1 => app.hits.repeat = r,
-            2 => app.hits.prev = r,
-            3 => app.hits.play = r,
-            _ => app.hits.next = r,
-        }
-        x = x.saturating_add(w + gap);
     }
 
     // Volume: [ - ] [ 100% ] [ + ]   (click the percentage to mute)
@@ -927,40 +955,45 @@ fn draw_left(f: &mut Frame, app: &mut App, area: Rect) {
     app.hits.vol_pct = Rect::default();
     app.hits.vol_plus = Rect::default();
     app.hits.vol_area = Rect::default();
-    if vol_shown && (vol_inline || vol_a.height > 0) {
-        let (row, x0) = if vol_inline {
-            // " - " between the transport buttons and the volume control
-            f.render_widget(
-                Paragraph::new(Span::styled("-", sep)),
-                Rect { x: (transport_start + total + 1).min(btn_a.right().saturating_sub(1)), y: btn_a.y, width: 1, height: 1 },
-            );
-            (btn_a, transport_start + total + 3)
-        } else {
-            (vol_a, vol_a.x + vol_a.width.saturating_sub(vol_w as u16) / 2)
-        };
+    let row = if plan.vol_row { vol_a } else { btn_a };
+    if let (Some((kind, vx)), true) = (plan.vol, row.height > 0) {
         let muted = app.muted();
-        let pct_w = 8u16;
-        let cell = |x: u16, w: u16| Rect {
-            x,
-            y: row.y,
-            width: w.min(row.right().saturating_sub(x)),
-            height: 1,
-        };
-        let (minus, pct, plus) = (cell(x0, 5), cell(x0 + 6, pct_w), cell(x0 + 6 + pct_w + 1, 5));
+        let pct = app.volume_pct().unwrap_or(0);
+        let (mw, pw, gap) = kind.cells();
+        let x0 = row.x + vx;
         let btn = Style::new().fg(th.text());
         let pct_style = if muted {
             Style::new().fg(th.primary()).add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
         } else {
             Style::new().fg(th.primary())
         };
-        f.render_widget(Paragraph::new(Span::styled("[ - ]", btn)), minus);
-        f.render_widget(
-            Paragraph::new(Span::styled(format!("{pct_txt:^8}"), pct_style)),
-            pct,
-        );
-        f.render_widget(Paragraph::new(Span::styled("[ + ]", btn)), plus);
+        let cell = |x: u16, w: u16| Rect { x, y: row.y, width: w, height: 1 };
+        let minus = cell(x0, mw);
+        let (pct_r, plus) = if pw > 0 {
+            (cell(x0 + mw + gap, pw), cell(x0 + mw + gap + pw + gap, mw))
+        } else {
+            (Rect::default(), cell(x0 + mw, mw))
+        };
+        let (m, p) = match kind {
+            VolKind::Full => ("[ - ]", "[ + ]"),
+            _ => ("[-]", "[+]"),
+        };
+        f.render_widget(Paragraph::new(Span::styled(m, btn)), minus);
+        if pw > 0 {
+            let txt = match (kind, muted) {
+                (VolKind::Full, true) => "[ MUTE ]".to_string(),
+                (VolKind::Full, false) => format!("[ {pct}% ]"),
+                (_, true) => "MUTE".to_string(),
+                (_, false) => format!("{pct}%"),
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(format!("{txt:^w$}", w = pw as usize), pct_style)),
+                pct_r,
+            );
+        }
+        f.render_widget(Paragraph::new(Span::styled(p, btn)), plus);
         app.hits.vol_minus = minus;
-        app.hits.vol_pct = pct;
+        app.hits.vol_pct = pct_r;
         app.hits.vol_plus = plus;
         app.hits.vol_area = Rect {
             x: minus.x,
@@ -969,6 +1002,184 @@ fn draw_left(f: &mut Frame, app: &mut App, area: Rect) {
             height: 1,
         };
     }
+}
+
+// ── the control row: pure layout, so every size can be tested ──────────────
+
+/// Blank columns between control buttons (full / compact labels).
+const CTL_GAP: u16 = 3;
+const CTL_GAP_COMPACT: u16 = 2;
+
+/// How much of the volume control is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolKind {
+    /// `[ - ] [ 65% ] [ + ]`
+    Full,
+    /// `[-] 65% [+]`
+    Compact,
+    /// `[-][+]`
+    Tiny,
+}
+
+impl VolKind {
+    /// (width of `[-]`, width of the percentage (0 = none), gap between the three parts).
+    pub fn cells(self) -> (u16, u16, u16) {
+        match self {
+            VolKind::Full => (5, 8, 1),
+            VolKind::Compact => (3, 4, 1),
+            VolKind::Tiny => (3, 0, 0),
+        }
+    }
+
+    pub fn width(self) -> u16 {
+        let (m, p, g) = self.cells();
+        if p == 0 { m * 2 } else { m * 2 + p + g * 2 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtlButton {
+    /// 0 shuffle, 1 repeat, 2 previous, 3 play / pause, 4 next.
+    pub id: u8,
+    pub label: String,
+    /// Column offset from the left edge of the row.
+    pub x: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ControlPlan {
+    pub buttons: Vec<CtlButton>,
+    /// Volume control: what is drawn and its column offset in its row.
+    pub vol: Option<(VolKind, u16)>,
+    /// The volume sits on its own row below the buttons.
+    pub vol_row: bool,
+}
+
+/// The buttons for one label set: shuffle / repeat only for what the player reports.
+fn ctl_labels(compact: bool, modes: bool, shuffle: Option<bool>, rep: Option<bool>, playing: bool) -> Vec<(u8, &'static str)> {
+    let mut v = Vec::new();
+    if modes {
+        if shuffle.is_some() {
+            v.push((0, if compact { "[sh]" } else { "[ shuf ]" }));
+        }
+        if let Some(one) = rep {
+            v.push((1, match (compact, one) {
+                (false, false) => "[ rep ]",
+                (false, true) => "[ rep 1 ]",
+                (true, false) => "[rp]",
+                (true, true) => "[r1]",
+            }));
+        }
+    }
+    v.push((2, if compact { "[<<]" } else { "[ prev ]" }));
+    v.push((3, match (compact, playing) {
+        (false, true) => "[ pause ]",
+        (false, false) => "[ play ]",
+        (true, true) => "[||]",
+        (true, false) => "[|>]",
+    }));
+    v.push((4, if compact { "[>>]" } else { "[ next ]" }));
+    v
+}
+
+fn labels_width(labels: &[(u8, &str)], gap: u16) -> u16 {
+    labels.iter().map(|l| l.1.chars().count() as u16).sum::<u16>() + gap * (labels.len() as u16).saturating_sub(1)
+}
+
+/// Lay the control row out for `width` columns. Whole buttons only: when something doesn't fit
+/// it is dropped, never cut. Order of giving up: full labels with the volume beside them, volume
+/// on its own row (`row_ok`: there is a spare row), compact labels, shuffle / repeat, the
+/// volume (percentage, then the whole control), and last prev / next; play stays longest.
+pub fn plan_controls(width: u16, shuffle: Option<bool>, rep: Option<bool>, playing: bool, volume: bool, row_ok: bool) -> ControlPlan {
+    // (compact labels, with shuffle / repeat, volume kind, volume on its own row)
+    let mut cands: Vec<(bool, bool, Option<VolKind>, bool)> = Vec::new();
+    let vols = |k: VolKind| if volume { Some(k) } else { None };
+    cands.push((false, true, vols(VolKind::Full), false));
+    if volume && row_ok {
+        cands.push((false, true, Some(VolKind::Full), true));
+    }
+    cands.push((true, true, vols(VolKind::Compact), false));
+    if volume && row_ok {
+        cands.push((true, true, Some(VolKind::Compact), true));
+    }
+    cands.push((true, false, vols(VolKind::Compact), false));
+    if volume && row_ok {
+        cands.push((true, false, Some(VolKind::Compact), true));
+    }
+    if volume {
+        cands.push((true, false, Some(VolKind::Tiny), false));
+    }
+    cands.push((true, false, None, false));
+    for (compact, modes, vol, on_row) in cands {
+        let gap = if compact { CTL_GAP_COMPACT } else { CTL_GAP };
+        let labels = ctl_labels(compact, modes, shuffle, rep, playing);
+        let t = labels_width(&labels, gap);
+        let vw = vol.map_or(0, VolKind::width);
+        let total = if vol.is_some() && !on_row { t + gap + vw } else { t };
+        if total > width || (on_row && vw > width) {
+            continue;
+        }
+        let mut x = (width - total) / 2;
+        let mut buttons = Vec::new();
+        for (id, label) in &labels {
+            buttons.push(CtlButton { id: *id, label: label.to_string(), x });
+            x += label.chars().count() as u16 + gap;
+        }
+        let vol = vol.map(|k| (k, if on_row { (width - vw) / 2 } else { x }));
+        return ControlPlan { buttons, vol, vol_row: on_row };
+    }
+    // Too narrow even for the compact row: play first, then next, then prev, as many as fit
+    let labels = ctl_labels(true, false, None, None, playing);
+    for keep in [&[3u8][..], &[3, 4], &[2, 3, 4]].iter().rev() {
+        let set: Vec<_> = labels.iter().filter(|l| keep.contains(&l.0)).copied().collect();
+        let t = labels_width(&set, CTL_GAP_COMPACT);
+        if t <= width {
+            let mut x = (width - t) / 2;
+            let mut buttons = Vec::new();
+            for (id, label) in &set {
+                buttons.push(CtlButton { id: *id, label: label.to_string(), x });
+                x += label.chars().count() as u16 + CTL_GAP_COMPACT;
+            }
+            return ControlPlan { buttons, vol: None, vol_row: false };
+        }
+    }
+    ControlPlan::default()
+}
+
+/// Row heights of the left panel. Priority when it is short: buttons, volume row, progress bar,
+/// metadata (as many lines as fit), and the cover last, which takes whatever is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LeftHeights {
+    pub cover: u16,
+    pub gap_cover: u16,
+    pub meta: u16,
+    pub gap_meta: u16,
+    pub prog: u16,
+    pub gap_prog: u16,
+    pub btn: u16,
+    pub vol: u16,
+}
+
+pub fn left_heights(h: u16, meta_len: u16, vol_row: bool) -> LeftHeights {
+    fn take(rem: &mut u16, want: u16) -> u16 {
+        let got = want.min(*rem);
+        *rem -= got;
+        got
+    }
+    let mut rem = h;
+    let btn = take(&mut rem, 1);
+    let vol = take(&mut rem, vol_row as u16);
+    let prog = take(&mut rem, 1);
+    let gap_prog = if prog > 0 { take(&mut rem, 1) } else { 0 };
+    let (gap_meta, meta) = if rem >= 2 && meta_len > 0 {
+        let g = take(&mut rem, 1);
+        (g, take(&mut rem, meta_len))
+    } else {
+        // one spare row: a metadata line (no gap) beats an invisible cover
+        (0, take(&mut rem, meta_len.min(1)))
+    };
+    let gap_cover = if meta > 0 && meta == meta_len { take(&mut rem, 1) } else { 0 };
+    LeftHeights { cover: rem, gap_cover, meta, gap_meta, prog, gap_prog, btn, vol }
 }
 
 fn draw_cover(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1186,17 +1397,22 @@ pub fn chord_line(cs: &[(usize, String)], text: &[char], limit: usize, n: i32, f
         text.iter().take(col).map(|c| crate::util::cw(*c)).sum::<usize>()
             + col.saturating_sub(text.len())
     };
+    let items: Vec<(usize, String)> = cs.iter().map(|(col, name)| (cell(*col), chords::transpose(name, n, flats))).collect();
+    place_chords(&items, limit)
+}
+
+/// Chord names (already transposed) at their cell columns, left to right: neighbours are
+/// pushed apart so they never overlap, and a chord that would run past `limit` is pulled
+/// left on its own, instead of the whole row shifting off its words.
+pub fn place_chords(items: &[(usize, String)], limit: usize) -> String {
     let mut s = String::new();
     let mut w = 0usize;
-    for (col, name) in cs {
-        let name = chords::transpose(name, n, flats);
+    for (cell, name) in items {
         let floor = if w > 0 { w + 1 } else { 0 };
-        // a chord that would run past the panel edge is pulled left on its own,
-        // instead of the whole row shifting off its words
-        let at = cell(*col).min(limit.saturating_sub(crate::util::width(&name))).max(floor);
+        let at = (*cell).min(limit.saturating_sub(crate::util::width(name))).max(floor);
         s.push_str(&" ".repeat(at - w));
-        w = at + crate::util::width(&name);
-        s.push_str(&name);
+        w = at + crate::util::width(name);
+        s.push_str(name);
     }
     s
 }
@@ -1263,12 +1479,26 @@ fn chord_rows(line: &str, cs: &[(usize, String)], width: usize, tr: i32, flats: 
 /// Big-font rows for `text` in a panel `width` × `height`: the largest scale
 /// (down to one) whose wrapped pieces (up to 4) leave at least 2 rows for the neighbouring lines;
 /// failing that the compact 3×5 font. `None`: the caller falls back to bold wrapped text.
-pub fn big_stage(text: &str, width: usize, height: u16, scale: usize) -> Option<Vec<String>> {
-    let fits = |rows: &Vec<String>| rows.len() as u16 + 2 <= height;
+/// `spare` leaves that many more rows free (the member tag above the stage).
+#[cfg(test)]
+pub fn big_stage(text: &str, width: usize, height: u16, scale: usize, spare: u16) -> Option<Vec<String>> {
+    big_stage_map(text, width, height, scale, spare).map(|r| r.rows)
+}
+
+/// [`big_stage`] with the column of every source character (for chords above the glyphs).
+/// A line with Hangul tries the finer 12×12 font first at each scale and falls back to the
+/// 8×8 one, so a narrow or short panel keeps working exactly as before.
+pub fn big_stage_map(text: &str, width: usize, height: u16, scale: usize, spare: u16) -> Option<bigfont::Rendered> {
+    use bigfont::Font;
+    let fits = |r: &bigfont::Rendered| r.rows.len() as u16 + 2 + spare <= height;
+    let hangul = bigfont::has_hangul(text);
     (1..=scale.clamp(1, 3))
         .rev()
-        .find_map(|sc| bigfont::render_scaled(text, width, 4, sc).filter(fits))
-        .or_else(|| bigfont::render_compact(text, width, 4).filter(fits))
+        .find_map(|sc| {
+            let fine = hangul.then(|| bigfont::render_map(text, width, 4, sc, Font::Fine).filter(fits));
+            fine.flatten().or_else(|| bigfont::render_map(text, width, 4, sc, Font::Normal).filter(fits))
+        })
+        .or_else(|| bigfont::render_map(text, width, 4, 1, Font::Compact).filter(fits))
 }
 
 /// Everything [`draw_focus`] needs besides the frame, area and theme.
@@ -1287,6 +1517,11 @@ pub struct Focus<'a> {
     pub context: usize,
     /// The active line is in an instrumental break: show its break chords under the stage.
     pub in_break: bool,
+    /// Members singing the active line (`--member-parts`): a dim tag row above the stage.
+    pub members: &'a [String],
+    /// This song has member data: keep one row free above the stage for the tag on every
+    /// line, so the layout doesn't jump between tagged and untagged lines.
+    pub reserve_tag: bool,
 }
 
 /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
@@ -1305,19 +1540,23 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     let bold = Style::new().fg(th.primary()).add_modifier(Modifier::BOLD);
     // which lyric line each panel row belongs to (chord rows and the intro belong to none)
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
-    let (stage, stage_style, stage_li): (Vec<String>, Style, Option<usize>) = match c {
-        Some(c) => match big_stage(&lines[c], width, inner.height, fc.scale) {
-            Some(rows) => (rows, Style::new().fg(th.primary()), Some(c)),
-            None => (wrap(&lines[c], width), bold, Some(c)),
+    let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
+    type Stage = (Vec<String>, Style, Option<usize>, Option<bigfont::Rendered>);
+    let (stage, stage_style, stage_li, map): Stage = match c {
+        Some(c) => match big_stage_map(&lines[c], width, inner.height, fc.scale, tag_rows) {
+            Some(r) => (r.rows.clone(), Style::new().fg(th.primary()), Some(c), Some(r)),
+            None => (wrap(&lines[c], width), bold, Some(c), None),
         },
         None => (
             fc.chords.map_or_else(Vec::new, |a| a.intro.iter().map(|n| names(n)).collect()),
             bold,
             None,
+            None,
         ),
     };
     let sh = (stage.len() as u16).min(inner.height);
-    let top = inner.y + (inner.height - sh) / 2;
+    // the spare row for the tag sits above the stage, so the stage moves down by half of it
+    let top = inner.y + (inner.height - sh + tag_rows) / 2;
 
     let put = |f: &mut Frame, y: i32, li: Option<usize>, text: &str, style: Style| {
         if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
@@ -1343,15 +1582,42 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     for (i, row) in stage.iter().take(sh as usize).enumerate() {
         put(f, top as i32 + i as i32, stage_li, row, stage_style);
     }
-    // summary of the active line's chords above the big text
+    // the active line's chords: each above its own glyph when the big font draws it (one row
+    // above every wrapped piece, in the blank row between pieces), else a summary above
     if let Some(c) = c {
-        let summary = fc.chords.and_then(|a| a.per_line.get(c)).filter(|cs| !cs.is_empty()).map(|cs| {
+        let line_chords = fc.chords.and_then(|a| a.per_line.get(c)).filter(|cs| !cs.is_empty());
+        let mut has_summary = false;
+        if let (Some(cs), Some(r)) = (line_chords, &map) {
+            let mut per_piece: Vec<Vec<(usize, String)>> = vec![Vec::new(); r.chunks.len()];
+            for (idx, name) in cs {
+                if let Some((k, col)) = r.column_of(*idx) {
+                    per_piece[k].push((col, chords::transpose(name, fc.tr, fc.flats)));
+                }
+            }
+            for (k, items) in per_piece.iter().enumerate().filter(|(_, i)| !i.is_empty()) {
+                let piece = &r.chunks[k];
+                let x = width.saturating_sub(piece.width) / 2;
+                let y = top as i32 + piece.row as i32 - 1;
+                put_at(f, y, x, &place_chords(items, width - x), bold);
+                if y >= inner.y as i32 && y < inner.bottom() as i32 {
+                    hits.borrow_mut()[(y - inner.y as i32) as usize] = Some(c);
+                }
+                has_summary |= k == 0;
+            }
+        } else if let Some(cs) = line_chords {
             let mut v: Vec<String> = cs.iter().map(|(_, n)| chords::transpose(n, fc.tr, fc.flats)).collect();
             v.dedup();
-            v.join("   ")
-        });
-        if let Some(cs) = summary {
-            put(f, top as i32 - 1, Some(c), &cs, bold);
+            put(f, top as i32 - 1, Some(c), &v.join("   "), bold);
+            has_summary = true;
+        }
+        // who sings it: one dim row right above the big text, or above the chord summary
+        let y = top as i32 - 1 - has_summary as i32;
+        let tag = member_tag_line(fc.members, width);
+        if tag_rows > 0 && !tag.is_empty() && y >= inner.y as i32 {
+            f.render_widget(
+                Paragraph::new(Line::from(tag)).alignment(Alignment::Center),
+                Rect { y: y as u16, height: 1, ..inner },
+            );
         }
     }
     // chords played during an instrumental break, right under the stage
@@ -1372,8 +1638,8 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
         chord_rows(&lines[li], cs.map_or(&[], |v| v.as_slice()), width, fc.tr, fc.flats)
     };
 
-    // Earlier lines, nearest first, growing upward.
-    let mut y = top as i32 - 2;
+    // Earlier lines, nearest first, growing upward (above the tag row when there is one).
+    let mut y = top as i32 - 2 - tag_rows as i32;
     for k in 1..=c.unwrap_or(0) {
         let li = c.unwrap_or(0) - k;
         let style = fade_style(th, k, true);
@@ -1428,8 +1694,43 @@ fn member_tag(members: &[String], width: usize, text_w: usize) -> Vec<Span<'stat
     if w + text_w > width { Vec::new() } else { spans }
 }
 
+/// The tag for the big layout, one line that always fits `width`: `[Jimin, V]`, else
+/// `[Jimin +1]`, else the first name shortened with `…`; empty when even that doesn't fit.
+fn member_tag_line(members: &[String], width: usize) -> Vec<Span<'static>> {
+    let Some(first) = members.first() else { return Vec::new() };
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let name = |m: &str, text: String| Span::styled(text, Style::new().fg(crate::genius::color(m)).add_modifier(Modifier::DIM));
+    let fits = |s: &[Span]| s.iter().map(|s| s.width()).sum::<usize>() <= width;
+    let mut full = vec![Span::styled("[", dim)];
+    for (i, m) in members.iter().enumerate() {
+        if i > 0 {
+            full.push(Span::styled(", ", dim));
+        }
+        full.push(name(m, m.clone()));
+    }
+    full.push(Span::styled("]", dim));
+    if fits(&full) {
+        return full;
+    }
+    if members.len() > 1 {
+        let more = vec![
+            Span::styled("[", dim),
+            name(first, first.clone()),
+            Span::styled(format!(" +{}]", members.len() - 1), dim),
+        ];
+        if fits(&more) {
+            return more;
+        }
+    }
+    let room = width.saturating_sub(2);
+    if room < 2 {
+        return Vec::new();
+    }
+    vec![Span::styled("[", dim), name(first, ellipsize(first, room)), Span::styled("]", dim)]
+}
+
 fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
-    let shown = app.translation().is_some_and(|t| app.lyric_lines().is_some_and(|l| l.len() == t.len()));
+    let shown =app.translation().is_some_and(|t| app.lyric_lines().is_some_and(|l| l.len() == t.len()));
     if app.browse_expired() {
         app.browse = 0.0;
     }
@@ -1564,6 +1865,8 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             flats,
             context: app.args.chords_context as usize,
             in_break,
+            members: current.and_then(|c| app.members.get(c)).map_or(&[][..], |m| m.as_slice()),
+            reserve_tag: app.members.iter().any(|m| !m.is_empty()),
         };
         let rows = draw_focus(f, inner, &th, &focus);
         // top = 0: the row index is the offset from the panel's top edge

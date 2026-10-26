@@ -813,13 +813,94 @@ fn compact_font_takes_over_when_the_normal_one_is_too_wide() {
     assert!(bigfont::render_scaled("HELLO", 20, 4, 1).is_none());
     let rows = bigfont::render_compact("HELLO", 20, 4).unwrap();
     assert_eq!((rows.len(), rows[0].chars().count()), (3, 19));
-    let stage = ui::big_stage("Hello world", 20, 12, 3).unwrap();
+    let stage = ui::big_stage("Hello world", 20, 12, 3, 0).unwrap();
     assert_eq!(stage.len(), 3 + 1 + 3);
     // too short for two pieces plus room for neighbours: bold text instead
-    assert!(ui::big_stage("Hello world", 20, 8, 3).is_none());
+    assert!(ui::big_stage("Hello world", 20, 8, 3, 0).is_none());
     // wide panels still get the largest scale that fits
-    assert_eq!(ui::big_stage("HI", 60, 40, 3).unwrap().len(), 12);
-    assert_eq!(ui::big_stage("HI", 60, 12, 3).unwrap().len(), 8);
+    assert_eq!(ui::big_stage("HI", 60, 40, 3, 0).unwrap().len(), 12);
+    assert_eq!(ui::big_stage("HI", 60, 12, 3, 0).unwrap().len(), 8);
+    // a spare row for the member tag can shrink the stage by one step
+    assert_eq!(ui::big_stage("HI", 60, 10, 3, 0).unwrap().len(), 8);
+    assert_eq!(ui::big_stage("HI", 60, 10, 3, 1).unwrap().len(), 4);
+}
+
+#[test]
+fn member_tag_shows_above_the_big_line_and_never_overlaps() {
+    use clap::Parser;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let args = cli::Args::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    let lines: Vec<String> = ["first line", "HI THERE", "third line"].map(String::from).to_vec();
+    let aligned = chords::Aligned {
+        per_line: vec![vec![], vec![(0, "Am".into())], vec![]],
+        matched: 1,
+        total: 3,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![], vec![], vec![]],
+    };
+    let members = ["Jimin".to_string(), "V".to_string()];
+    let run = |w: u16, h: u16, with_chords: bool, members: &[String], reserve: bool| -> (Vec<String>, Vec<Option<usize>>) {
+        let fc = ui::Focus {
+            lines: &lines,
+            current: Some(1),
+            gap: 0,
+            scale: 1,
+            chords: with_chords.then_some(&aligned),
+            tr: 0,
+            flats: false,
+            context: 99,
+            in_break: false,
+            members,
+            reserve_tag: reserve,
+        };
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut hits = Vec::new();
+        term.draw(|f| hits = ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc)).unwrap();
+        let b = term.backend().buffer();
+        ((0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect::<String>()).collect(), hits)
+    };
+    let row_of = |text: &[String], needle: &str| text.iter().position(|r| r.contains(needle));
+    // without chords: the tag is the row right above the big glyphs (the stage's first row)
+    let (text, hits) = run(40, 24, false, &members, true);
+    let tag = row_of(&text, "[Jimin, V]").expect("tag drawn");
+    assert_eq!(hits[tag], None, "the tag row belongs to no lyric line");
+    let stage_top = text.iter().position(|r| r.contains('█') || r.contains('▀') || r.contains('▄')).unwrap();
+    assert_eq!(tag + 1, stage_top, "{text:#?}");
+    // with chords: chord summary directly above the big text, the tag above that
+    let (text, _) = run(40, 24, true, &members, true);
+    let (tag, chord) = (row_of(&text, "[Jimin, V]").unwrap(), row_of(&text, "Am").unwrap());
+    assert_eq!(tag + 1, chord, "{text:#?}");
+    // the earlier line stays above the tag, nothing is overwritten
+    let first = row_of(&text, "first line").unwrap();
+    assert!(first < tag, "{text:#?}");
+    // no member data: nothing drawn, and the stage keeps its place for lines without a tag
+    let (text, _) = run(40, 24, false, &[], false);
+    assert!(row_of(&text, "[").is_none(), "{text:#?}");
+    // narrow panels shorten the tag, whole or with an ellipsis, and never overflow the row
+    for w in [6u16, 8, 10, 12, 14, 20] {
+        let (text, _) = run(w, 24, true, &members, true);
+        for r in &text {
+            assert_eq!(r.chars().count(), w as usize);
+        }
+        if let Some(t) = text.iter().find(|r| r.contains('[') && r.contains(']')) {
+            let t = t.trim();
+            assert!(t.starts_with('[') && t.ends_with(']'), "w={w} {t:?}");
+        }
+    }
+    let three = ["Jimin".to_string(), "V".to_string(), "Jungkook".to_string()];
+    let (text, _) = run(12, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jimin +2]")), "{text:#?}");
+    let (text, _) = run(7, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jimin]")), "{text:#?}");
+    let (text, _) = run(6, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jim…]")), "{text:#?}");
+    // a short panel keeps what it can: no panic, the tag only appears where a row is free
+    for h in 1..=14u16 {
+        let (text, _) = run(30, h, true, &members, true);
+        assert_eq!(text.len(), h as usize);
+    }
 }
 
 #[test]
@@ -847,6 +928,8 @@ fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
         flats: false,
         context: 99,
         in_break,
+        members: &[],
+        reserve_tag: false,
     };
     let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
     let area = Rect::new(0, 0, 40, 24);
@@ -1459,7 +1542,10 @@ fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
     assert_eq!(app::action_for(KeyCode::Char('?')), Some(A::Help));
     assert_eq!(app::action_for(KeyCode::Esc), Some(A::Quit));
     assert_eq!(app::action_for(KeyCode::Char('z')), Some(A::Shuffle));
-    assert_eq!(app::action_for(KeyCode::Char('x')), None);
+    assert_eq!(app::action_for(KeyCode::Char('y')), None);
+    assert_eq!(app::action_for(KeyCode::Char('x')), Some(A::BigScale));
+    assert_eq!(app::action_for(KeyCode::Char('i')), Some(A::LineSpacing));
+    assert_eq!(app::action_for(KeyCode::Char('u')), Some(A::LyricPad));
     assert_eq!(app::action_for(KeyCode::Char('o')), Some(A::Library));
     assert_eq!(app::action_for(KeyCode::Char('f')), Some(A::Like));
     assert_eq!(app::action_for(KeyCode::Char('H')), Some(A::PlayHere));
@@ -1469,6 +1555,7 @@ fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
         A::SyncLater, A::VolUp, A::VolDown, A::Mute, A::ToggleLyrics, A::ToggleBig,
         A::ToggleCava, A::ToggleChords, A::TransposeUp, A::TransposeDown, A::CapoDown,
         A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help, A::Library, A::Like, A::PlayHere,
+        A::BigScale, A::LineSpacing, A::LyricPad,
     ] {
         assert!(BINDS.iter().any(|b| b.action == a), "{a:?} has no key");
     }
@@ -1693,4 +1780,324 @@ fn genius_lookup_with_fake_site_and_cache() {
 #[test]
 fn percent() {
     assert_eq!(util::percent_decode("/a%20b/c%C3%A9.jpg"), "/a b/cé.jpg");
+}
+
+#[test]
+fn control_row_never_draws_half_a_button() {
+    use ui::plan_controls;
+    for width in 0..=160u16 {
+        for shuffle in [None, Some(false), Some(true)] {
+            for rep in [None, Some(false), Some(true)] {
+                for (playing, volume, row_ok) in [(true, true, true), (false, true, false), (true, false, true), (false, false, false)] {
+                    let p = plan_controls(width, shuffle, rep, playing, volume, row_ok);
+                    let ctx = format!("w={width} sh={shuffle:?} rep={rep:?} play={playing} vol={volume} row={row_ok}");
+                    // every button is whole, inside the row, and none touches the next
+                    let mut end = 0u16;
+                    for b in &p.buttons {
+                        let w = b.label.chars().count() as u16;
+                        assert!(b.x >= end && b.x + w <= width, "{ctx}: {b:?}");
+                        end = b.x + w + 1;
+                    }
+                    if let Some((k, x)) = p.vol {
+                        assert!(volume && x + k.width() <= width, "{ctx}: volume {k:?} at {x}");
+                        if p.vol_row {
+                            assert!(row_ok, "{ctx}");
+                        } else {
+                            assert!(x >= end, "{ctx}: volume overlaps the buttons");
+                        }
+                    } else {
+                        assert!(!p.vol_row, "{ctx}");
+                    }
+                    // play stays longest; the whole transport group once it fits
+                    let ids: Vec<u8> = p.buttons.iter().map(|b| b.id).collect();
+                    if width >= 4 {
+                        assert!(ids.contains(&3), "{ctx}: no play button");
+                    }
+                    if width >= 16 {
+                        assert!(ids.contains(&2) && ids.contains(&4), "{ctx}");
+                    }
+                    // shuffle / repeat only exist for what the player reports
+                    assert!(!ids.contains(&0) || shuffle.is_some(), "{ctx}");
+                    assert!(!ids.contains(&1) || rep.is_some(), "{ctx}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn control_row_gives_up_in_a_fixed_order() {
+    use ui::{VolKind, plan_controls};
+    let ids = |p: &ui::ControlPlan| p.buttons.iter().map(|b| b.id).collect::<Vec<_>>();
+    let wide = plan_controls(120, Some(false), Some(false), true, true, true);
+    assert_eq!(ids(&wide), [0, 1, 2, 3, 4]);
+    assert_eq!(wide.vol.map(|v| v.0), Some(VolKind::Full));
+    assert!(!wide.vol_row);
+    assert!(wide.buttons[0].label.starts_with("[ shuf"));
+    // three blank columns between buttons
+    let (a, b) = (&wide.buttons[0], &wide.buttons[1]);
+    assert_eq!(b.x - (a.x + a.label.chars().count() as u16), 3);
+    // volume moves below the buttons before anything is shortened
+    let mid = plan_controls(60, Some(false), Some(false), true, true, true);
+    assert!(mid.vol_row && ids(&mid) == [0, 1, 2, 3, 4] && mid.buttons[2].label == "[ prev ]");
+    // then compact labels
+    let compact = plan_controls(40, Some(false), Some(false), true, true, true);
+    assert_eq!(compact.buttons[2].label, "[<<]");
+    // then shuffle / repeat go, the volume shrinks, and prev / play / next are kept longest
+    let small = plan_controls(20, Some(false), Some(false), true, true, false);
+    assert_eq!(ids(&small), [2, 3, 4]);
+    assert_eq!(small.vol, None);
+    assert_eq!(ids(&plan_controls(10, None, None, true, false, false)), [3, 4]);
+    assert_eq!(ids(&plan_controls(9, None, None, true, false, false)), [3]);
+    assert_eq!(ids(&plan_controls(4, None, None, false, false, false)), [3]);
+    assert!(plan_controls(3, None, None, false, false, false).buttons.is_empty());
+}
+
+#[test]
+fn left_panel_keeps_the_controls_when_short() {
+    for h in 0..=60u16 {
+        for meta in [0u16, 3, 7] {
+            for vol_row in [false, true] {
+                let l = ui::left_heights(h, meta, vol_row);
+                let sum = l.cover + l.gap_cover + l.meta + l.gap_meta + l.prog + l.gap_prog + l.btn + l.vol;
+                assert_eq!(sum, h, "h={h} meta={meta} {l:?}");
+                if h >= 1 {
+                    assert_eq!(l.btn, 1, "buttons first: h={h}");
+                }
+                // the cover is the first to go, then metadata
+                if l.meta < meta && meta > 0 {
+                    assert_eq!(l.cover, 0, "h={h} meta={meta} {l:?}");
+                }
+                if l.cover > 0 {
+                    assert!(l.meta == meta || meta == 0, "h={h} meta={meta} {l:?}");
+                }
+                assert!(l.vol == 0 || vol_row);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn control_row_survives_every_window_size() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let mut s = snap("Band", "Song", "LP");
+    s.shuffle = Some(true);
+    s.repeat = Some(player::Loop::None);
+    s.volume = Some(0.65);
+    s.player = "spotify".into();
+    for w in [10u16, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 100, 120] {
+        for h in [4u16, 5, 6, 8, 10, 12, 16, 20, 30, 40] {
+            let mut app = test_app();
+            app.apply(AppEvent::Player(Some(s.clone())));
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let area = Rect::new(0, 0, w, h);
+            let hits = &app.hits;
+            let rects = [
+                ("shuffle", hits.shuffle), ("repeat", hits.repeat), ("prev", hits.prev), ("play", hits.play),
+                ("next", hits.next), ("vol-", hits.vol_minus), ("vol%", hits.vol_pct), ("vol+", hits.vol_plus),
+            ];
+            let shown: Vec<_> = rects.iter().filter(|r| r.1.width > 0).collect();
+            for (name, r) in &shown {
+                assert!(area.contains(ratatui::layout::Position::new(r.x, r.y)) && r.right() <= w && r.bottom() <= h, "{w}x{h} {name} {r:?}");
+                // what is drawn under a hit area is a whole button: it starts with `[` and ends with `]`
+                let b = term.backend().buffer();
+                let text: String = (r.x..r.right()).map(|x| b[(x, r.y)].symbol()).collect();
+                if *name != "vol%" || text.starts_with('[') {
+                    assert!(text.starts_with('[') && text.ends_with(']'), "{w}x{h} {name}: {text:?}");
+                }
+            }
+            for (i, (an, a)) in shown.iter().enumerate() {
+                for (bn, b) in &shown[i + 1..] {
+                    let apart = a.y != b.y || a.right() <= b.x || b.right() <= a.x;
+                    assert!(apart, "{w}x{h}: {an} {a:?} overlaps {bn} {b:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn key_hints_drop_whole_items_never_cut_one() {
+    let items = [(3u8, "tab/1-5"), (1, "enter play"), (2, "→/← open/back"), (4, "a queue"), (5, "f like"), (1, "esc")];
+    let full = "tab/1-5 · enter play · →/← open/back · a queue · f like · esc";
+    assert_eq!(ui::fit_hints(&items, 200), full);
+    for w in 0..=full.chars().count() {
+        let got = ui::fit_hints(&items, w);
+        assert!(util::width(&got) <= w, "{w}: {got:?}");
+        // every shown piece is a whole item, in the original order
+        let pieces: Vec<&str> = if got.is_empty() { vec![] } else { got.split(" · ").collect() };
+        let mut at = 0;
+        for p in pieces {
+            at += items[at..].iter().position(|i| i.1 == p).expect(p) + 1;
+        }
+    }
+    // the highest number goes first, then the next
+    assert_eq!(ui::fit_hints(&items, 54), "tab/1-5 · enter play · →/← open/back · a queue · esc");
+    assert_eq!(ui::fit_hints(&items, 12), "enter play");
+    assert_eq!(ui::fit_hints(&items, 9), "esc");
+    assert_eq!(ui::fit_hints(&items, 2), "");
+    assert_eq!(ui::ellipsize("hello world", 8), "hello w…");
+    assert_eq!(ui::ellipsize("hi", 8), "hi");
+}
+
+#[tokio::test]
+async fn runtime_keys_cycle_size_spacing_and_padding() {
+    use app::Action as A;
+    let mut app = test_app();
+    let mut after = |a: A, get: fn(&app::App) -> u16, n: usize| -> Vec<u16> {
+        (0..n).map(|_| { app.run(a); get(&app) }).collect()
+    };
+    assert_eq!(after(A::BigScale, |a| a.args.big_scale, 4), [2, 3, 1, 2]);
+    assert_eq!(after(A::LineSpacing, |a| a.args.lyric_spacing, 5), [2, 3, 0, 1, 2]);
+    assert_eq!(after(A::LyricPad, |a| a.args.lyric_pad, 7), [2, 4, 6, 8, 10, 0, 2]);
+    assert!(app.note_text().is_some_and(|n| n.contains("side padding")));
+    // an odd value from the config can't step past the range
+    app.args.lyric_pad = 9;
+    app.run(A::LyricPad);
+    assert_eq!(app.args.lyric_pad, 0);
+    // the three keys are plain lowercase letters: no Shift, no AltGr on a Swedish layout
+    for (k, a) in [('x', A::BigScale), ('i', A::LineSpacing), ('u', A::LyricPad)] {
+        let b = app::BINDS.iter().find(|b| b.action == a).unwrap();
+        assert_eq!(b.codes, [crossterm::event::KeyCode::Char(k)]);
+        assert!(b.group == "Lyrics" && k.is_ascii_lowercase());
+    }
+}
+
+#[test]
+fn fine_hangul_composes_every_syllable() {
+    use bigfont::{Font, dump};
+    let mut seen = std::collections::HashSet::new();
+    for u in 0xAC00u32..=0xD7A3 {
+        let c = char::from_u32(u).unwrap();
+        let g = dump(c, Font::Fine);
+        assert_eq!((g.len(), g[0].chars().count()), (12, 12), "{c}");
+        assert!(g.iter().any(|r| r.contains('#')), "{c} is empty");
+        seen.insert(g);
+    }
+    // 12×12 tells syllables apart better than the 8×8 grid (10 049 distinct of 11 172)
+    assert!(seen.len() >= 10_400, "{} distinct", seen.len());
+    // golden: 가 = ㄱ with ㅏ, and 한 = ㅎ ㅏ ㄴ
+    assert_eq!(
+        dump('가', Font::Fine),
+        [
+            "#######.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.####",
+            "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...",
+        ]
+    );
+    assert_eq!(
+        dump('한', Font::Fine),
+        [
+            "...#....#...", "#######.#...", "..###...#...", ".#...#..####", ".#...#..#...", ".#...#..#...",
+            "..###...#...", "............", ".#..........", ".#..........", ".#..........", ".##########.",
+        ]
+    );
+    // Latin letters sit beside Hangul on the same 12 rows
+    assert_eq!(dump('A', Font::Fine).iter().filter(|r| r.contains('#')).count(), 7);
+}
+
+#[test]
+fn hangul_lines_use_the_fine_font_and_fall_back() {
+    // "안녕": 2 × 13 − 1 columns, 6 text rows (12 pixel rows), against 17 columns × 4 rows
+    let fine = ui::big_stage("안녕", 60, 20, 1, 0).unwrap();
+    assert_eq!((fine.len(), fine[0].chars().count()), (6, 25));
+    // a panel too short for it keeps the 8×8 font, one too narrow too (13 > 9 columns each)
+    assert_eq!(ui::big_stage("안녕", 60, 7, 1, 0).unwrap().len(), 4);
+    let narrow = ui::big_stage("안녕", 17, 20, 1, 0).unwrap();
+    assert_eq!((narrow.len(), narrow[0].chars().count()), (4, 17));
+    // Latin lines are unchanged, and mixed lines work
+    assert_eq!(ui::big_stage("Hi there", 60, 20, 1, 0).unwrap().len(), 4);
+    assert!(ui::big_stage("Hi 안녕", 60, 20, 1, 0).unwrap().len() == 6);
+    // scale applies to the fine font too, and the compact font still can't draw Hangul
+    assert_eq!(ui::big_stage("안녕", 80, 30, 2, 0).unwrap().len(), 12);
+    assert!(bigfont::render_compact("안녕", 60, 3).is_none());
+}
+
+#[test]
+fn chords_sit_above_their_glyphs_in_the_big_layout() {
+    use clap::Parser;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let args = cli::Args::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    // H(6) I(6) space(3) T(6): "T" starts at column 15, "I" at 6
+    let lines: Vec<String> = vec!["HI TO".to_string()];
+    let aligned = chords::Aligned {
+        per_line: vec![vec![(0, "Am".into()), (1, "G".into()), (3, "C".into())]],
+        matched: 1,
+        total: 1,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![]],
+    };
+    let fc = ui::Focus {
+        lines: &lines,
+        current: Some(0),
+        gap: 0,
+        scale: 1,
+        chords: Some(&aligned),
+        tr: 0,
+        flats: false,
+        context: 99,
+        in_break: false,
+        members: &[],
+        reserve_tag: false,
+    };
+    let (w, h) = (40u16, 12u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut hits = Vec::new();
+    term.draw(|f| hits = ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc)).unwrap();
+    let b = term.backend().buffer();
+    let screen: Vec<String> = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect()).collect();
+    let stage = screen.iter().position(|r| r.contains('█') || r.contains('▀') || r.contains('▄')).unwrap();
+    // "HI TO" is 6+6+3+6+5 = 26 columns wide, centred in 40: starts at column 7
+    let left = (40 - 26) / 2;
+    let chord_row = &screen[stage - 1];
+    assert_eq!(chord_row.find("Am"), Some(left), "{screen:#?}");
+    // G sits over the I (6 columns on); C over the T (15 on)
+    assert_eq!(chord_row.chars().position(|c| c == 'G'), Some(left + 6), "{chord_row:?}");
+    assert_eq!(chord_row.chars().position(|c| c == 'C'), Some(left + 15), "{chord_row:?}");
+    assert_eq!(hits[stage - 1], Some(0), "the chord row belongs to the active line");
+    // a chord on the space goes over the next glyph (T), one past the end over the last
+    let space = chords::Aligned { per_line: vec![vec![(2, "Em".into()), (9, "F".into())]], ..aligned.clone() };
+    let fc2 = ui::Focus { chords: Some(&space), ..fc };
+    term.draw(|f| { ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc2); }).unwrap();
+    let b = term.backend().buffer();
+    let row: String = (0..w).map(|x| b[(x, stage as u16 - 1)].symbol()).collect();
+    assert_eq!(row.find("Em"), Some(left + 15), "{row:?}");
+    assert!(row.contains('F'), "{row:?}");
+    // wrapped pieces get their own chord row, in the blank row above each piece
+    let wrap_lines: Vec<String> = vec!["HI TO GO".to_string()];
+    let wrapped = chords::Aligned {
+        per_line: vec![vec![(0, "Am".into()), (6, "G".into())]],
+        matched: 1,
+        total: 1,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![]],
+    };
+    let fc3 = ui::Focus { lines: &wrap_lines, chords: Some(&wrapped), ..fc2 };
+    let (w, h) = (30u16, 16u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| { ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc3); }).unwrap();
+    let b = term.backend().buffer();
+    let screen: Vec<String> = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect()).collect();
+    let am = screen.iter().position(|r| r.contains("Am")).unwrap();
+    let g = screen.iter().position(|r| r.contains('G') && !r.contains('█')).unwrap();
+    assert!(g > am + 4, "second piece, lower down: Am row {am}, G row {g}");
+    assert!(screen[g].trim() == "G", "{:?}", screen[g]);
+}
+
+#[test]
+fn hangul_chords_follow_the_wide_glyphs() {
+    let r = bigfont::render_map("안녕 하", 60, 3, 1, bigfont::Font::Fine).unwrap();
+    // 안 at 0, 녕 at 13, space 4, 하 at 13 + 13 + 4 = 30
+    assert_eq!(r.chunks.len(), 1);
+    assert_eq!(r.chunks[0].cols, [(0, 0), (1, 13), (3, 30)]);
+    assert_eq!(r.chunks[0].width, 12 + 1 + 12 + 1 + 4 + 12);
+    assert_eq!(r.column_of(1), Some((0, 13)));
+    assert_eq!(r.column_of(2), Some((0, 30)), "a space goes to the next glyph");
+    assert_eq!(r.column_of(99), Some((0, 30)), "past the end: the last glyph");
+    // scaled: columns scale too; "…" maps all three dots to the one source character
+    let r = bigfont::render_map("A…B", 60, 3, 2, bigfont::Font::Normal).unwrap();
+    assert_eq!(r.chunks[0].cols, [(0, 0), (1, 12), (1, 24), (1, 36), (2, 48)]);
 }
