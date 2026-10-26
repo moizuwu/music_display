@@ -3266,5 +3266,25 @@ async fn use_spotifyd_is_a_setting_and_gates_the_device_name() {
     assert!(!app.spot.as_ref().unwrap().is_local("Living Room PC"));
 }
 
+#[tokio::test]
+async fn lyric_click_needs_the_text_not_the_blank_space_beside_it() {
+    let mut app = test_app();
+    app.lyrics = app::LyricsState::Ready(lyrics::Lyrics::Synced(vec![(10.0, "a".into()), (20.0, "line".into())]));
+    app.lyric_hits = app::LyricHits {
+        area: Rect::new(0, 0, 40, 4),
+        top: 0,
+        rows: vec![Some(0), Some(1), None, None],
+        spans: vec![(19, 20), (18, 22), (0, 40), (0, 40)],
+    };
+    click(&mut app, 5, 1); // beside the text
+    assert!(app.anchor.0 < 5.0, "{}", app.anchor.0);
+    click(&mut app, 25, 1);
+    assert!(app.anchor.0 < 5.0, "{}", app.anchor.0);
+    click(&mut app, 20, 1); // on it
+    assert!((app.anchor.0 - 20.0).abs() < 1.0, "{}", app.anchor.0);
+    click(&mut app, 19, 0);
+    assert!((app.anchor.0 - 10.0).abs() < 1.0, "{}", app.anchor.0);
+}
+
 // `[keys]` in config.toml: src/tests/keys_tests.rs
 mod keys_tests;

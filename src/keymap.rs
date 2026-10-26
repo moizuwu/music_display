@@ -42,6 +42,7 @@ impl Action {
             Action::Diagrams => "diagrams",
             Action::Minimal => "minimal",
             Action::Translate => "translate",
+            Action::TranslateBoth => "translate_both",
             Action::Settings => "settings",
             Action::Library => "library",
             Action::Like => "like",

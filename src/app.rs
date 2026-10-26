@@ -44,6 +44,7 @@ pub enum Action {
     Diagrams,
     Minimal,
     Translate,
+    TranslateBoth,
     Settings,
     Library,
     Like,
@@ -111,7 +112,8 @@ pub const BINDS: &[Bind] = &[
     bind!("Lyrics", "PgUp", "browse a page up", [KeyCode::PageUp], BrowsePageUp),
     bind!("Lyrics", "PgDn", "browse a page down", [KeyCode::PageDown], BrowsePageDown),
     bind!("Lyrics", "End", "back to the playing line", [KeyCode::End], BrowseEnd),
-    bind!("Lyrics", "K", "translate lyrics on / off", [KeyCode::Char('K')], Translate),
+    bind!("Lyrics", "K", "translate lyrics on / off (translation only)", [KeyCode::Char('K')], Translate),
+    bind!("Lyrics", "k", "translation under each original line on / off", [KeyCode::Char('k')], TranslateBoth),
     bind!("View", "s / S", "settings menu", [KeyCode::Char('s'), KeyCode::Char('S')], Settings),
     bind!("View", "?", "this help", [KeyCode::Char('?')], Help),
     bind!("View", "q / Esc", "quit", [KeyCode::Char('q'), KeyCode::Esc], Quit),
@@ -144,7 +146,7 @@ pub const MOUSE: &[(&str, &str, &str)] = &[
     ("Playback", "click - / +", "volume down / up"),
     ("Playback", "click vol %", "mute / restore"),
     ("Playback", "wheel: volume", "volume up / down"),
-    ("Lyrics", "click a line", "seek to that line"),
+    ("Lyrics", "click a line's text", "seek to that line"),
 ];
 
 /// The action of `code` in the default table (tests; the program uses `App::keys`).
@@ -248,6 +250,7 @@ pub enum Setting {
     SpotifyLogout,
     SpotifyDevice,
     UseSpotifyd,
+    KillSpotifyd,
     SpotifyButton,
     SpotifyQueueTab,
 }
@@ -319,6 +322,7 @@ impl Setting {
         Setting::SpotifyLogout,
         Setting::SpotifyDevice,
         Setting::UseSpotifyd,
+        Setting::KillSpotifyd,
         Setting::SpotifyButton,
         Setting::SpotifyQueueTab,
     ];
@@ -352,6 +356,7 @@ impl Setting {
             Setting::SpotifyLogout => "Log out",
             Setting::SpotifyDevice => "spotifyd device name",
             Setting::UseSpotifyd => "Use spotifyd",
+            Setting::KillSpotifyd => "Stop spotifyd on exit",
             Setting::SpotifyButton => "Library button (top left)",
             Setting::SpotifyQueueTab => "Queue tab in the library",
         }
@@ -386,6 +391,7 @@ impl Setting {
             Setting::SpotifyLogin | Setting::SpotifyLogout => &[],
             Setting::SpotifyDevice => &["spotify_device"],
             Setting::UseSpotifyd => &["use_spotifyd"],
+            Setting::KillSpotifyd => &["kill_spotifyd_on_exit"],
             Setting::SpotifyButton => &["spotify_button"],
             Setting::SpotifyQueueTab => &["spotify_queue_tab"],
         }
@@ -427,6 +433,8 @@ pub struct LyricHits {
     pub top: i64,
     /// Per row: the lyric line it belongs to, or `None` if not clickable.
     pub rows: Vec<Option<usize>>,
+    /// Per row: the columns `[x0, x1)` its text covers; a click outside them does nothing.
+    pub spans: Vec<(u16, u16)>,
 }
 
 pub struct App {
@@ -442,7 +450,7 @@ pub struct App {
 
     pub snap: Option<Snapshot>,
     /// Position anchor for smooth interpolation between polls.
-    anchor: (f64, Instant),
+    pub(crate) anchor: (f64, Instant),
     track_key: u64,
     art_url: String,
 
@@ -476,6 +484,8 @@ pub struct App {
 
     pub hits: Hits,
     pub lyric_hits: LyricHits,
+    /// The spotifyd this program started (never one that was already running).
+    pub spotifyd: Option<std::process::Child>,
     /// Player volume, 0..=1 (`None` until the player reports one).
     pub volume: Option<f64>,
     /// Last non-zero volume, restored when un-muting.
@@ -509,6 +519,8 @@ pub struct App {
     pub settings_note: Option<String>,
     /// `K`: show translated lyrics.
     pub translate_on: bool,
+    /// `k`: the translation is shown under each original line instead of replacing it.
+    pub translate_both: bool,
     pub translate_state: TranslateState,
     /// The (song, language) request currently running, so toggling doesn't duplicate it.
     translate_inflight: Option<(u64, String)>,
@@ -613,6 +625,7 @@ impl App {
             tasks: Vec::new(),
             hits: Hits::default(),
             lyric_hits: LyricHits::default(),
+            spotifyd: None,
             volume: None,
             vol_last: 0.5,
             vol_hold: Instant::now() - Duration::from_secs(5),
@@ -633,6 +646,7 @@ impl App {
             skip_cursor: 0,
             settings_note: None,
             translate_on: false,
+            translate_both: false,
             translate_state: TranslateState::Idle,
             translate_inflight: None,
             translate_task: None,
@@ -1330,6 +1344,20 @@ impl App {
 
     fn toggle_translate(&mut self) {
         self.translate_on = !self.translate_on;
+        self.translate_both = false;
+        self.snap_scroll = true;
+        if self.translate_on {
+            self.show_lyrics = true;
+            self.translate_state = TranslateState::Idle;
+            self.ensure_translation();
+        }
+    }
+
+    /// `k`: translation on with the original line kept; again = off.
+    fn toggle_translate_both(&mut self) {
+        let off = self.translate_on && self.translate_both;
+        self.translate_on = !off;
+        self.translate_both = !off;
         self.snap_scroll = true;
         if self.translate_on {
             self.show_lyrics = true;
@@ -1389,6 +1417,7 @@ impl App {
                 _ => self.args.spotify_device.clone(),
             },
             Setting::UseSpotifyd => onoff(self.args.use_spotifyd),
+            Setting::KillSpotifyd => onoff(!self.args.no_kill_spotifyd),
             Setting::SpotifyButton => onoff(!self.args.no_spotify_button),
             Setting::SpotifyQueueTab => onoff(!self.args.no_spotify_queue_tab),
         }
@@ -1517,9 +1546,15 @@ impl App {
             Setting::SpotifyLogout => self.logout_spotify(),
             Setting::UseSpotifyd => {
                 self.args.use_spotifyd = !self.args.use_spotifyd;
+                if !self.args.use_spotifyd {
+                    self.stop_spotifyd();
+                } else if self.spotifyd.is_none() {
+                    self.spotifyd = crate::spotifyd::start();
+                }
                 // the running client matches "this PC" by this name: rebuild it
                 self.restart_spotify();
             }
+            Setting::KillSpotifyd => self.args.no_kill_spotifyd = !self.args.no_kill_spotifyd,
             Setting::SpotifyButton => self.args.no_spotify_button = !self.args.no_spotify_button,
             Setting::SpotifyQueueTab => {
                 self.args.no_spotify_queue_tab = !self.args.no_spotify_queue_tab;
@@ -1581,6 +1616,7 @@ impl App {
             ("spotify", B(self.args.spotify)),
             ("spotify_device", S(self.args.spotify_device.clone())),
             ("use_spotifyd", B(self.args.use_spotifyd)),
+            ("kill_spotifyd_on_exit", B(!self.args.no_kill_spotifyd)),
             ("spotify_button", B(!self.args.no_spotify_button)),
             ("spotify_queue_tab", B(!self.args.no_spotify_queue_tab)),
         ]
@@ -1755,7 +1791,7 @@ impl App {
                 } else if self.hits.vol_pct.contains(pos) {
                     self.toggle_mute();
                 } else if self.lyric_hits.area.contains(pos) {
-                    self.click_lyric(pos.y);
+                    self.click_lyric(pos.x, pos.y);
                 }
             }
             Event::Mouse(m)
@@ -1841,6 +1877,7 @@ impl App {
             Action::BrowsePageDown => self.browse_by(8.0),
             Action::BrowseEnd => self.browse = 0.0,
             Action::Translate => self.toggle_translate(),
+            Action::TranslateBoth => self.toggle_translate_both(),
             Action::Settings => {
                 self.show_settings = true;
                 if self.login_task.is_none() {
@@ -1896,16 +1933,18 @@ impl App {
     }
 
     /// Seek to the lyric line drawn at terminal row `y` (synced lyrics only).
-    fn click_lyric(&mut self, y: u16) {
+    fn click_lyric(&mut self, x: u16, y: u16) {
         let h = &self.lyric_hits;
         if y < h.area.y {
             return;
         }
         let idx = h.top + (y - h.area.y) as i64;
-        let Some(Some(li)) = usize::try_from(idx).ok().and_then(|i| h.rows.get(i)).copied()
-        else {
+        let Some(i) = usize::try_from(idx).ok() else { return };
+        let Some(Some(li)) = h.rows.get(i).copied() else { return };
+        // only the text itself is a target, not the blank space beside it
+        if h.spans.get(i).is_some_and(|&(x0, x1)| x < x0 || x >= x1) {
             return;
-        };
+        }
         let LyricsState::Ready(Lyrics::Synced(l)) = &self.lyrics else {
             return;
         };
@@ -2080,6 +2119,12 @@ impl App {
     }
 
     /// Rebuild the client (new Client ID, device name, token).
+    fn stop_spotifyd(&mut self) {
+        if let Some(mut c) = self.spotifyd.take() {
+            crate::spotifyd::stop(&mut c);
+        }
+    }
+
     fn restart_spotify(&mut self) {
         if self.spot.is_some() {
             self.stop_spotify();
@@ -2816,5 +2861,13 @@ impl App {
     /// Part of the layout (panel, button) changed since `before`: the screen needs a clean redraw.
     pub fn layout_key(&self) -> (bool, bool) {
         (self.lib.hits.panel, self.lib.hits.button.width > 0)
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if !self.args.no_kill_spotifyd {
+            self.stop_spotifyd();
+        }
     }
 }

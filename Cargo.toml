@@ -20,7 +20,7 @@ ratatui-image = { version = "11.1", default-features = false, features = ["cross
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 
 # Async runtime + plumbing
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal"] }
 futures = "0.3"
 
 # HTTP (MusicBrainz, iTunes, lrclib, cover art) — rustls, no OpenSSL dependency

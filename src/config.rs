@@ -61,6 +61,7 @@ pub const KEYS: &[Key] = &[
     k!("spotify", Kind::Bool, "spotify"),
     k!("spotify_client_id", Kind::Str, "spotify_client_id"),
     k!("use_spotifyd", Kind::Bool, "use_spotifyd"),
+    k!("kill_spotifyd_on_exit", Kind::Bool, "no_kill_spotifyd"),
     k!("spotify_device", Kind::Text, "spotify_device"),
     k!("spotify_button", Kind::Bool, "no_spotify_button"),
     k!("spotify_queue_tab", Kind::Bool, "no_spotify_queue_tab"),
@@ -148,6 +149,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "mouse" => args.no_mouse = !b(),
         "spotify" => args.spotify = b(),
         "spotify_client_id" => args.spotify_client_id = Some(st()),
+        "kill_spotifyd_on_exit" => args.no_kill_spotifyd = !b(),
         "spotify_device" => args.spotify_device = st(),
         "use_spotifyd" => args.use_spotifyd = b(),
         "spotify_button" => args.no_spotify_button = !b(),
@@ -288,6 +290,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     }
     line("spotify_device", q(&args.spotify_device));
     line("use_spotifyd", args.use_spotifyd.to_string());
+    line("kill_spotifyd_on_exit", (!args.no_kill_spotifyd).to_string());
     line("spotify_button", (!args.no_spotify_button).to_string());
     line("spotify_queue_tab", (!args.no_spotify_queue_tab).to_string());
     o

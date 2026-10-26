@@ -323,12 +323,7 @@ impl Steps for Live {
     }
 
     fn spotifyd_running(&self) -> bool {
-        std::fs::read_dir("/proc")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
-            .any(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "spotifyd"))
+        crate::spotifyd::running()
     }
 
     async fn login(&self, client_id: &str) -> Result<()> {

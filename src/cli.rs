@@ -191,6 +191,11 @@ pub struct Args {
     #[arg(long)]
     pub use_spotifyd: bool,
 
+    /// Leave the spotifyd that this program started running when it quits (by default it is
+    /// stopped again) [config: kill_spotifyd_on_exit = false]
+    #[arg(long)]
+    pub no_kill_spotifyd: bool,
+
     /// Hide the library button at the top left (it is only shown while Spotify is on; open the
     /// library with `o` instead) [config: spotify_button = false]
     #[arg(long)]

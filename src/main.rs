@@ -185,6 +185,11 @@ mod ui;
 mod setup;
 
 // ════════════════════════════════════════════════════════════════════════════
+// spotifyd: started with the app when use_spotifyd is on
+// ════════════════════════════════════════════════════════════════════════════
+mod spotifyd;
+
+// ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown
 // ════════════════════════════════════════════════════════════════════════════
 #[tokio::main]
@@ -264,6 +269,9 @@ async fn main() -> Result<()> {
     tokio::spawn(app.ctl.clone().follow_loop(tx.clone()));
     // Spotify Web API: playback on other devices, `local` / volume for this one.
     app.start_spotify();
+    if app.args.use_spotifyd {
+        app.spotifyd = spotifyd::start();
+    }
 
     let res = run(&mut terminal, app, rx).await;
 
@@ -282,8 +290,14 @@ async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - Duration::from_secs(1);
 
+    // SIGTERM / SIGHUP end the loop like `q` does, so the terminal and spotifyd are cleaned up.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+
     loop {
         tokio::select! {
+            _ = term.recv() => break,
+            _ = hup.recv() => break,
             ev = events.next() => match ev {
                 Some(Ok(ev)) => if app.handle(ev) { break },
                 Some(Err(_)) | None => break,

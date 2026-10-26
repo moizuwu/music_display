@@ -1786,7 +1786,13 @@ pub struct Focus<'a> {
 /// middle of the panel (big font if it fits, otherwise bold wrapped text), with the lines
 /// before and after stacked outward from it, each with its chord row when it has chords.
 /// Returns which lyric line each panel row belongs to (for click-to-seek).
+#[cfg(test)]
 pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Option<usize>> {
+    draw_focus_spans(f, inner, th, fc).0
+}
+
+/// [`draw_focus`] plus the columns `[x0, x1)` each panel row's text covers.
+fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> (Vec<Option<usize>>, Vec<(u16, u16)>) {
     let width = inner.width as usize;
     let (lines, c) = (fc.lines, fc.current);
     let names = |v: &[String]| {
@@ -1798,6 +1804,7 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     let bold = Style::new().fg(th.primary()).add_modifier(Modifier::BOLD);
     // which lyric line each panel row belongs to (chord rows and the intro belong to none)
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
+    let spans = std::cell::RefCell::new(vec![(inner.x, inner.right()); inner.height as usize]);
     let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
     type Stage = (Vec<String>, Style, Option<usize>, Option<bigfont::Rendered>);
     let (stage, stage_style, stage_li, map): Stage = match c {
@@ -1818,7 +1825,10 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
 
     let put = |f: &mut Frame, y: i32, li: Option<usize>, text: &str, style: Style| {
         if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
+            let w = (crate::util::width(text) as u16).min(inner.width);
+            let x0 = inner.x + (inner.width - w) / 2;
             hits.borrow_mut()[(y - inner.y as i32) as usize] = li;
+            spans.borrow_mut()[(y - inner.y as i32) as usize] = (x0, x0 + w);
             f.render_widget(
                 Paragraph::new(Line::styled(text.to_string(), style)).alignment(Alignment::Center),
                 Rect { y: y as u16, height: 1, ..inner },
@@ -1830,6 +1840,7 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
         if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
             let w = (crate::util::width(text) as u16).min(inner.width);
             let xs = (inner.x + x as u16).min(inner.right().saturating_sub(w)).max(inner.x);
+            spans.borrow_mut()[(y - inner.y as i32) as usize] = (xs, xs + w);
             f.render_widget(
                 Paragraph::new(Line::styled(text.to_string(), style)),
                 Rect { x: xs, y: y as u16, width: w, height: 1 },
@@ -1933,7 +1944,7 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
             break;
         }
     }
-    hits.into_inner()
+    (hits.into_inner(), spans.into_inner())
 }
 
 /// `[Jimin] ` / `[Jimin, V] ` in each member's colour, dimmed; empty if the tag plus the
@@ -2002,6 +2013,9 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             (_, Some(_)) if shown && app.translate_backend != "google" => {
                 format!("lyrics · translated ({}, {})", app.args.translate_lang, app.translate_backend)
             }
+            (_, Some(_)) if shown && app.translate_both => {
+                format!("lyrics · original + translated ({})", app.args.translate_lang)
+            }
             (_, Some(_)) if shown => format!("lyrics · translated ({})", app.args.translate_lang),
             (TS::Failed(e), _) => format!("lyrics · {e}"),
             _ => "lyrics · translating…".to_string(),
@@ -2057,7 +2071,16 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     // the original words, are carried over to the same relative place in the translation.
     let original = lines.clone();
     let mut lines = lines;
+    // `k`: keep the original and put the translation under it. The fixed big-font layout has
+    // no room for a second line, so there the translation replaces the original as with `K`.
+    let big_focus = app.big_lyrics && !plain && app.browse == 0.0;
+    let both = app.translate_both && !big_focus;
+    let subs: Vec<String> = match app.translation() {
+        Some(t) if both && t.len() == lines.len() => t.clone(),
+        _ => Vec::new(),
+    };
     let translated = match app.translation() {
+        Some(_) if both => false,
         Some(t) if t.len() == lines.len() => {
             for (l, t) in lines.iter_mut().zip(t) {
                 if !t.trim().is_empty() {
@@ -2126,9 +2149,9 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             members: current.and_then(|c| app.members.get(c)).map_or(&[][..], |m| m.as_slice()),
             reserve_tag: app.members.iter().any(|m| !m.is_empty()),
         };
-        let rows = draw_focus(f, inner, &th, &focus);
+        let (rows, spans) = draw_focus_spans(f, inner, &th, &focus);
         // top = 0: the row index is the offset from the panel's top edge
-        app.lyric_hits = crate::app::LyricHits { area: inner, top: 0, rows };
+        app.lyric_hits = crate::app::LyricHits { area: inner, top: 0, rows, spans };
         return;
     }
 
@@ -2194,6 +2217,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             rows.push(Row { li, text, chord_x: Some(x), intro: false, marker: None, gap: Some(m) });
         }
     };
+    let mut sub_rows: std::collections::HashSet<usize> = Default::default();
     let mut starts = Vec::with_capacity(lines.len());
     let mut ends = Vec::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
@@ -2234,6 +2258,14 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+        // `k`: the translation as extra rows of the same line (skipped when it adds nothing)
+        let sub_from = rows.len();
+        if let Some(t) = subs.get(i).filter(|t| !t.trim().is_empty() && t.trim() != l.trim()) {
+            for r in wrap(t, width) {
+                rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None, gap: None });
+            }
+        }
+        sub_rows.extend(sub_from..rows.len());
         ends.push(rows.len());
         // A long silence after this line (solo / instrumental break).
         if !plain && l.trim() != "♪" {
@@ -2304,6 +2336,21 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|r| {
                 (!plain && !r.intro && r.marker.is_none() && r.gap.is_none() && !r.text.is_empty()).then_some(r.li)
+            })
+            .collect(),
+        spans: rows
+            .iter()
+            .map(|r| match r.chord_x {
+                Some(x) => {
+                    let w = (crate::util::width(&r.text) as u16).min(inner.width);
+                    let xs = (inner.x + x as u16).min(inner.right().saturating_sub(w)).max(inner.x);
+                    (xs, xs + w)
+                }
+                None => {
+                    let w = (crate::util::width(&r.text) as u16).min(inner.width);
+                    let x0 = inner.x + (inner.width - w) / 2;
+                    (x0, x0 + w)
+                }
             })
             .collect(),
     };
@@ -2424,6 +2471,12 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             None if plain => Style::new().fg(th.fade(0.35)),
             None => Style::new().fg(th.fade(0.55)),
         };
+        // the translation under an original line is italic and not bold
+        let style = if sub_rows.contains(&(idx as usize)) {
+            style.remove_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC)
+        } else {
+            style
+        };
         // `[Jimin]` tag before the first text row of the active line and its neighbours
         let tag = current
             .filter(|c| li.abs_diff(*c) <= 2)
@@ -2432,6 +2485,11 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             .map(|m| member_tag(m, width, crate::util::width(text.as_str())))
             .filter(|t| !t.is_empty());
         if let Some(tag) = tag {
+            // the tag is part of the row: widen its clickable span to cover it
+            let tag_w: u16 = tag.iter().map(|s| s.width() as u16).sum();
+            let w = (crate::util::width(text.as_str()) as u16 + tag_w).min(inner.width);
+            let x0 = inner.x + (inner.width - w) / 2;
+            app.lyric_hits.spans[idx as usize] = (x0, x0 + w);
             let mut spans: Vec<Span> = tag;
             spans.push(Span::styled(text.as_str(), style));
             f.render_widget(

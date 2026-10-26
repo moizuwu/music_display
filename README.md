@@ -107,7 +107,7 @@ chords_context = 99            # 99 = chords on every line; N = active line + N 
 volume_step = 5                # percent per + / - / wheel notch
 interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
-translate = false              # start with translated lyrics (toggle with K)
+translate = false              # start with translated lyrics (toggle with K; k keeps the original line too)
 translate_lang = "en"          # language lyrics are translated into
 translate_skip = ""              # languages never translated, e.g. "sv,fi"
 translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
@@ -121,7 +121,9 @@ spotify = false                # Spotify Web API features (see "Spotify" below)
 spotify_device = ""            # only if you run spotifyd: its `device_name` (e.g. "Living Room PC"), so it
                                # counts as "this PC". Empty = just the Spotify app on this computer
 use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup): `spotify_device` then
-                               # counts as "this PC"; off = only the Spotify app on this computer does
+                               # counts as "this PC"; off = only the Spotify app on this computer does.
+                               # While on, spotifyd is started with the app (if not already running)
+kill_spotifyd_on_exit = true   # stop the spotifyd this app started when it quits (never one that was already running)
 spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
 spotify_queue_tab = true       # the Queue tab in the library browser
 # [keys]                       # must come last in the file; see "Remapping keys" below
@@ -171,7 +173,8 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | only if you run spotifyd: its Spotify Connect name (the `device_name` in its config, say `Living Room PC`), so it counts as "this PC". Default: empty, which matches only the Spotify app on this computer (named after the host name) and devices of type "Computer". |
-| `--use-spotifyd` | spotifyd is the player on this PC: the `spotify_device` name then counts as "this PC" (for `H`, play and the device list). Off, only the Spotify app on this computer does. `--setup` turns it on for you (see "Setup (spotifyd)" below); also a row in the settings menu. |
+| `--use-spotifyd` | spotifyd is the player on this PC: the `spotify_device` name then counts as "this PC" (for `H`, play and the device list). Off, only the Spotify app on this computer does. While on, `spotifyd --no-daemon` is started together with the app unless one is already running. `--setup` turns it on for you (see "Setup (spotifyd)" below); also a row in the settings menu. |
+| `--no-kill-spotifyd` | leave the spotifyd that this app started running when it quits (by default it is stopped again; a spotifyd that was already running is never touched). Config: `kill_spotifyd_on_exit = false`; also the *Stop spotifyd on exit* row in the settings menu. |
 | `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
 | `--no-spotify-queue-tab` | hide the Queue tab of the library browser (config `spotify_queue_tab = false`; also in the settings menu). |
@@ -190,7 +193,8 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `m` | mute / restore |
 | `,` / `.` | lyric offset −0.1 s / +0.1 s |
 | `l` | show / hide the lyrics |
-| `K` | translate lyrics on / off (cached per song while the app runs) |
+| `K` | translate lyrics on / off: the translation replaces the original line (cached per song while the app runs) |
+| `k` | translation on / off with the original kept: each line is followed by its translation (italic). With big lyrics the translation replaces the line as with `K`. `K` and `k` switch between the two modes |
 | `b` | big-font active line |
 | `x` | big-font size 1 → 2 → 3 → 1 (`big_scale`; the line steps down by itself when it doesn't fit) |
 | `i` | line spacing 0 → 1 → 2 → 3 → 0 (`lyric_spacing`) |
@@ -211,7 +215,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `d` | choose a Spotify device (the list of where Spotify can play; `Enter` moves playback there) |
 | `q` / `Esc` | quit |
 
-Mouse: click the progress bar to seek; click `[ shuf ]   [ rep ]   [ prev ]   [ pause ]   [ next ]   [ - ] [ 65% ] [ + ]` (three blank columns between buttons; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+Mouse: click the progress bar to seek; click `[ shuf ]   [ rep ]   [ prev ]   [ pause ]   [ next ]   [ - ] [ 65% ] [ + ]` (three blank columns between buttons; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click on a lyric line's text to seek to it** (synced lyrics only; works through wrapped lines and chord rows; the blank space beside the text does nothing). Hold Shift to select text.
 
 The control row scales with the window and only ever draws whole buttons. When it gets narrow it gives up, in this order: the volume moves to its own row below the buttons; labels turn compact (`[sh] [rp] [<<] [|>] [>>]`, volume `[-] 65% [+]`); shuffle and repeat are dropped; the volume shrinks to `[-][+]` and then goes; last prev / next go, so play stays longest. Keyboard shortcuts work whatever is hidden. When the window is short, the controls and progress bar keep their rows first, then the metadata, and the cover shrinks or disappears before any of them. The key hints at the bottom of the library browser follow the same rule: whole hints are left out, never cut.
 
@@ -233,7 +237,7 @@ big_scale = "2"                # unshifted keys work on any layout
 
 **Key syntax.** One character (`"n"`, `"T"`, `"["`, `"+"`; case matters, `"T"` is a capital T), or a name: `space`, `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`, `home`, `end`, `f1` … `f12`. Modifiers (`ctrl+x`, `alt+x`, `shift+x`) are not supported: the key handler ignores Ctrl and Alt, so use the plain key, a capital for Shift.
 
-**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
+**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `translate_both` (`k`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
 
 **Rules.**
 - An entry **replaces** that action's default keys. An action you don't mention keeps its keys.
@@ -319,7 +323,7 @@ Optional. [spotifyd](https://github.com/Spotifyd/spotifyd) turns this PC into a 
 4. Writes `~/.config/spotifyd/spotifyd.conf` (just `device_name`) and the entries `spotify = true`, `spotify_client_id`, `spotify_device` and `use_spotifyd = true` to `config.toml`. The device name is asked for (default: your `spotify_device`, else `music_display`).
 5. Checks that spotifyd is running and that the device shows up in your Spotify devices, and says which of the two is missing if not.
 
-An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself; if it isn't running, start it (for example `spotifyd --no-daemon`, or enable its service) and the device appears in Spotify within a few seconds. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC, so `spotify_device` counts as "this PC"; leave it off if you only use the Spotify app or other devices.
+An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself, but with `use_spotifyd` on the app does: it runs `spotifyd --no-daemon` at startup unless spotifyd is already running (for example as a service) and stops that one again when it quits; turn *Stop spotifyd on exit* (`kill_spotifyd_on_exit`) off to leave it running. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC, so `spotify_device` counts as "this PC"; leave it off if you only use the Spotify app or other devices.
 
 ## Local files
 
