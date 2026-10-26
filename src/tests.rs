@@ -1569,3 +1569,6 @@ fn genius_lookup_with_fake_site_and_cache() {
 fn percent() {
     assert_eq!(util::percent_decode("/a%20b/c%C3%A9.jpg"), "/a b/cé.jpg");
 }
+
+// `--setup` (spotifyd + Spotify login): src/tests/setup_tests.rs
+mod setup_tests;

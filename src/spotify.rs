@@ -903,6 +903,11 @@ impl Api {
         Ok(String::new())
     }
 
+    /// `(name, active)` of the devices Spotify lists for you (used by `--setup`).
+    pub async fn device_names(&self) -> Res<Vec<(String, bool)>> {
+        Ok(crate::setup::parse_devices(&json!({ "devices": self.devices().await? })))
+    }
+
     /// Keep `/me/player` coming: every 1.5 s while another device plays, slower while paused
     /// or while an MPRIS player is on screen; at once after a command (`wake`).
     pub async fn remote_loop(self, tx: UnboundedSender<AppEvent>) {
