@@ -31,7 +31,8 @@ Press `?` inside the app for the full list of keys and mouse actions (it is gene
 `~/.config/music_display/config.toml` (or `$XDG_CONFIG_HOME/music_display/config.toml`, or `--config FILE`). Nothing is created for you. **Command-line flags override the file, the file overrides the built-in defaults.** A missing file is fine; unknown keys and invalid values print a warning with the line number to stderr and fall back to the default.
 
 ```toml
-player = "spotify"             # MPRIS player for playerctl ("any" = playerctl's pick)
+player = "spotify"             # MPRIS player(s) for playerctl: a name, a comma list in priority
+                               # order ("vlc,mpv"), "local" (common desktop players) or "any"
 offset = 0.0                   # default lyric offset, seconds
 tint = 1.0                     # cover duotone strength 0..1
 transparent = false
@@ -43,6 +44,8 @@ cava_bars = 64
 thirdpanel = false
 big_lyrics = false
 lyric_spacing = 1              # 0..3
+lyric_pad = 0                  # 0..10 blank columns on each side of the lyrics
+big_scale = 1                  # 1..3, size of the big-font line
 chords = false
 chords_ug = false
 # chords_dir = "~/.local/share/music_display/chords"
@@ -52,7 +55,11 @@ interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental /
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
 translate = false              # start with translated lyrics (toggle with K)
 translate_lang = "en"          # language lyrics are translated into
+translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
+translate_fallback_url = "https://libretranslate.com/translate"
+# translate_fallback_key = "…" # libretranslate.com needs a key; your own server may not
 minimal_view = false           # start in the minimal view
+hide_color_warning = false     # hide "(no usable colour file)" in the footer
 mouse = true                   # false = don't capture the mouse
 ```
 
@@ -80,6 +87,9 @@ mouse = true                   # false = don't capture the mouse
 | `--minimal` | start in the minimal teleprompter view (also `M`). |
 | `--interlude-secs N` | a silence between two lyric lines longer than N seconds shows `[ Instrumental / Solo ]` (with a countdown) while it lasts; also before the first and after the last line. |
 | `--lyrics-retries N` | retries after a failed lyrics request (timeouts, 429 with `Retry-After`, disconnects, 5xx), 0.5 s / 1 s / 2 s backoff. |
+| `--big-scale 1..3` / `--lyric-pad 0..10` | size of the big-font line (pixels drawn 1–3× as wide and tall; falls back to a smaller size when it doesn't fit) / blank columns beside the lyrics. |
+| `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
+| `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords are hidden while a translation is shown. |
 | `--volume-step N` | percent per volume change. |
 | `--no-mouse` | don't capture the mouse. |
@@ -97,13 +107,14 @@ mouse = true                   # false = don't capture the mouse
 | `l` | show / hide the lyrics |
 | `K` | translate lyrics on / off (cached per song while the app runs) |
 | `b` | big-font active line |
+| `↑` / `↓`, `PgUp` / `PgDn`, mouse wheel over the lyrics | browse the lyrics without leaving the song; `End` (or 6 s idle) returns to the playing line |
 | `g` | chords on / off |
 | `t` / `T` | transpose chords up / down one semitone |
 | `]` / `[` | capo up / down (0–12), remembered per track |
 | `0` | back to the sheet's own capo |
 | `D` | chord diagram panel |
 | `M` | minimal teleprompter view |
-| `s` | settings menu: toggles and steppers for chords, translation, minimal view, big lyrics, spacing, cava and more. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
+| `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `q` / `Esc` | quit |
@@ -114,15 +125,19 @@ The volume control follows the player: changes made elsewhere (media keys, the S
 
 ## Metadata panel
 
-`Release` shows the full `YYYY-MM-DD` when the player reports it (otherwise the year from MusicBrainz/iTunes). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so with chords off — or a sheet without them — these fields are simply hidden. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
+Rows: `Track No | Tuning`, `Release | Capo`, `BPM | Key` (without a capo the tuning takes the Capo slot; hidden items leave no gap). The playback time sits inside the progress bar: elapsed on the left, total on the right. `Release` shows the full `YYYY-MM-DD` when the player or MusicBrainz/iTunes has it (otherwise the year). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so they come from the sheet: with `chords_ug` on the sheet is fetched even while chords are hidden, and a sheet that states no key gets one estimated from its chords. Without a sheet these fields are simply hidden. The `Key` shown is the song's own key and never changes with `t` / `T`; only the chord letters do. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
 
 `Tuning` (shown while chords are on) is the song's original guitar tuning (Standard, Drop D, Half Step Down…) from Ultimate Guitar's page metadata or a `{tuning: …}` line in a ChordPro file; it is also shown in the chord diagram panel title.
 
 The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot show the **sounding** key (shapes + capo); the Capo row says which shapes you finger, e.g. `Capo 3  (shapes in C#m)`. Changing the capo with `[` / `]` re-spells the shapes (and the diagrams) but leaves the sounding key alone.
 
+## Local files
+
+Any MPRIS player works (`player = "vlc"`, `"mpv"`, `"local"`…). When it reports a `file://` URL but leaves tags out (artist, album, year, track number, cover), they are read from the file itself (ID3, FLAC/Vorbis, MP4) with `lofty`; a file without tags shows its file name.
+
 ## Chords
 
-See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_display/chords/` (`Artist - Title.cho` / `.txt`), optionally Ultimate Guitar with `--chords-ug`; chords are shown on every lyric line (the active one in bold), intro chords appear before the first lyric, and `D` opens chord diagrams with a small tab.
+See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_display/chords/` (`Artist - Title.cho` / `.txt`), optionally Ultimate Guitar with `--chords-ug`; chords are shown on every lyric line (the active one in bold), intro chords appear before the first lyric, and `D` opens chord diagrams with a small tab. During an instrumental or solo section the chords of that part of the sheet are shown under `[ Instrumental / Solo ]` so you can play along. If a lookup fails, the title is retried without `(…)` groups, `feat.`/`ft.` credits and ` - demo` / ` - remastered` suffixes.
 
 ## Notes
 

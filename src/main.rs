@@ -140,6 +140,18 @@ mod cli {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=3))]
         pub lyric_spacing: u16,
 
+        /// Size of the big-font line, 1-3 times the base size (toggle the font with `b`) [config: big_scale]
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=3))]
+        pub big_scale: u16,
+
+        /// Extra blank columns on each side of the lyrics (0-10) [config: lyric_pad]
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=10))]
+        pub lyric_pad: u16,
+
+        /// Hide the "terminal colors (no usable colour file)" note in the footer [config: hide_color_warning]
+        #[arg(long)]
+        pub hide_color_warning: bool,
+
         /// Volume change per `+` / `-` / mouse-wheel notch, in percent [config: volume_step]
         #[arg(long, default_value_t = DEFAULT_VOLUME_STEP, value_parser = clap::value_parser!(u32).range(1..=50))]
         pub volume_step: u32,
@@ -161,6 +173,19 @@ mod cli {
         /// Language code lyrics are translated into, e.g. en, sv, de [config: translate_lang]
         #[arg(long, default_value = "en")]
         pub translate_lang: String,
+
+        /// Fall back to LibreTranslate when Google Translate is rate-limited or unreachable
+        /// [config: translate_fallback]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
+        pub translate_fallback: bool,
+
+        /// LibreTranslate endpoint used as the fallback [config: translate_fallback_url]
+        #[arg(long, default_value = crate::translate::LIBRE_URL, value_name = "URL")]
+        pub translate_fallback_url: String,
+
+        /// API key for the LibreTranslate endpoint (libretranslate.com needs one) [config: translate_fallback_key]
+        #[arg(long, value_name = "KEY")]
+        pub translate_fallback_key: Option<String>,
 
         /// Start in the minimal teleprompter view (toggle with `M`) [config: minimal_view]
         #[arg(long)]
@@ -188,7 +213,7 @@ mod cli {
 // Config file: ~/.config/music_display/config.toml (flags > file > built-in defaults)
 // ════════════════════════════════════════════════════════════════════════════
 mod config {
-    use crate::cli::{self, Args};
+    use crate::cli::Args;
     use clap::parser::ValueSource;
     use clap::ArgMatches;
     use std::path::{Path, PathBuf};
@@ -227,6 +252,9 @@ mod config {
         k!("thirdpanel", Kind::Bool, "thirdpanel"),
         k!("big_lyrics", Kind::Bool, "big_lyrics"),
         k!("lyric_spacing", Kind::Int(0, 3), "lyric_spacing"),
+        k!("big_scale", Kind::Int(1, 3), "big_scale"),
+        k!("lyric_pad", Kind::Int(0, 10), "lyric_pad"),
+        k!("hide_color_warning", Kind::Bool, "hide_color_warning"),
         k!("chords", Kind::Bool, "chords"),
         k!("chords_ug", Kind::Bool, "chords_ug"),
         k!("chords_dir", Kind::Str, "chords_dir"),
@@ -236,6 +264,9 @@ mod config {
         k!("lyrics_retries", Kind::Int(0, 10), "lyrics_retries"),
         k!("translate", Kind::Bool, "translate"),
         k!("translate_lang", Kind::Str, "translate_lang"),
+        k!("translate_fallback", Kind::Bool, "translate_fallback"),
+        k!("translate_fallback_url", Kind::Str, "translate_fallback_url"),
+        k!("translate_fallback_key", Kind::Str, "translate_fallback_key"),
         k!("minimal_view", Kind::Bool, "minimal"),
         k!("mouse", Kind::Bool, "no_mouse"),
     ];
@@ -257,8 +288,7 @@ mod config {
             },
             Kind::Int(lo, hi) => match v.as_integer() {
                 Some(n) if (*lo..=*hi).contains(&n) => Ok(()),
-                Some(_) => Err(format!("expected a whole number from {lo} to {hi}")),
-                None => Err(format!("expected a whole number from {lo} to {hi}")),
+                _ => Err(format!("expected a whole number from {lo} to {hi}")),
             },
             Kind::Float(lo, hi) => {
                 let f = v.as_float().or_else(|| v.as_integer().map(|n| n as f64));
@@ -275,8 +305,10 @@ mod config {
         raw.lines()
             .position(|l| {
                 let l = l.trim_start();
-                l.strip_prefix(key)
-                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+                let l = l.strip_prefix('"').unwrap_or(l);
+                l.strip_prefix(key).is_some_and(|rest| {
+                    rest.trim_start_matches('"').trim_start().starts_with('=')
+                })
             })
             .map_or(0, |i| i + 1)
     }
@@ -299,6 +331,9 @@ mod config {
             "thirdpanel" => args.thirdpanel = b() && !args.underlyrics,
             "big_lyrics" => args.big_lyrics = b(),
             "lyric_spacing" => args.lyric_spacing = i() as u16,
+            "big_scale" => args.big_scale = i() as u16,
+            "lyric_pad" => args.lyric_pad = i() as u16,
+            "hide_color_warning" => args.hide_color_warning = b(),
             "chords" => args.chords = b(),
             "chords_ug" => args.chords_ug = b(),
             "chords_dir" => args.chords_dir = Some(PathBuf::from(st())),
@@ -308,6 +343,9 @@ mod config {
             "lyrics_retries" => args.lyrics_retries = i() as u32,
             "translate" => args.translate = b(),
             "translate_lang" => args.translate_lang = st(),
+            "translate_fallback" => args.translate_fallback = b(),
+            "translate_fallback_url" => args.translate_fallback_url = st(),
+            "translate_fallback_key" => args.translate_fallback_key = Some(st()),
             "minimal_view" => args.minimal = b(),
             "mouse" => args.no_mouse = !b(),
             _ => {}
@@ -371,10 +409,14 @@ mod config {
     /// Write `values` into the config file at `path`, keeping every other key already in it
     /// (comments in the file are not preserved). Creates the folder if needed.
     pub fn save(path: &Path, values: &[(&str, toml::Value)]) -> std::io::Result<()> {
-        let mut table: toml::Table = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| raw.parse().ok())
-            .unwrap_or_default();
+        // A file with a syntax error is left alone rather than overwritten with just our keys.
+        let mut table: toml::Table = match std::fs::read_to_string(path) {
+            Ok(raw) => raw.parse().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("not valid TOML, left untouched ({e})"))
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(e) => return Err(e),
+        };
         for (k, v) in values {
             table.insert((*k).to_string(), v.clone());
         }
@@ -407,6 +449,9 @@ mod config {
         line("thirdpanel", args.thirdpanel.to_string());
         line("big_lyrics", args.big_lyrics.to_string());
         line("lyric_spacing", args.lyric_spacing.to_string());
+        line("big_scale", args.big_scale.to_string());
+        line("lyric_pad", args.lyric_pad.to_string());
+        line("hide_color_warning", args.hide_color_warning.to_string());
         line("chords", args.chords.to_string());
         line("chords_ug", args.chords_ug.to_string());
         match &args.chords_dir {
@@ -419,9 +464,13 @@ mod config {
         line("lyrics_retries", args.lyrics_retries.to_string());
         line("translate", args.translate.to_string());
         line("translate_lang", q(&args.translate_lang));
+        line("translate_fallback", args.translate_fallback.to_string());
+        line("translate_fallback_url", q(&args.translate_fallback_url));
+        if args.translate_fallback_key.is_some() {
+            line("# translate_fallback_key", "\"…\"  # set (not shown)".into());
+        }
         line("minimal_view", args.minimal.to_string());
         line("mouse", (!args.no_mouse).to_string());
-        let _ = (cli::DEFAULT_VOLUME_STEP, cli::DEFAULT_LYRICS_RETRIES);
         o
     }
 }
@@ -442,13 +491,17 @@ mod util {
             Regex::new(r"(?i)\s*[\(\[][^\)\]]*\b(remaster(ed)?|re-?master|deluxe|anniversar\w*|live|version|edit|mono|stereo|bonus|demo|acoustic|explicit|radio|expanded|edition|reissue|special|collector\w*|super|single)\b[^\)\]]*[\)\]]").unwrap()
         });
         static DASH: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?i)\s+[-–—]\s+.*\b(remaster(ed)?|re-?master|deluxe|anniversar\w*|live|version|edit|mono|stereo|single|bonus|demo|acoustic|radio|expanded|edition|reissue|\d{4})\b.*$").unwrap()
+            Regex::new(r"(?i)\s+[-–—]\s+.*\b(remaster(ed)?|re-?master|deluxe|anniversar\w*|live|version|edit|mono|stereo|single|bonus|demo|acoustic|radio|expanded|edition|reissue)\b.*$").unwrap()
         });
         static TRAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\-–—]+$").unwrap());
+        let orig = s;
         let s = BRACKET.replace_all(s, "");
         let s = DASH.replace(&s, "");
         let s = TRAIL.replace(&s, "");
-        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+        let fold = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let out = fold(&s);
+        // "(Live)" or "---" as the whole title: keep it rather than collapse to nothing
+        if out.is_empty() { fold(orig) } else { out }
     }
 
     /// Terminal cell width of a char (0 for combining marks, 2 for CJK/Hangul/emoji).
@@ -458,7 +511,8 @@ mod util {
 
     /// Terminal cell width of a string.
     pub fn width(s: &str) -> usize {
-        unicode_width::UnicodeWidthStr::width(s)
+        // summed per char so it always agrees with how the wrappers measure
+        s.chars().map(cw).sum()
     }
 
     /// Stable 64-bit FNV-1a — used for cache file names (std's hasher isn't stable across releases).
@@ -840,7 +894,7 @@ mod player {
     use tokio::sync::{Notify, mpsc::UnboundedSender};
 
     /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
-    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}";
+    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Status {
@@ -863,6 +917,8 @@ mod player {
         pub content_created: String,
         /// Player volume 0.0..=1.0 (`None` if the player doesn't report one).
         pub volume: Option<f64>,
+        /// `xesam:url` — a `file://` path for locally played audio.
+        pub url: String,
     }
 
     impl Snapshot {
@@ -882,9 +938,15 @@ mod player {
 
     fn parse(line: &str) -> Option<Snapshot> {
         let f: Vec<&str> = line.trim_end_matches(['\n', '\r']).split('\x1f').collect();
-        if f.len() < 10 || (f[2].is_empty() && f[3].is_empty()) {
+        let url = f.get(11).map(|u| u.trim()).unwrap_or("");
+        // a local file without any tags still has a name to show
+        if f.len() < 10 || (f[2].is_empty() && f[3].is_empty() && url.is_empty()) {
             return None;
         }
+        let title = match f[2].trim() {
+            "" => crate::tags::title_from_url(url),
+            t => t.to_string(),
+        };
         let us = |s: &str| {
             s.trim()
                 .parse::<f64>()
@@ -899,7 +961,7 @@ mod player {
                 _ => Status::Stopped,
             },
             position: us(f[1]),
-            title: f[2].trim().to_string(),
+            title,
             artist: f[3].trim().to_string(),
             album: f[4].trim().to_string(),
             length: us(f[5]),
@@ -912,32 +974,68 @@ mod player {
                 .and_then(|v| v.trim().parse::<f64>().ok())
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 1.0)),
+            url: url.to_string(),
         })
     }
 
     /// Handle used by the UI to send commands to the player.
     #[derive(Clone)]
     pub struct Ctl {
-        base: Vec<String>,
+        /// `-p a,b,c` (playerctl tries them in order), or empty for "any". Shared by every
+        /// clone so the settings menu can switch the player while the tasks run.
+        base: Arc<std::sync::RwLock<Vec<String>>>,
         pub repoll: Arc<Notify>,
+        /// The follow task restarts its `playerctl --follow` when this fires.
+        switched: Arc<Notify>,
+    }
+
+    fn player_args(player: &str) -> Vec<String> {
+        if player == "any" || player.is_empty() {
+            vec![]
+        } else {
+            vec!["-p".to_string(), player.to_string()]
+        }
+    }
+
+    /// Players the settings menu cycles through; `local` is the usual desktop players.
+    pub const PRESETS: &[&str] = &[
+        "spotify",
+        "vlc",
+        "mpv",
+        "rhythmbox",
+        "local",
+        "any",
+    ];
+
+    /// What a menu name means to playerctl (`local` = any of the common local players).
+    pub fn expand(player: &str) -> String {
+        match player {
+            "local" => "vlc,mpv,rhythmbox,audacious,strawberry,deadbeef,elisa,lollypop,mpd".into(),
+            p => p.into(),
+        }
     }
 
     impl Ctl {
         pub fn new(player: &str) -> Self {
-            let base = if player == "any" || player.is_empty() {
-                vec![]
-            } else {
-                vec!["-p".to_string(), player.to_string()]
-            };
             Ctl {
-                base,
+                base: Arc::new(std::sync::RwLock::new(player_args(&expand(player)))),
                 repoll: Arc::new(Notify::new()),
+                switched: Arc::new(Notify::new()),
             }
+        }
+
+        /// Switch to another player (or priority list) without restarting the program.
+        pub fn set_player(&self, player: &str) {
+            if let Ok(mut b) = self.base.write() {
+                *b = player_args(&expand(player));
+            }
+            self.switched.notify_one();
+            self.repoll.notify_one();
         }
 
         fn cmd(&self) -> Command {
             let mut c = Command::new("playerctl");
-            c.args(&self.base)
+            c.args(self.base.read().map(|b| b.clone()).unwrap_or_default())
                 .stdin(Stdio::null())
                 .stderr(Stdio::null());
             c
@@ -989,6 +1087,7 @@ mod player {
         /// instant track switches without hammering the poller.
         pub async fn follow_loop(self, tx: UnboundedSender<AppEvent>) {
             loop {
+                let mut restart = false;
                 let child = self
                     .cmd()
                     .args(["--follow", "metadata", "--format", FORMAT])
@@ -998,13 +1097,29 @@ mod player {
                 if let Ok(mut child) = child {
                     if let Some(out) = child.stdout.take() {
                         let mut lines = BufReader::new(out).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            if tx.send(AppEvent::Player(parse(&line))).is_err() {
-                                return;
+                        loop {
+                            tokio::select! {
+                                line = lines.next_line() => match line {
+                                    Ok(Some(line)) => {
+                                        if tx.send(AppEvent::Player(parse(&line))).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    _ => break,
+                                },
+                                // player changed: stop this child and start one for the new player
+                                _ = self.switched.notified() => {
+                                    let _ = child.kill().await;
+                                    restart = true;
+                                    break;
+                                }
                             }
                         }
                     }
                     let _ = child.wait().await;
+                    if restart {
+                        continue;
+                    }
                 }
                 // playerctl missing or exited: retry later, polling covers us meanwhile.
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1015,6 +1130,67 @@ mod player {
 
 // ════════════════════════════════════════════════════════════════════════════
 // Release-year resolution: contentCreated → cache → MusicBrainz → iTunes
+// ════════════════════════════════════════════════════════════════════════════
+mod tags {
+    //! Tags read straight from a local audio file (ID3, Vorbis/FLAC, MP4…), for players
+    //! whose MPRIS metadata is incomplete.
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::Accessor;
+    use std::path::PathBuf;
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Tags {
+        pub title: String,
+        pub artist: String,
+        pub album: String,
+        /// `YYYY` (tags rarely carry more).
+        pub year: String,
+        pub track: Option<u32>,
+        pub disc: Option<u32>,
+        /// `file://` URL of the embedded cover, written to the cache folder.
+        pub art_url: String,
+    }
+
+    /// `file:///home/me/My%20Song.flac` → the path.
+    pub fn path_of(url: &str) -> Option<PathBuf> {
+        url.strip_prefix("file://").map(|p| PathBuf::from(crate::util::percent_decode(p)))
+    }
+
+    /// File name without folder and extension — what to show when there are no tags at all.
+    pub fn title_from_url(url: &str) -> String {
+        path_of(url)
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_default()
+    }
+
+    /// Blocking: call from `spawn_blocking`.
+    pub fn read(url: &str) -> Option<Tags> {
+        let path = path_of(url)?;
+        let file = lofty::read_from_path(&path).ok()?;
+        let tag = file.primary_tag().or_else(|| file.first_tag())?;
+        let s = |v: Option<std::borrow::Cow<'_, str>>| v.map(|c| c.trim().to_string()).unwrap_or_default();
+        let art_url = tag
+            .pictures()
+            .first()
+            .and_then(|pic| {
+                let p = crate::util::cache_dir().join(format!("tagart-{:016x}", crate::util::fnv1a(url)));
+                std::fs::create_dir_all(p.parent()?).ok()?;
+                std::fs::write(&p, pic.data()).ok()?;
+                Some(format!("file://{}", p.display()))
+            })
+            .unwrap_or_default();
+        Some(Tags {
+            title: s(tag.title()),
+            artist: s(tag.artist()),
+            album: s(tag.album()),
+            year: tag.date().map(|d| d.year.to_string()).unwrap_or_default(),
+            track: tag.track(),
+            disc: tag.disk(),
+            art_url,
+        })
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 mod year {
     use crate::util::{cache_dir, fnv1a};
@@ -1046,6 +1222,20 @@ mod year {
         }
     }
 
+    /// The bare song title: no (…) / […] groups, no `feat.` / `ft.` credits, nothing after
+    /// a ` - ` (demo, remastered…). Used to retry a failed chord lookup.
+    pub fn base_title(s: &str) -> String {
+        static GROUPS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]").unwrap());
+        static FEAT: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?i)\s+(feat\.?|ft\.?|featuring)\s+.*$").unwrap());
+        static DASH_ANY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+[-–—]\s+.*$").unwrap());
+        let t = GROUPS.replace_all(s, "");
+        let t = FEAT.replace(&t, "");
+        let t = DASH_ANY.replace(&t, "");
+        let t = t.trim();
+        if t.is_empty() { s.trim().to_string() } else { t.to_string() }
+    }
+
     /// `"2011-09-26T…"` / `"2011"` → `Some("2011")`.
     /// `YYYY-MM-DD` from an MPRIS `contentCreated` ("1969-09-26T00:00:00Z"); `None` if it
     /// only carries a year (or nothing).
@@ -1072,6 +1262,18 @@ mod year {
             .filter(|y| (1900..=2100).contains(y))
     }
 
+    /// `"1991-08-12T…"` → `"1991-08-12"`, `"1991-08"` → `"1991"`: the full date only when all
+    /// three parts are there.
+    fn date_of(date: &str) -> Option<String> {
+        let y = year_of(date)?;
+        Some(full_date(date).unwrap_or_else(|| y.to_string()))
+    }
+
+    /// Earlier year wins; for the same year the more precise date does.
+    fn rank(d: &str) -> (i32, std::cmp::Reverse<usize>) {
+        (year_of(d).unwrap_or(0), std::cmp::Reverse(d.len()))
+    }
+
     fn lucene(s: &str) -> String {
         s.replace(['"', '\\'], " ")
     }
@@ -1085,7 +1287,7 @@ mod year {
     }
 
     /// Earliest first-release-date among high-confidence matches in a MusicBrainz result list.
-    fn earliest(v: &Value, list: &str) -> Option<i32> {
+    fn earliest(v: &Value, list: &str) -> Option<String> {
         v.get(list)?
             .as_array()?
             .iter()
@@ -1093,16 +1295,16 @@ mod year {
             .filter_map(|r| {
                 r.get("first-release-date")
                     .and_then(Value::as_str)
-                    .and_then(year_of)
+                    .and_then(date_of)
             })
-            .min()
+            .min_by_key(|d| rank(d))
     }
 
     async fn mb_recording(
         c: &reqwest::Client,
         title: &str,
         artist: &str,
-    ) -> Result<Option<i32>, ()> {
+    ) -> Result<Option<String>, ()> {
         let q = format!(
             "recording:\"{}\" AND artist:\"{}\"",
             lucene(title),
@@ -1121,7 +1323,7 @@ mod year {
         c: &reqwest::Client,
         album: &str,
         artist: &str,
-    ) -> Result<Option<i32>, ()> {
+    ) -> Result<Option<String>, ()> {
         let q = format!(
             "releasegroup:\"{}\" AND artist:\"{}\"",
             lucene(album),
@@ -1136,7 +1338,7 @@ mod year {
         Ok(earliest(&v, "release-groups"))
     }
 
-    async fn itunes(c: &reqwest::Client, title: &str, artist: &str) -> Result<Option<i32>, ()> {
+    async fn itunes(c: &reqwest::Client, title: &str, artist: &str) -> Result<Option<String>, ()> {
         let term = format!("{artist} {title}");
         let v = get_json(
             c,
@@ -1166,12 +1368,12 @@ mod year {
             .filter_map(|r| {
                 r.get("releaseDate")
                     .and_then(Value::as_str)
-                    .and_then(year_of)
+                    .and_then(date_of)
             })
-            .min())
+            .min_by_key(|d| rank(d)))
     }
 
-    /// Returns `Some(year)` or `None` (= "N/A"). Never blocks the UI: runs in its own task.
+    /// Returns `Some("YYYY-MM-DD" or "YYYY")` or `None` (= "N/A"). Never blocks the UI: runs in its own task.
     pub async fn resolve(
         c: reqwest::Client,
         artist: String,
@@ -1200,7 +1402,7 @@ mod year {
         let album_c = clean(&album);
         let first_artist = artist.split(", ").next().unwrap_or(&artist).to_string();
         let mut had_error = false;
-        let mut found: Option<i32> = None;
+        let mut found: Option<String> = None;
 
         // MusicBrainz asks for ≤1 req/s — space the calls out.
         let gap = Duration::from_millis(1100);
@@ -1237,8 +1439,8 @@ mod year {
 
         match found {
             Some(y) => {
-                let _ = tokio::fs::write(&path, y.to_string()).await;
-                Some(y.to_string())
+                let _ = tokio::fs::write(&path, &y).await;
+                Some(y)
             }
             None => {
                 // Only remember a miss if every source actually answered.
@@ -1643,58 +1845,163 @@ mod lyrics {
 // Cover art: fetch (file:// or http), cache in /tmp, downscale + duotone tint
 // ════════════════════════════════════════════════════════════════════════════
 mod translate {
-    //! Lyric translation through Google Translate's unauthenticated web endpoint
-    //! (unofficial; it can be rate-limited or change without notice).
+    //! Lyric translation: Google Translate's unauthenticated web endpoints first
+    //! (unofficial; they can be rate-limited or change without notice), then a
+    //! LibreTranslate server when Google answers 429 or can't be reached.
     use futures::StreamExt;
-    use serde_json::Value;
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    const URL: &str = "https://translate.googleapis.com/translate_a/single";
+    const GTX: &str = "https://translate.googleapis.com/translate_a/single";
+    const DICT: &str = "https://clients5.google.com/translate_a/t";
+    pub const LIBRE_URL: &str = "https://libretranslate.com/translate";
+    const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
-    /// Pull the translated text out of `[[["hello","hallo",…],…],…]`.
+    #[derive(Clone, Debug, Default)]
+    pub struct Cfg {
+        /// Test hook: replaces both Google endpoints.
+        pub google_base: Option<String>,
+        pub fallback: bool,
+        pub fallback_url: String,
+        pub fallback_key: Option<String>,
+    }
+
+    /// Why one request failed: `Limited` / `Net` switch to the fallback, `Other` is retried.
+    enum Fail {
+        Limited,
+        Net,
+        Other,
+    }
+
+    /// Pull the translated text out of `[[["hello","hallo",…],…],…]` (the `gtx` shape).
     pub fn parse(v: &Value) -> Option<String> {
         let segs = v.get(0)?.as_array()?;
         let out: String = segs
             .iter()
             .filter_map(|s| s.get(0).and_then(Value::as_str))
             .collect();
-        Some(out)
+        (!out.is_empty()).then_some(out)
     }
 
-    async fn one(c: &reqwest::Client, base: &str, lang: &str, text: &str) -> Option<String> {
+    /// The `dict-chrome-ex` shapes: `{"sentences":[{"trans":…}]}`, `["…"]` or `[["…","ko"]]`.
+    pub fn parse_dict(v: &Value) -> Option<String> {
+        let out: String = if let Some(s) = v.get("sentences").and_then(Value::as_array) {
+            s.iter().filter_map(|x| x.get("trans").and_then(Value::as_str)).collect()
+        } else {
+            let first = v.get(0)?;
+            first.as_str().or_else(|| first.get(0).and_then(Value::as_str))?.to_string()
+        };
+        (!out.is_empty()).then_some(out)
+    }
+
+    fn classify(e: &reqwest::Error) -> Fail {
+        if e.is_timeout() || e.is_connect() || e.is_request() { Fail::Net } else { Fail::Other }
+    }
+
+    async fn get(c: &reqwest::Client, url: &str, client: &str, lang: &str, text: &str) -> Result<Value, Fail> {
+        let mut q = vec![("client", client), ("sl", "auto"), ("tl", lang), ("q", text)];
+        if client == "gtx" {
+            q.push(("dt", "t"));
+        }
         let r = c
-            .get(base)
-            .query(&[("client", "gtx"), ("sl", "auto"), ("tl", lang), ("dt", "t"), ("q", text)])
+            .get(url)
+            .query(&q)
+            .header(reqwest::header::USER_AGENT, UA)
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.8")
             .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| classify(&e))?;
+        match r.status().as_u16() {
+            200..=299 => r.json::<Value>().await.map_err(|_| Fail::Other),
+            429 => Err(Fail::Limited),
+            500..=599 => Err(Fail::Net),
+            _ => Err(Fail::Other),
+        }
+    }
+
+    /// `gtx`, then `dict-chrome-ex` when the first is limited or unreachable.
+    async fn google(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Result<String, Fail> {
+        let (u1, u2) = match &cfg.google_base {
+            Some(b) => (b.clone(), format!("{b}/dict")),
+            None => (GTX.to_string(), DICT.to_string()),
+        };
+        match get(c, &u1, "gtx", lang, text).await.map(|v| parse(&v)) {
+            Ok(Some(t)) => return Ok(t),
+            Ok(None) | Err(Fail::Other) => {}
+            Err(_) => {}
+        }
+        match get(c, &u2, "dict-chrome-ex", lang, text).await {
+            Ok(v) => parse_dict(&v).ok_or(Fail::Other),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn libre(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Option<String> {
+        // LibreTranslate wants "zh", not "zh-CN"
+        let target = lang.split('-').next().unwrap_or(lang);
+        let mut body = json!({ "q": text, "source": "auto", "target": target, "format": "text" });
+        if let Some(k) = cfg.fallback_key.as_deref().filter(|k| !k.is_empty()) {
+            body["api_key"] = json!(k);
+        }
+        let r = c
+            .post(&cfg.fallback_url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .ok()?;
         if !r.status().is_success() {
             return None;
         }
-        parse(&r.json::<Value>().await.ok()?)
+        let v = r.json::<Value>().await.ok()?;
+        v.get("translatedText")?.as_str().filter(|t| !t.is_empty()).map(str::to_string)
     }
 
-    async fn line(c: &reqwest::Client, base: &str, lang: &str, l: String) -> Option<String> {
+    async fn line(c: &reqwest::Client, cfg: &Cfg, use_fallback: &AtomicBool, lang: &str, l: String) -> Option<String> {
         let t = l.trim();
         if t.is_empty() || t == "♪" {
             return Some(l);
         }
-        one(c, base, lang, t).await
+        if !use_fallback.load(Ordering::Relaxed) {
+            // one retry for a plain failure: a single dropped request shouldn't leave a line
+            for _ in 0..2 {
+                match google(c, cfg, lang, t).await {
+                    Ok(x) => return Some(x),
+                    Err(Fail::Other) => continue,
+                    Err(_) => {
+                        // limited / unreachable: stay on the fallback for the rest of the song
+                        if cfg.fallback {
+                            use_fallback.store(true, Ordering::Relaxed);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if cfg.fallback { libre(c, cfg, lang, t).await } else { None }
     }
 
     /// Translate every line (order preserved; a line that fails keeps its original text).
-    /// `Err` only when nearly everything failed.
-    pub async fn lines(c: &reqwest::Client, base: Option<&str>, lang: &str, src: &[String]) -> Result<Vec<String>, String> {
-        let base = base.unwrap_or(URL);
-        let out: Vec<Option<String>> = futures::stream::iter(src.iter().cloned().map(|l| line(c, base, lang, l)))
-        .buffered(6)
-        .collect()
-        .await;
+    /// Returns the lines and which backend did the work. `Err` only when nearly everything failed.
+    pub async fn lines(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -> Result<(Vec<String>, &'static str), String> {
+        let use_fallback = AtomicBool::new(false);
+        let out: Vec<Option<String>> =
+            futures::stream::iter(src.iter().cloned().map(|l| line(c, cfg, &use_fallback, lang, l)))
+                .buffered(6)
+                .collect()
+                .await;
         let failed = out.iter().filter(|o| o.is_none()).count();
-        if !src.is_empty() && failed * 2 > src.len() {
-            return Err("translation failed (Google Translate unreachable or rate-limited)".into());
+        let real = src.iter().filter(|l| !l.trim().is_empty() && l.trim() != "♪").count();
+        if failed > 0 && failed * 5 > real {
+            return Err(if cfg.fallback {
+                "translation failed (Google and LibreTranslate unavailable)".into()
+            } else {
+                "translation failed (Google Translate unreachable or rate-limited)".into()
+            });
         }
-        Ok(out.into_iter().zip(src).map(|(o, s)| o.unwrap_or_else(|| s.clone())).collect())
+        let backend = if use_fallback.load(Ordering::Relaxed) { "libretranslate" } else { "google" };
+        Ok((out.into_iter().zip(src).map(|(o, s)| o.unwrap_or_else(|| s.clone())).collect(), backend))
     }
 }
 
@@ -2198,6 +2505,45 @@ mod chords {
         Some(KeyInfo { root, minor })
     }
 
+    /// Best guess at the key of the shapes from the chords alone (diatonic fit, then the
+    /// tonic that is played first / last). Used when the source states no key.
+    pub fn estimate_key(sheet: &Sheet) -> Option<String> {
+        // (pitch class, minor) of each chord, in song order
+        let seq: Vec<(u8, bool)> = sheet
+            .lines
+            .iter()
+            .flat_map(|l| l.chords.iter())
+            .filter_map(|(_, name)| {
+                let main = name.split('/').next()?;
+                let n = root_len(main)?;
+                let root = pitch_class(&main[..n])?;
+                let rest = &main[n..];
+                Some((root, rest.starts_with('m') && !rest.starts_with("maj")))
+            })
+            .collect();
+        if seq.len() < 4 {
+            return None;
+        }
+        let count = |root: u8, minor: bool| seq.iter().filter(|c| **c == (root, minor)).count() as i32;
+        let (first, last) = (seq[0], seq[seq.len() - 1]);
+        // major-key fit: I ii iii IV V vi
+        let fit = |r: u8| -> i32 {
+            [(0, false), (2, true), (4, true), (5, false), (7, false), (9, true)]
+                .iter()
+                .map(|(d, m)| count((r + d) % 12, *m))
+                .sum::<i32>()
+        };
+        let best = (0..12u8).max_by_key(|r| {
+            let bonus = [first, last].iter().filter(|c| **c == (*r, false) || **c == ((*r + 9) % 12, true)).count() as i32;
+            fit(*r) * 4 + bonus
+        })?;
+        let rel = (best + 9) % 12;
+        let major_score = count(best, false) * 2 + (last == (best, false)) as i32 * 3 + (first == (best, false)) as i32;
+        let minor_score = count(rel, true) * 2 + (last == (rel, true)) as i32 * 3 + (first == (rel, true)) as i32;
+        let k = if minor_score > major_score { KeyInfo { root: rel, minor: true } } else { KeyInfo { root: best, minor: false } };
+        Some(k.short())
+    }
+
     impl KeyInfo {
         pub fn shift(self, n: i32) -> KeyInfo {
             KeyInfo {
@@ -2662,6 +3008,9 @@ mod chords {
         /// Chord-only sheet lines before the first matched lyric line (the intro), one
         /// `Vec` of chord names per sheet line.
         pub intro: Vec<Vec<String>>,
+        /// Per lyric line: chord-only sheet lines that follow it (solo / instrumental break),
+        /// one `Vec` of chord names per sheet line. The last entry is the outro.
+        pub gaps: Vec<Vec<Vec<String>>>,
     }
 
     impl Aligned {
@@ -2686,9 +3035,11 @@ mod chords {
             .collect();
         let mut out = Aligned {
             per_line: vec![Vec::new(); lyrics.len()],
+            gaps: vec![Vec::new(); lyrics.len()],
             flats: sheet.prefers_flats(),
             ..Default::default()
         };
+        let mut hits: Vec<(usize, usize)> = Vec::new(); // (lyric line, sheet line)
         let mut j = 0usize;
         let mut first_hit: Option<usize> = None;
         for (li, (_, text)) in lyrics.iter().enumerate() {
@@ -2725,6 +3076,7 @@ mod chords {
                 j = k + 1;
             }
             out.matched += 1;
+            hits.push((li, sung[k].0));
             let line = &sheet.lines[sung[k].0];
             let lyric_norm = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let mut cs: Vec<(usize, String)> = line
@@ -2742,9 +3094,22 @@ mod chords {
             .filter(|l| norm(&l.text).is_empty() && !l.chords.is_empty())
             .map(|l| l.chords.iter().map(|c| c.1.clone()).collect())
             .collect();
+        // chord-only sheet lines between one matched line and the next: the play-along
+        // chords for the break after that lyric line
+        for (n, (li, si)) in hits.iter().enumerate() {
+            let end = hits.iter().skip(n + 1).map(|h| h.1).find(|s| s > si).unwrap_or(sheet.lines.len());
+            out.gaps[*li] = sheet.lines[si + 1..end.max(si + 1)]
+                .iter()
+                .filter(|l| norm(&l.text).is_empty() && !l.chords.is_empty())
+                .map(|l| l.chords.iter().map(|c| c.1.clone()).collect())
+                .collect();
+        }
         if !out.usable() {
             for l in &mut out.per_line {
                 l.clear();
+            }
+            for g in &mut out.gaps {
+                g.clear();
             }
             out.intro.clear();
         }
@@ -2848,6 +3213,17 @@ mod ug {
         }
     }
 
+    /// The object that holds `key` — the chord page itself, so its capo / tuning / key aren't
+    /// confused with those of related tabs elsewhere in the page data.
+    fn parent_of<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+        match v {
+            Value::Object(m) if m.get(key).is_some_and(|x| !x.is_null()) => Some(v),
+            Value::Object(m) => m.values().find_map(|x| parent_of(x, key)),
+            Value::Array(a) => a.iter().find_map(|x| parent_of(x, key)),
+            _ => None,
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub struct Cand {
         pub url: String,
@@ -2904,6 +3280,9 @@ mod ug {
             .and_then(|w| w.get("content"))
             .and_then(Value::as_str)?;
         let mut sheet = chords::parse_text(content);
+        // metadata sits next to `wiki_tab` (in `tab_view`); search there before the whole page
+        let tab = parent_of(store, "wiki_tab").unwrap_or(store);
+        let find_key = |_: &Value, k: &str| find_key(tab, k).or_else(|| find_key(store, k));
         if sheet.capo == 0 {
             sheet.capo = find_key(store, "capo")
                 .and_then(Value::as_u64)
@@ -2924,15 +3303,15 @@ mod ug {
         }
         if sheet.tuning.is_none() {
             // UG: "tuning": {"name": "Half Step Down", "value": "Eb Ab Db Gb Bb Eb"}
+            let text = |v: Option<&Value>| {
+                v.and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty() && n.len() < 40 && !n.contains(['}', '\n']))
+                    .map(str::to_string)
+            };
             sheet.tuning = find_key(store, "tuning").and_then(|t| match t {
-                Value::Object(m) => m
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|n| !n.trim().is_empty())
-                    .map(|n| n.trim().to_string())
-                    .or_else(|| m.get("value").and_then(Value::as_str).map(|v| v.trim().to_string())),
-                Value::String(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
-                _ => None,
+                Value::Object(m) => text(m.get("name")).or_else(|| text(m.get("value"))),
+                v => text(Some(v)),
             });
         }
         (sheet.chord_count() >= MIN_CHORDS).then(|| {
@@ -3060,14 +3439,27 @@ mod ug {
         artist: String,
         title: String,
     ) -> Result<Option<Sheet>, String> {
-        if let Some(s) = chords::load_local(dir, artist.clone(), title.clone()).await {
+        let base = crate::year::base_title(&title);
+        let retry = base != title;
+        if let Some(s) = chords::load_local(dir.clone(), artist.clone(), title.clone()).await {
             return Ok(Some(s));
+        }
+        if retry {
+            if let Some(s) = chords::load_local(dir, artist.clone(), base.clone()).await {
+                return Ok(Some(s));
+            }
         }
         if !use_ug {
             return Ok(None);
         }
         match lookup(&c, BASE, &artist, &title).await {
             Outcome::Found(s) => Ok(Some(s)),
+            // nothing under the full title: try the bare song name
+            Outcome::NotFound if retry => match lookup(&c, BASE, &artist, &base).await {
+                Outcome::Found(s) => Ok(Some(s)),
+                Outcome::NotFound => Ok(None),
+                Outcome::Error(e) => Err(e),
+            },
             Outcome::NotFound => Ok(None),
             Outcome::Error(e) => Err(e),
         }
@@ -3337,10 +3729,15 @@ pub enum AppEvent {
         /// Saved per-track capo override, if any.
         capo: Option<u8>,
     },
+    /// Tags read from a local file (`None` = unreadable).
+    Tags {
+        url: String,
+        tags: Option<tags::Tags>,
+    },
     Translated {
         key: u64,
         lang: String,
-        lines: Result<Vec<String>, String>,
+        lines: Result<(Vec<String>, &'static str), String>,
     },
     Cava(Vec<u16>),
     /// Informational status while cava has produced nothing yet.
@@ -3392,6 +3789,11 @@ mod app {
         Minimal,
         Translate,
         Settings,
+        BrowseUp,
+        BrowseDown,
+        BrowsePageUp,
+        BrowsePageDown,
+        BrowseEnd,
         Help,
     }
 
@@ -3434,8 +3836,13 @@ mod app {
         bind!("Chords", "D", "chord diagrams", [KeyCode::Char('D')], Diagrams),
         bind!("View", "M", "minimal view", [KeyCode::Char('M')], Minimal),
         bind!("View", "c", "cava visualiser", [KeyCode::Char('c')], ToggleCava),
+        bind!("Lyrics", "↑", "browse lyrics up (playback goes on)", [KeyCode::Up], BrowseUp),
+        bind!("Lyrics", "↓", "browse lyrics down", [KeyCode::Down], BrowseDown),
+        bind!("Lyrics", "PgUp", "browse a page up", [KeyCode::PageUp], BrowsePageUp),
+        bind!("Lyrics", "PgDn", "browse a page down", [KeyCode::PageDown], BrowsePageDown),
+        bind!("Lyrics", "End", "back to the playing line", [KeyCode::End], BrowseEnd),
         bind!("Lyrics", "K", "translate lyrics on / off", [KeyCode::Char('K')], Translate),
-        bind!("View", "s", "settings menu", [KeyCode::Char('s')], Settings),
+        bind!("View", "s / S", "settings menu", [KeyCode::Char('s'), KeyCode::Char('S')], Settings),
         bind!("View", "?", "this help", [KeyCode::Char('?')], Help),
         bind!("View", "q / Esc", "quit", [KeyCode::Char('q'), KeyCode::Esc], Quit),
     ];
@@ -3523,56 +3930,96 @@ mod app {
     /// One row of the settings menu.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Setting {
+        Player,
         Chords,
         ChordsUg,
         Translate,
         TranslateLang,
+        TranslateFallback,
         Minimal,
         BigLyrics,
+        BigScale,
         LyricSpacing,
+        LyricPad,
         Cava,
         ThirdPanel,
         CoverTheme,
         AsciiCover,
         Transparent,
+        HideColorWarning,
         Mouse,
         VolumeStep,
     }
 
     impl Setting {
         pub const ALL: &'static [Setting] = &[
+            Setting::Player,
             Setting::Chords,
             Setting::ChordsUg,
             Setting::Translate,
             Setting::TranslateLang,
+            Setting::TranslateFallback,
             Setting::Minimal,
             Setting::BigLyrics,
+            Setting::BigScale,
             Setting::LyricSpacing,
+            Setting::LyricPad,
             Setting::Cava,
             Setting::ThirdPanel,
             Setting::CoverTheme,
             Setting::AsciiCover,
             Setting::Transparent,
+            Setting::HideColorWarning,
             Setting::Mouse,
             Setting::VolumeStep,
         ];
 
         pub fn label(self) -> &'static str {
             match self {
+                Setting::Player => "Player source",
                 Setting::Chords => "Chords",
-                Setting::ChordsUg => "Ultimate Guitar lookup",
+                Setting::ChordsUg => "Ultimate Guitar (next track)",
                 Setting::Translate => "Translate lyrics",
                 Setting::TranslateLang => "Translate into",
+                Setting::TranslateFallback => "LibreTranslate fallback",
                 Setting::Minimal => "Minimal view",
                 Setting::BigLyrics => "Big active line",
+                Setting::BigScale => "Big line size",
                 Setting::LyricSpacing => "Lyric spacing",
+                Setting::LyricPad => "Lyric side padding",
                 Setting::Cava => "Cava visualiser",
                 Setting::ThirdPanel => "Cava as third column",
                 Setting::CoverTheme => "Accent from cover",
                 Setting::AsciiCover => "ASCII cover",
                 Setting::Transparent => "Transparent background",
+                Setting::HideColorWarning => "Hide colour-file note",
                 Setting::Mouse => "Mouse support",
                 Setting::VolumeStep => "Volume step %",
+            }
+        }
+
+        /// The config-file keys this row owns.
+        pub fn config_keys(self) -> &'static [&'static str] {
+            match self {
+                Setting::Player => &["player"],
+                Setting::Chords => &["chords"],
+                Setting::ChordsUg => &["chords_ug"],
+                Setting::Translate => &["translate"],
+                Setting::TranslateLang => &["translate_lang"],
+                Setting::TranslateFallback => &["translate_fallback"],
+                Setting::Minimal => &["minimal_view"],
+                Setting::BigLyrics => &["big_lyrics"],
+                Setting::BigScale => &["big_scale"],
+                Setting::LyricSpacing => &["lyric_spacing"],
+                Setting::LyricPad => &["lyric_pad"],
+                Setting::Cava => &["cava", "thirdpanel"],
+                Setting::ThirdPanel => &["thirdpanel", "cava"],
+                Setting::CoverTheme => &["cover_theme"],
+                Setting::AsciiCover => &["ascii_cover"],
+                Setting::Transparent => &["transparent"],
+                Setting::HideColorWarning => &["hide_color_warning"],
+                Setting::Mouse => &["mouse"],
+                Setting::VolumeStep => &["volume_step"],
             }
         }
 
@@ -3679,15 +4126,25 @@ mod app {
         /// `s`: settings menu and the highlighted row.
         pub show_settings: bool,
         pub settings_sel: usize,
+        pub settings_top: usize,
         /// Last settings-save problem, shown in the menu.
         pub settings_note: Option<String>,
         /// `K`: show translated lyrics.
         pub translate_on: bool,
         pub translate_state: TranslateState,
+        /// The (song, language) request currently running, so toggling doesn't duplicate it.
+        translate_inflight: Option<(u64, String)>,
         /// Translations kept for the session, per song and language.
         pub translations: std::collections::HashMap<(u64, String), Vec<String>>,
         /// Test hook: alternative translate endpoint.
         pub translate_base: Option<String>,
+        /// Which backend produced the translation on screen.
+        pub translate_backend: &'static str,
+        /// Rows the lyrics are scrolled away from the playing line (0 = following).
+        pub browse: f64,
+        browse_at: Instant,
+        pub local_tags: std::collections::HashMap<String, tags::Tags>,
+        tags_asked: std::collections::HashSet<String>,
     }
 
     impl App {
@@ -3759,11 +4216,18 @@ mod app {
                 help_scroll: 0,
                 show_settings: false,
                 settings_sel: 0,
+                settings_top: 0,
                 settings_note: None,
                 translate_on: false,
                 translate_state: TranslateState::Idle,
+                translate_inflight: None,
                 translations: Default::default(),
                 translate_base: None,
+                translate_backend: "google",
+                browse: 0.0,
+                browse_at: Instant::now(),
+                local_tags: Default::default(),
+                tags_asked: Default::default(),
             };
             app.translate_on = app.args.translate;
             app.vol_step = app.args.volume_step;
@@ -3822,7 +4286,10 @@ mod app {
                 AppEvent::Chords { key, sheet, capo } if key == self.track_key => {
                     self.capo_override = capo.filter(|c| *c <= 12);
                     match sheet {
-                        Ok(Some(s)) => {
+                        Ok(Some(mut s)) => {
+                            if s.key.is_none() {
+                                s.key = chords::estimate_key(&s);
+                            }
                             self.sheet = Some(s);
                             self.chords_state = ChordsState::Ready;
                         }
@@ -3857,13 +4324,29 @@ mod app {
                     };
                     self.dirty = true;
                 }
+                AppEvent::Tags { url, tags } => {
+                    if let Some(t) = tags {
+                        self.local_tags.insert(url.clone(), t);
+                    }
+                    // re-run the current snapshot with the tags merged in
+                    if let Some(s) = self.snap.clone().filter(|s| s.url == url) {
+                        self.on_snapshot(s);
+                    }
+                    self.dirty = true;
+                }
                 AppEvent::Translated { key, lang, lines } => {
                     match lines {
-                        Ok(l) => {
+                        Ok((l, backend)) => {
                             self.translations.insert((key, lang.clone()), l);
+                            self.translate_backend = backend;
                         }
-                        Err(e) if key == self.track_key => self.translate_state = TranslateState::Failed(e),
+                        Err(e) if key == self.track_key && lang == self.args.translate_lang => {
+                            self.translate_state = TranslateState::Failed(e)
+                        }
                         Err(_) => {}
+                    }
+                    if self.translate_inflight.as_ref() == Some(&(key, lang.clone())) {
+                        self.translate_inflight = None;
                     }
                     if key == self.track_key && lang == self.args.translate_lang {
                         if self.translations.contains_key(&(key, lang)) {
@@ -3896,9 +4379,32 @@ mod app {
             }
         }
 
-        fn on_snapshot(&mut self, s: Snapshot) {
+        fn on_snapshot(&mut self, mut s: Snapshot) {
+            if s.url.starts_with("file://") {
+                self.merge_local_tags(&mut s);
+            }
             let key = s.key();
             let new_track = key != self.track_key;
+            // Same track, different spelling of the strings (edition names, art): keep what
+            // is already on screen and only fill in what was missing.
+            if !new_track {
+                if let Some(o) = &self.snap {
+                    let keep = |old: &str, new: &mut String| {
+                        if !old.is_empty() {
+                            *new = old.to_string();
+                        }
+                    };
+                    keep(&o.title, &mut s.title);
+                    keep(&o.artist, &mut s.artist);
+                    keep(&o.album, &mut s.album);
+                    keep(&o.content_created, &mut s.content_created);
+                    if !self.art_url.is_empty() && !matches!(self.cover, CoverState::Failed) {
+                        s.art_url = self.art_url.clone();
+                    }
+                    s.track_no = o.track_no.or(s.track_no);
+                    s.disc_no = o.disc_no.or(s.disc_no);
+                }
+            }
             let new_art = s.art_url != self.art_url;
 
             // Only re-anchor if the reported position meaningfully disagrees with our
@@ -3923,6 +4429,7 @@ mod app {
                 self.capo_override = None;
                 self.chords_state = ChordsState::Idle;
                 self.translate_state = TranslateState::Idle;
+                self.translate_inflight = None;
 
                 // Year: metadata first, network fallback in background.
                 self.year = match year::from_content_created(&s.content_created) {
@@ -3954,7 +4461,9 @@ mod app {
                 }));
             }
 
-            if new_track && self.chords_on {
+            // with Ultimate Guitar on, the sheet is also fetched while chords are hidden, so the
+            // Key / BPM / Tuning rows can fill in
+            if new_track && (self.chords_on || self.args.chords_ug) {
                 self.fetch_chords(key, &s.artist, &s.title);
             }
 
@@ -4008,6 +4517,35 @@ mod app {
             }
         }
 
+        /// Fill what the player left empty from the file's own tags; ask for them once.
+        fn merge_local_tags(&mut self, s: &mut Snapshot) {
+            let Some(t) = self.local_tags.get(&s.url) else {
+                if self.tags_asked.insert(s.url.clone()) {
+                    let (url, tx) = (s.url.clone(), self.tx.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let tags = tags::read(&url);
+                        let _ = tx.send(AppEvent::Tags { url, tags });
+                    });
+                }
+                return;
+            };
+            let fill = |dst: &mut String, src: &str| {
+                if dst.is_empty() && !src.is_empty() {
+                    *dst = src.to_string();
+                }
+            };
+            // a title that is only the file name gives way to the real one
+            if !t.title.is_empty() && s.title == tags::title_from_url(&s.url) {
+                s.title = t.title.clone();
+            }
+            fill(&mut s.artist, &t.artist);
+            fill(&mut s.album, &t.album);
+            fill(&mut s.content_created, &t.year);
+            fill(&mut s.art_url, &t.art_url);
+            s.track_no = s.track_no.or(t.track);
+            s.disc_no = s.disc_no.or(t.disc);
+        }
+
         fn capo_path(key: u64) -> std::path::PathBuf {
             crate::util::cache_dir().join(format!("capo-{key:016x}.txt"))
         }
@@ -4036,7 +4574,6 @@ mod app {
             self.capo_override = o;
             self.snap_scroll = true;
             let path = Self::capo_path(self.track_key);
-            self.tasks.retain(|t| !t.is_finished());
             tokio::spawn(async move {
                 match o {
                     Some(n) => {
@@ -4092,12 +4629,13 @@ mod app {
 
         /// (sounding key, key of the shapes being shown), from the sheet's written key.
         /// The sheet's key is taken to be the key of its chord shapes, so it sounds
-        /// `sheet capo` semitones higher.
+        /// `sheet capo` semitones higher; transposing does not change it.
         pub fn keys(&self) -> Option<(chords::KeyInfo, chords::KeyInfo)> {
             let sh = self.sheet.as_ref()?;
             let k = chords::parse_key(sh.key.as_deref()?)?;
             Some((
-                k.shift(sh.capo as i32 + self.transpose),
+                // the song's own key never moves with `t` / `T`; only the chord letters do
+                k.shift(sh.capo as i32),
                 k.shift(self.chord_shift()),
             ))
         }
@@ -4163,16 +4701,35 @@ mod app {
             let Some(lines) = self.lyric_lines().filter(|l| !l.is_empty()) else {
                 return;
             };
-            if matches!(self.translate_state, TranslateState::Loading) {
+            let want = (self.track_key, self.args.translate_lang.clone());
+            if self.translate_inflight.as_ref() == Some(&want) {
                 return;
             }
+            self.translate_inflight = Some(want);
             self.translate_state = TranslateState::Loading;
             let (c, tx, key) = (self.client.clone(), self.tx.clone(), self.track_key);
-            let (lang, base) = (self.args.translate_lang.clone(), self.translate_base.clone());
+            let lang = self.args.translate_lang.clone();
+            let cfg = translate::Cfg {
+                google_base: self.translate_base.clone(),
+                fallback: self.args.translate_fallback,
+                fallback_url: self.args.translate_fallback_url.clone(),
+                fallback_key: self.args.translate_fallback_key.clone(),
+            };
             self.tasks.push(tokio::spawn(async move {
-                let lines = translate::lines(&c, base.as_deref(), &lang, &lines).await;
+                let lines = translate::lines(&c, &cfg, &lang, &lines).await;
                 let _ = tx.send(AppEvent::Translated { key, lang, lines });
             }));
+        }
+
+        /// Scroll the lyrics away from the playing line without touching playback.
+        pub fn browse_by(&mut self, rows: f64) {
+            self.browse += rows;
+            self.browse_at = Instant::now();
+        }
+
+        /// Browsing hands the view back to the playing line after a few idle seconds.
+        pub fn browse_expired(&self) -> bool {
+            self.browse != 0.0 && self.browse_at.elapsed() > Duration::from_secs(6)
         }
 
         fn toggle_translate(&mut self) {
@@ -4189,18 +4746,23 @@ mod app {
         pub fn setting_value(&self, s: Setting) -> String {
             let onoff = |b: bool| if b { "[x]" } else { "[ ]" }.to_string();
             match s {
+                Setting::Player => format!("< {} >", self.args.player),
                 Setting::Chords => onoff(self.chords_on),
                 Setting::ChordsUg => onoff(self.args.chords_ug),
                 Setting::Translate => onoff(self.translate_on),
                 Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
+                Setting::TranslateFallback => onoff(self.args.translate_fallback),
                 Setting::Minimal => onoff(self.minimal),
                 Setting::BigLyrics => onoff(self.big_lyrics),
+                Setting::BigScale => format!("< {}x >", self.args.big_scale),
                 Setting::LyricSpacing => format!("< {} >", self.args.lyric_spacing),
+                Setting::LyricPad => format!("< {} >", self.args.lyric_pad),
                 Setting::Cava => onoff(if self.minimal { self.cava_before_minimal } else { self.show_cava }),
                 Setting::ThirdPanel => onoff(self.placement == CavaPlacement::ThirdPanel),
                 Setting::CoverTheme => onoff(self.args.cover_theme),
                 Setting::AsciiCover => onoff(self.args.ascii_cover),
                 Setting::Transparent => onoff(self.args.transparent),
+                Setting::HideColorWarning => onoff(self.args.hide_color_warning),
                 Setting::Mouse => onoff(!self.args.no_mouse),
                 Setting::VolumeStep => format!("< {} >", self.vol_step),
             }
@@ -4210,19 +4772,43 @@ mod app {
         /// write the new values to the config file.
         pub fn change_setting(&mut self, s: Setting, dir: i32) {
             match s {
+                Setting::Player => {
+                    let mut all: Vec<String> = player::PRESETS.iter().map(|p| p.to_string()).collect();
+                    if !all.contains(&self.args.player) {
+                        all.push(self.args.player.clone());
+                    }
+                    let n = all.len() as i32;
+                    let cur = all.iter().position(|p| *p == self.args.player).unwrap_or(0) as i32;
+                    self.args.player = all[(cur + dir).rem_euclid(n) as usize].clone();
+                    self.ctl.set_player(&self.args.player);
+                }
                 Setting::Chords => self.toggle_chords(),
                 Setting::ChordsUg => self.args.chords_ug = !self.args.chords_ug,
                 Setting::Translate => self.toggle_translate(),
                 Setting::TranslateLang => {
                     let cur = LANGS.iter().position(|l| *l == self.args.translate_lang);
                     let n = LANGS.len() as i32;
-                    let i = cur.map_or(0, |i| (i as i32 + dir).rem_euclid(n) as usize);
+                    let i = match cur {
+                        Some(i) => (i as i32 + dir).rem_euclid(n) as usize,
+                        None if dir < 0 => LANGS.len() - 1,
+                        None => 0,
+                    };
                     self.args.translate_lang = LANGS[i].to_string();
                     self.translate_state = TranslateState::Idle;
                     self.snap_scroll = true;
                     self.ensure_translation();
                 }
+                Setting::TranslateFallback => self.args.translate_fallback = !self.args.translate_fallback,
                 Setting::Minimal => self.set_minimal(!self.minimal),
+                Setting::BigScale => {
+                    self.args.big_scale = (self.args.big_scale as i32 + dir).clamp(1, 3) as u16;
+                    self.snap_scroll = true;
+                }
+                Setting::LyricPad => {
+                    self.args.lyric_pad = (self.args.lyric_pad as i32 + dir).clamp(0, 10) as u16;
+                    self.snap_scroll = true;
+                }
+                Setting::HideColorWarning => self.args.hide_color_warning = !self.args.hide_color_warning,
                 Setting::BigLyrics => {
                     self.big_lyrics = !self.big_lyrics;
                     self.snap_scroll = true;
@@ -4240,6 +4826,10 @@ mod app {
                         CavaPlacement::UnderLyrics => CavaPlacement::ThirdPanel,
                     };
                     self.args.thirdpanel = self.placement == CavaPlacement::ThirdPanel;
+                    // startup shows cava whenever thirdpanel is set, so keep the two in step
+                    if self.args.thirdpanel && !self.minimal && !self.show_cava {
+                        self.set_cava(true);
+                    }
                 }
                 Setting::CoverTheme => self.args.cover_theme = !self.args.cover_theme,
                 Setting::AsciiCover => self.args.ascii_cover = !self.args.ascii_cover,
@@ -4250,22 +4840,32 @@ mod app {
                     self.args.volume_step = self.vol_step;
                 }
             }
-            self.save_settings();
+            self.save_settings(s);
         }
 
         /// The settings the menu owns, as config-file entries.
         pub fn settings_values(&self) -> Vec<(&'static str, toml::Value)> {
             use toml::Value::{Boolean as B, Integer as I, String as S};
             vec![
+                ("player", S(self.args.player.clone())),
                 ("chords", B(self.chords_on)),
                 ("chords_ug", B(self.args.chords_ug)),
                 ("translate", B(self.translate_on)),
                 ("translate_lang", S(self.args.translate_lang.clone())),
+                ("translate_fallback", B(self.args.translate_fallback)),
+                ("big_scale", I(self.args.big_scale as i64)),
+                ("lyric_pad", I(self.args.lyric_pad as i64)),
+                ("hide_color_warning", B(self.args.hide_color_warning)),
                 ("minimal_view", B(self.minimal)),
                 ("big_lyrics", B(self.big_lyrics)),
                 ("lyric_spacing", I(self.args.lyric_spacing as i64)),
                 ("cava", B(if self.minimal { self.cava_before_minimal } else { self.show_cava })),
-                ("thirdpanel", B(self.placement == CavaPlacement::ThirdPanel)),
+                // saved off while cava is off: startup would otherwise turn cava back on
+                (
+                    "thirdpanel",
+                    B(self.placement == CavaPlacement::ThirdPanel
+                        && (if self.minimal { self.cava_before_minimal } else { self.show_cava })),
+                ),
                 ("cover_theme", B(self.args.cover_theme)),
                 ("ascii_cover", B(self.args.ascii_cover)),
                 ("transparent", B(self.args.transparent)),
@@ -4274,9 +4874,13 @@ mod app {
             ]
         }
 
-        fn save_settings(&mut self) {
+        /// Write only the setting that changed, so flags given for this run (`--minimal`…)
+        /// don't leak into the file.
+        fn save_settings(&mut self, s: Setting) {
             let path = self.args.config.clone().unwrap_or_else(config::default_path);
-            self.settings_note = config::save(&path, &self.settings_values())
+            let keys = s.config_keys();
+            let values: Vec<_> = self.settings_values().into_iter().filter(|(k, _)| keys.contains(k)).collect();
+            self.settings_note = config::save(&path, &values)
                 .err()
                 .map(|e| format!("couldn't save {}: {e}", path.display()));
         }
@@ -4292,7 +4896,7 @@ mod app {
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.change_setting(Setting::ALL[self.settings_sel], 1)
                 }
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => self.show_settings = false,
+                KeyCode::Esc | KeyCode::Char('q' | 's' | 'S') => self.show_settings = false,
                 _ => {}
             }
         }
@@ -4359,6 +4963,9 @@ mod app {
                         }
                         return false;
                     }
+                    if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        return false;
+                    }
                     if let Some(a) = action_for(k.code) {
                         return self.run(a);
                     }
@@ -4396,6 +5003,12 @@ mod app {
                     } else if self.lyric_hits.area.contains(pos) {
                         self.click_lyric(pos.y);
                     }
+                }
+                Event::Mouse(m)
+                    if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                        && self.lyric_hits.area.contains(Position::new(m.column, m.row)) =>
+                {
+                    self.browse_by(if m.kind == MouseEventKind::ScrollUp { -3.0 } else { 3.0 });
                 }
                 Event::Mouse(m)
                     if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
@@ -4449,6 +5062,11 @@ mod app {
                     self.snap_scroll = true;
                 }
                 Action::Minimal => self.set_minimal(!self.minimal),
+                Action::BrowseUp => self.browse_by(-1.0),
+                Action::BrowseDown => self.browse_by(1.0),
+                Action::BrowsePageUp => self.browse_by(-8.0),
+                Action::BrowsePageDown => self.browse_by(8.0),
+                Action::BrowseEnd => self.browse = 0.0,
                 Action::Translate => self.toggle_translate(),
                 Action::Settings => self.show_settings = true,
                 Action::Help => {
@@ -4547,7 +5165,7 @@ mod app {
 
         /// Whether the next frame would differ even without new events.
         pub fn animating(&self) -> bool {
-            (self.lyric_scroll - self.lyric_scroll_target).abs() > 0.02
+            (self.lyric_scroll - self.lyric_scroll_target).abs() > 0.02 || self.browse != 0.0
         }
     }
 }
@@ -4557,7 +5175,7 @@ mod app {
 // ════════════════════════════════════════════════════════════════════════════
 mod bigfont {
     /// 5×7 bitmap, one `u8` per row, bit 4 = leftmost pixel.
-    fn glyph(c: char) -> Option<[u8; 7]> {
+    fn base_glyph(c: char) -> Option<[u8; 7]> {
         Some(match c {
             ' ' => [0; 7],
             'A' => [
@@ -4706,14 +5324,75 @@ mod bigfont {
         })
     }
 
-    /// Upper-case; `None` if the font can't draw the character (accented letters, Hangul… make
-    /// the caller fall back to normal text instead of drawing e.g. `Å` as `A`).
+    /// Accent marks as a top row. The letter's top two rows are merged to make room for it,
+    /// so accented capitals stay 7 rows tall.
+    fn accented(c: char) -> Option<[u8; 7]> {
+        let (base, mark): (char, u8) = match c {
+            'Ä' => ('A', 0b01010),
+            'Ë' => ('E', 0b01010),
+            'Ï' => ('I', 0b01010),
+            'Ö' => ('O', 0b01010),
+            'Ü' => ('U', 0b01010),
+            'Ÿ' => ('Y', 0b01010),
+            'Å' => ('A', 0b00100),
+            'Á' | 'É' | 'Í' | 'Ó' | 'Ú' | 'Ý' => (
+                match c {
+                    'Á' => 'A',
+                    'É' => 'E',
+                    'Í' => 'I',
+                    'Ó' => 'O',
+                    'Ú' => 'U',
+                    _ => 'Y',
+                },
+                0b00010,
+            ),
+            'À' | 'È' | 'Ì' | 'Ò' | 'Ù' => (
+                match c {
+                    'À' => 'A',
+                    'È' => 'E',
+                    'Ì' => 'I',
+                    'Ò' => 'O',
+                    _ => 'U',
+                },
+                0b01000,
+            ),
+            'Â' | 'Ê' | 'Î' | 'Ô' | 'Û' => (
+                match c {
+                    'Â' => 'A',
+                    'Ê' => 'E',
+                    'Î' => 'I',
+                    'Ô' => 'O',
+                    _ => 'U',
+                },
+                0b00100,
+            ),
+            'Ñ' => ('N', 0b01101),
+            'Ø' => return Some([0b01110, 0b10011, 0b10101, 0b10101, 0b10101, 0b11001, 0b01110]),
+            _ => return None,
+        };
+        let g = base_glyph(base)?;
+        Some([mark, g[0] | g[1], g[2], g[3], g[4], g[5], g[6]])
+    }
+
+    fn glyph(c: char) -> Option<[u8; 7]> {
+        base_glyph(c).or_else(|| accented(c))
+    }
+
+    /// Upper-case; `None` if the font can't draw the character (Hangul, Arabic… make
+    /// the caller fall back to normal text).
     fn fold(c: char) -> Option<char> {
         let c = match c {
             '’' | '‘' | '`' | '´' => '\'',
             '“' | '”' => '"',
             '–' | '—' => '-',
-            c => c.to_ascii_uppercase(),
+            c if c.is_ascii() => c.to_ascii_uppercase(),
+            c => {
+                let mut up = c.to_uppercase();
+                match (up.next(), up.next()) {
+                    (Some(u), None) => u, // `ß` → "SS" is not one letter: leave it undrawable
+                    _ => c,
+                }
+            }
         };
         glyph(c).map(|_| c)
     }
@@ -4727,7 +5406,16 @@ mod bigfont {
     /// `max_chunks` wrapped pieces tall (each piece = 4 text rows, pieces separated by one
     /// blank row). `None` when it can't be drawn — unsupported characters, a word wider than
     /// the panel, or too many pieces — so the caller can fall back to normal text.
+    #[cfg(test)]
     pub fn render(text: &str, max_cols: usize, max_chunks: usize) -> Option<Vec<String>> {
+        render_scaled(text, max_cols, max_chunks, 1)
+    }
+
+    /// [`render`] with every pixel drawn `scale` (1–3) times as wide and tall; a piece is
+    /// then `4 * scale` rows tall.
+    pub fn render_scaled(text: &str, max_cols: usize, max_chunks: usize, scale: usize) -> Option<Vec<String>> {
+        let scale = scale.clamp(1, 3);
+        let advance = |c: char| advance(c) * scale;
         let text = text.replace('…', "...");
         let mut words: Vec<Vec<char>> = Vec::new();
         for w in text.split_whitespace() {
@@ -4787,7 +5475,17 @@ mod bigfont {
             for row in px.iter_mut() {
                 row.pop(); // trailing gap
             }
-            for pair in 0..4 {
+            // each pixel becomes a scale × scale block
+            if scale > 1 {
+                px = px
+                    .iter()
+                    .flat_map(|row| {
+                        let wide: Vec<bool> = row.iter().flat_map(|&b| std::iter::repeat_n(b, scale)).collect();
+                        std::iter::repeat_n(wide, scale)
+                    })
+                    .collect();
+            }
+            for pair in 0..4 * scale {
                 let (top, bot) = (&px[pair * 2], &px[pair * 2 + 1]);
                 rows.push(
                     top.iter()
@@ -4876,7 +5574,13 @@ mod ui {
         f.render_widget(block, r);
         let view_h = inner.height.saturating_sub(1) as usize;
         // keep the selected row in view on short terminals
-        let first = app.settings_sel.saturating_sub(view_h.saturating_sub(1));
+        let sel = app.settings_sel;
+        if sel < app.settings_top {
+            app.settings_top = sel;
+        } else if sel >= app.settings_top + view_h.max(1) {
+            app.settings_top = sel + 1 - view_h.max(1);
+        }
+        let first = app.settings_top;
         let lines: Vec<Line> = Setting::ALL
             .iter()
             .enumerate()
@@ -4894,6 +5598,9 @@ mod ui {
                     label.push_str(" *");
                 }
                 let value = app.setting_value(*s);
+                // on a narrow terminal shorten the label so the value stays visible
+                let room = (inner.width as usize).saturating_sub(crate::util::width(&value) + 4);
+                while crate::util::width(&label) > room && label.pop().is_some() {}
                 let pad = (inner.width as usize)
                     .saturating_sub(crate::util::width(&label) + crate::util::width(&value) + 2);
                 Line::from(vec![
@@ -4905,8 +5612,11 @@ mod ui {
             })
             .collect();
         f.render_widget(Paragraph::new(lines), Rect { height: view_h as u16, ..inner });
+        if inner.height == 0 {
+            return;
+        }
         let hint = match &app.settings_note {
-            Some(n) => n.clone(),
+            Some(n) => n.chars().take(inner.width as usize).collect(),
             None => "↑/↓ select · space/←/→ change · * restart · esc".to_string(),
         };
         f.render_widget(
@@ -5092,6 +5802,29 @@ mod ui {
     }
 
     /// One-row progress bar: ━ filled, ─ remaining, ● knob.
+    /// `0:42 ━━━●─── 3:10`: both timestamps sit inside the row, the bar between them.
+    /// Returns the bar part (the click target for seeking).
+    fn timed_bar(f: &mut Frame, th: &Theme, row: Rect, pos: f64, length: f64) -> Rect {
+        let (l, r) = (fmt_time(pos), fmt_time(length));
+        let side = (l.chars().count().max(r.chars().count()) + 1) as u16;
+        if row.width <= side * 2 + 4 {
+            let bar = row;
+            progress_bar(f, th, bar, if length > 0.0 { (pos / length).clamp(0.0, 1.0) } else { 0.0 });
+            return bar;
+        }
+        let bar = Rect { x: row.x + side, width: row.width - side * 2, ..row };
+        f.render_widget(
+            Paragraph::new(Span::styled(l, Style::new().fg(th.fade(0.4)))),
+            Rect { width: side, ..row },
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(r, Style::new().fg(th.fade(0.4)))).alignment(Alignment::Right),
+            Rect { x: row.right() - side, width: side, ..row },
+        );
+        progress_bar(f, th, bar, if length > 0.0 { (pos / length).clamp(0.0, 1.0) } else { 0.0 });
+        bar
+    }
+
     fn progress_bar(f: &mut Frame, th: &Theme, r: Rect, frac: f64) {
         let w = r.width as usize;
         if w == 0 {
@@ -5139,29 +5872,7 @@ mod ui {
                 .alignment(Alignment::Center),
                 title,
             );
-            // time │ bar │ time, with the bar clickable like the normal one
-            let pos = app.position();
-            let (l, r) = (fmt_time(pos), fmt_time(s.length));
-            let side = (l.chars().count().max(r.chars().count()) + 1) as u16;
-            if prog.width > side * 2 + 4 {
-                let bar = Rect {
-                    x: prog.x + side,
-                    width: prog.width - side * 2,
-                    ..prog
-                };
-                f.render_widget(
-                    Paragraph::new(Span::styled(l, Style::new().fg(th.fade(0.4)))),
-                    Rect { width: side, ..prog },
-                );
-                f.render_widget(
-                    Paragraph::new(Span::styled(r, Style::new().fg(th.fade(0.4))))
-                        .alignment(Alignment::Right),
-                    Rect { x: prog.right() - side, width: side, ..prog },
-                );
-                let frac = if s.length > 0.0 { (pos / s.length).clamp(0.0, 1.0) } else { 0.0 };
-                progress_bar(f, &th, bar, frac);
-                app.hits.progress = bar;
-            }
+            app.hits.progress = timed_bar(f, &th, prog, app.position(), s.length);
         }
         draw_lyrics_and_diagrams(f, app, body);
     }
@@ -5277,7 +5988,8 @@ mod ui {
                 y: inner.y + (i / cols) as u16 * CELL_H,
                 width: CELL_W - 1,
                 height: CELL_H - 1,
-            };
+            }
+            .intersection(inner);
             let is_active = active == Some(i);
             let body = if is_active { th.primary() } else { th.fade(0.35) };
             let name_style = if is_active {
@@ -5324,9 +6036,9 @@ mod ui {
     }
 
     // ── left column ─────────────────────────────────────────────────────────
-    /// The metadata block. Release Date + BPM share a row, Time + Key/Camelot share a row
-    /// (each falls back to two rows when the panel is too narrow); a Capo row appears only
-    /// when there is a capo. Key / BPM / Capo are hidden when no source provides them.
+    /// The metadata block: Track No | Tuning, Release | Capo, BPM | Key (each pair falls back
+    /// to two rows when the panel is too narrow). Tuning / Capo / BPM / Key are hidden when
+    /// no source provides them; without a capo the tuning takes the Capo slot.
     fn meta_lines(app: &App, snap: &crate::player::Snapshot, avail: usize) -> Vec<Line<'static>> {
         let th = &app.theme;
         let label = |s: &str| {
@@ -5355,7 +6067,6 @@ mod ui {
             YearState::Known(y) => y.clone(),
             YearState::NotFound => "N/A".to_string(),
         });
-        let pos = app.position();
 
         // `left` and an optional `right` (label, value) on one row, or two rows if too wide.
         let pair = |out: &mut Vec<Line<'static>>, left: Vec<Span<'static>>, right: Option<Vec<Span<'static>>>| {
@@ -5393,37 +6104,40 @@ mod ui {
             Line::from(vec![label("Album"), val(dash(&snap.album))]),
             Line::from(vec![label("Track No"), val(track_no)]),
         ];
-        pair(
-            &mut out,
-            vec![label("Release"), val(date)],
-            app.bpm().map(|b| tag("BPM:", b.to_string())),
-        );
-        let keytxt = app
-            .keys()
-            .map(|(sounding, _)| tag("Key:", format!("{} / {}", sounding.long(), sounding.camelot())));
-        pair(
-            &mut out,
-            vec![label("Time"), val(format!("{} / {}", fmt_time(pos), fmt_time(snap.length)))],
-            keytxt,
-        );
-        if app.chords_on || app.show_diagrams {
-            if let Some(t) = app.tuning() {
-                pair(&mut out, vec![label("Tuning"), val(t.to_string())], None);
-            }
-        }
         let capo = app.effective_capo();
-        if app.chords_on && capo > 0 {
+        let capo_tag = if app.chords_on && capo > 0 {
             let mut v = format!("{capo}");
             if let Some((_, shapes)) = app.keys() {
-                v.push_str(&format!("  (shapes in {})", shapes.short()));
+                v.push_str(&format!(" ({})", shapes.short()));
             }
             if app.capo_override.is_some() {
                 let sheet_capo = app.sheet_info().map_or(0, |i| i.1);
-                v.push_str(&format!("  [sheet: {sheet_capo}]"));
+                v.push_str(&format!(" [sheet {sheet_capo}]"));
             }
-            pair(&mut out, vec![label("Capo"), val(v)], None);
+            Some(tag("Capo:", v))
         } else if app.chords_on && app.capo_override == Some(0) {
-            pair(&mut out, vec![label("Capo"), val("none".into())], None);
+            Some(tag("Capo:", "none".into()))
+        } else {
+            None
+        };
+        let tuning = (app.chords_on || app.show_diagrams)
+            .then(|| app.tuning().map(|t| tag("Tuning:", t.to_string())))
+            .flatten();
+        // Track No | Tuning, Release | Capo, BPM | Key. Without a Capo the tuning takes
+        // the Capo slot on the Release row.
+        let (tuning_top, release_right) = match (&capo_tag, tuning) {
+            (Some(_), t) => (t, capo_tag),
+            (None, t) => (None, t),
+        };
+        let last = out.pop().unwrap_or_default();
+        pair(&mut out, last.spans, tuning_top);
+        pair(&mut out, vec![label("Release"), val(date)], release_right);
+        let keytxt = app
+            .keys()
+            .map(|(sounding, _)| tag("Key:", format!("{} / {}", sounding.long(), sounding.camelot())));
+        if app.bpm().is_some() || keytxt.is_some() {
+            let bpm = app.bpm().map_or("—".to_string(), |b| b.to_string());
+            pair(&mut out, vec![label("BPM"), val(bpm)], keytxt);
         }
         out
     }
@@ -5489,13 +6203,7 @@ mod ui {
         f.render_widget(Paragraph::new(meta_lines), meta_a);
 
         // Progress bar
-        app.hits.progress = prog_a;
-        let frac = if snap.length > 0.0 {
-            (pos / snap.length).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        progress_bar(f, &th, prog_a, frac);
+        app.hits.progress = timed_bar(f, &th, prog_a, pos, snap.length);
 
         // Buttons
         let play_lbl = if snap.status == Status::Playing {
@@ -5663,6 +6371,15 @@ mod ui {
     }
 
     // ── lyrics ──────────────────────────────────────────────────────────────
+    /// Closing punctuation (CJK and Latin) that must not start a wrapped line.
+    fn no_line_start(c: char) -> bool {
+        matches!(
+            c,
+            '，' | '。' | '、' | '！' | '？' | '；' | '：' | '）' | '」' | '』' | '】' | '》' | '〉' | '”' | '’'
+                | '…' | 'ー' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']' | '}'
+        )
+    }
+
     /// Greedy word-wrap by display width.
     pub fn wrap(text: &str, width: usize) -> Vec<String> {
         if width == 0 {
@@ -5681,9 +6398,15 @@ mod ui {
                 // hard-break very long tokens
                 for ch in word.chars() {
                     let cw = crate::util::cw(ch);
-                    if cur_w + cw > width {
+                    if cur_w > 0 && cur_w + cw > width {
+                        // closing punctuation never starts a line: carry the last char over
+                        let carry = if no_line_start(ch) && cur.chars().count() > 1 { cur.pop() } else { None };
                         out.push(std::mem::take(&mut cur));
                         cur_w = 0;
+                        if let Some(p) = carry {
+                            cur.push(p);
+                            cur_w = crate::util::cw(p);
+                        }
                     }
                     cur.push(ch);
                     cur_w += cw;
@@ -5706,6 +6429,9 @@ mod ui {
     /// Same wrapping as [`wrap`] but returns `(start, end)` char ranges into `norm` (the
     /// single-spaced text), so chord columns can be mapped onto the wrapped rows.
     pub fn wrap_ranges(norm: &str, width: usize) -> Vec<(usize, usize)> {
+        if width == 0 {
+            return vec![];
+        }
         let chars: Vec<char> = norm.chars().collect();
         let cw = crate::util::cw;
         let mut rows: Vec<(usize, usize)> = Vec::new();
@@ -5719,8 +6445,14 @@ mod ui {
             if ww > width {
                 for (k, c) in chars[s..s + len].iter().enumerate() {
                     if cur_w + cw(*c) > width && cur_w > 0 {
-                        rows.push((start, end));
-                        cur_w = 0;
+                        if no_line_start(*c) && end > start + 1 {
+                            rows.push((start, end - 1));
+                            start = end - 1;
+                            cur_w = cw(chars[end - 1]);
+                        } else {
+                            rows.push((start, end));
+                            cur_w = 0;
+                        }
                     }
                     if cur_w == 0 {
                         start = s + k;
@@ -5743,7 +6475,7 @@ mod ui {
     }
 
     /// `Am   G   C` with each chord at its column; neighbours are pushed apart, never overlap.
-    pub fn chord_line(cs: &[(usize, String)], text: &[char], n: i32, flats: bool) -> String {
+    pub fn chord_line(cs: &[(usize, String)], text: &[char], limit: usize, n: i32, flats: bool) -> String {
         // chord columns are char indices into `text`; place them by terminal cell width
         let cell = |col: usize| -> usize {
             text.iter().take(col).map(|c| crate::util::cw(*c)).sum::<usize>()
@@ -5753,7 +6485,10 @@ mod ui {
         let mut w = 0usize;
         for (col, name) in cs {
             let name = chords::transpose(name, n, flats);
-            let at = cell(*col).max(if w > 0 { w + 1 } else { 0 });
+            let floor = if w > 0 { w + 1 } else { 0 };
+            // a chord that would run past the panel edge is pulled left on its own,
+            // instead of the whole row shifting off its words
+            let at = cell(*col).min(limit.saturating_sub(crate::util::width(&name))).max(floor);
             s.push_str(&" ".repeat(at - w));
             w = at + crate::util::width(&name);
             s.push_str(&name);
@@ -5800,12 +6535,16 @@ mod ui {
         th: &Theme,
         lines: &[String],
         c: usize,
-        gap: usize,
+        (gap, scale): (usize, usize),
         chord_summary: Option<String>,
-    ) {
+    ) -> Vec<Option<usize>> {
         let width = inner.width as usize;
-        let big = bigfont::render(&lines[c], width, 3)
-            .filter(|rows| rows.len() as u16 + 4 <= inner.height);
+        // the biggest size that still leaves room for the neighbouring lines
+        let big = (1..=scale.clamp(1, 3))
+            .rev()
+            .find_map(|sc| bigfont::render_scaled(&lines[c], width, 3, sc).filter(|rows| rows.len() as u16 + 4 <= inner.height));
+        // which lyric line each panel row belongs to (for click-to-seek)
+        let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
         let (stage, stage_style): (Vec<String>, Style) = match big {
             Some(rows) => (rows, Style::new().fg(th.primary())),
             None => (
@@ -5816,8 +6555,9 @@ mod ui {
         let sh = (stage.len() as u16).min(inner.height);
         let top = inner.y + (inner.height - sh) / 2;
 
-        let put = |f: &mut Frame, y: i32, text: &str, style: Style| {
+        let put = |f: &mut Frame, y: i32, li: usize, text: &str, style: Style| {
             if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
+                hits.borrow_mut()[(y - inner.y as i32) as usize] = Some(li);
                 f.render_widget(
                     Paragraph::new(Line::styled(text.to_string(), style))
                         .alignment(Alignment::Center),
@@ -5831,12 +6571,13 @@ mod ui {
         };
 
         for (i, row) in stage.iter().take(sh as usize).enumerate() {
-            put(f, top as i32 + i as i32, row, stage_style);
+            put(f, top as i32 + i as i32, c, row, stage_style);
         }
         if let Some(cs) = chord_summary {
             put(
                 f,
                 top as i32 - 1,
+                c,
                 &cs,
                 Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
             );
@@ -5847,7 +6588,7 @@ mod ui {
         for k in 1..=c {
             let style = fade_style(th, k, true);
             for row in wrap(&lines[c - k], width).iter().rev() {
-                put(f, y, row, style);
+                put(f, y, c - k, row, style);
                 y -= 1;
             }
             y -= gap as i32;
@@ -5860,7 +6601,7 @@ mod ui {
         for (k, line) in lines.iter().enumerate().skip(c + 1) {
             let style = fade_style(th, k - c, false);
             for row in wrap(line, width) {
-                put(f, y, &row, style);
+                put(f, y, k, &row, style);
                 y += 1;
             }
             y += gap as i32;
@@ -5868,22 +6609,32 @@ mod ui {
                 break;
             }
         }
+        hits.into_inner()
     }
 
     fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
-        let title = if !app.translate_on {
+        let shown = app.translation().is_some_and(|t| app.lyric_lines().is_some_and(|l| l.len() == t.len()));
+        if app.browse_expired() {
+            app.browse = 0.0;
+        }
+        let title = if app.browse != 0.0 {
+            "lyrics · browsing — End to follow".to_string()
+        } else if !app.translate_on {
             "lyrics".to_string()
         } else {
             use crate::app::TranslateState as TS;
             match (&app.translate_state, app.translation()) {
-                (_, Some(_)) => format!("lyrics · translated ({})", app.args.translate_lang),
+                (_, Some(_)) if shown && app.translate_backend != "google" => {
+                    format!("lyrics · translated ({}, {})", app.args.translate_lang, app.translate_backend)
+                }
+                (_, Some(_)) if shown => format!("lyrics · translated ({})", app.args.translate_lang),
                 (TS::Failed(e), _) => format!("lyrics · {e}"),
                 _ => "lyrics · translating…".to_string(),
             }
         };
         let block = panel(app, &title);
         let inner = block.inner(area).inner(ratatui::layout::Margin {
-            horizontal: 2,
+            horizontal: 2 + app.args.lyric_pad,
             vertical: 1,
         });
         f.render_widget(block, area);
@@ -5961,7 +6712,7 @@ mod ui {
         let flats = app.use_flats();
 
         // Big-font mode uses the fixed "focus" layout instead of the scrolling one.
-        if app.big_lyrics && !plain {
+        if app.big_lyrics && !plain && app.browse == 0.0 {
             if let Some(c) = current {
                 app.lyric_scroll_target = app.lyric_scroll; // nothing left to animate
                 let summary = aligned.as_ref().and_then(|a| a.per_line.get(c)).and_then(|cs| {
@@ -5974,7 +6725,9 @@ mod ui {
                         names.join("   ")
                     })
                 });
-                draw_focus(f, inner, &th, &lines, c, gap, summary);
+                let rows = draw_focus(f, inner, &th, &lines, c, (gap, app.args.big_scale as usize), summary);
+                // top = 0: the row index is the offset from the panel's top edge
+                app.lyric_hits = crate::app::LyricHits { area: inner, top: 0, rows };
                 return;
             }
         }
@@ -5992,6 +6745,8 @@ mod ui {
             intro: bool,
             /// `[ Instrumental / Solo ]` placeholder; only drawn while it is active.
             marker: Option<Mk>,
+            /// A chord row played during this break; drawn only while the break is active.
+            gap: Option<Mk>,
         }
         #[derive(Clone, Copy, PartialEq)]
         enum Mk {
@@ -6008,6 +6763,7 @@ mod ui {
             chord_x: None,
             intro: false,
             marker: Some(m),
+            gap: None,
         };
         // Time before the first lyric: an instrumental marker, then the intro chords.
         if !plain && stamps.first().is_some_and(|t| *t > threshold) {
@@ -6019,15 +6775,25 @@ mod ui {
                 let names: Vec<String> = names.iter().map(|n| chords::transpose(n, tr, flats)).collect();
                 let text = names.join("   ");
                 let x = width.saturating_sub(crate::util::width(&text)) / 2;
-                rows.push(Row { li: 0, text, chord_x: Some(x), intro: true, marker: None });
+                rows.push(Row { li: 0, text, chord_x: Some(x), intro: true, marker: None, gap: None });
             }
             if !a.intro.is_empty() {
                 for _ in 0..gap.max(1) {
-                    rows.push(Row { li: 0, text: String::new(), chord_x: None, intro: true, marker: None });
+                    rows.push(Row { li: 0, text: String::new(), chord_x: None, intro: true, marker: None, gap: None });
                 }
             }
         }
         let intro_rows = rows.len();
+        // chord rows for the break after lyric line `li`, shown while that break is active
+        let push_gap = |rows: &mut Vec<Row>, li: usize, m: Mk| {
+            let Some(a) = &aligned else { return };
+            for names in a.gaps.get(li).into_iter().flatten() {
+                let names: Vec<String> = names.iter().map(|n| chords::transpose(n, tr, flats)).collect();
+                let text = names.join("   ");
+                let x = width.saturating_sub(crate::util::width(&text)) / 2;
+                rows.push(Row { li, text, chord_x: Some(x), intro: false, marker: None, gap: Some(m) });
+            }
+        };
         let mut starts = Vec::with_capacity(lines.len());
         let mut ends = Vec::with_capacity(lines.len());
         for (i, l) in lines.iter().enumerate() {
@@ -6039,7 +6805,7 @@ mod ui {
             match line_chords {
                 None => {
                     for r in wrap(l, width) {
-                        rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None });
+                        rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None, gap: None });
                     }
                 }
                 Some(cs) => {
@@ -6057,13 +6823,14 @@ mod ui {
                             let x = width.saturating_sub(crate::util::width(&text)) / 2;
                             rows.push(Row {
                                 li: i,
-                                text: chord_line(&here, &chars[*rs..*re], tr, flats),
+                                text: chord_line(&here, &chars[*rs..*re], width.saturating_sub(x), tr, flats),
                                 chord_x: Some(x),
                                 intro: false,
                                 marker: None,
+                                gap: None,
                             });
                         }
-                        rows.push(Row { li: i, text, chord_x: None, intro: false, marker: None });
+                        rows.push(Row { li: i, text, chord_x: None, intro: false, marker: None, gap: None });
                     }
                 }
             }
@@ -6072,15 +6839,19 @@ mod ui {
             if !plain && l.trim() != "♪" {
                 let next = stamps.get(i + 1).copied();
                 match next {
-                    Some(n) if n - stamps[i] > threshold => rows.push(marker_row(i, Mk::After(i))),
+                    Some(n) if n - stamps[i] > threshold => {
+                        rows.push(marker_row(i, Mk::After(i)));
+                        push_gap(&mut rows, i, Mk::After(i));
+                    }
                     None if length > 0.0 && length - stamps[i] > threshold + est_sung(l) => {
-                        rows.push(marker_row(i, Mk::Tail))
+                        rows.push(marker_row(i, Mk::Tail));
+                        push_gap(&mut rows, i, Mk::Tail);
                     }
                     _ => {}
                 }
             }
             for _ in 0..gap {
-                rows.push(Row { li: i, text: String::new(), chord_x: None, intro: false, marker: None });
+                rows.push(Row { li: i, text: String::new(), chord_x: None, intro: false, marker: None, gap: None });
             }
         }
         if rows.is_empty() {
@@ -6107,6 +6878,9 @@ mod ui {
         let now = std::time::Instant::now();
         let dt = now.duration_since(app.last_anim).as_secs_f64().min(0.1);
         app.last_anim = now;
+        // browsing moves the view, not the playback: the target stays relative to the playing line
+        app.browse = app.browse.clamp(-target - 1.0, rows.len() as f64 - target);
+        let target = target + app.browse;
         app.lyric_scroll_target = target;
         if app.snap_scroll || (target - app.lyric_scroll).abs() > inner.height as f64 {
             app.lyric_scroll = target;
@@ -6129,7 +6903,7 @@ mod ui {
             rows: rows
                 .iter()
                 .map(|r| {
-                    (!plain && !r.intro && r.marker.is_none() && !r.text.is_empty()).then_some(r.li)
+                    (!plain && !r.intro && r.marker.is_none() && r.gap.is_none() && !r.text.is_empty()).then_some(r.li)
                 })
                 .collect(),
         };
@@ -6154,15 +6928,15 @@ mod ui {
             if idx < 0 || idx as usize >= rows.len() {
                 continue;
             }
-            let Row { li, text, chord_x, intro, marker } = &rows[idx as usize];
+            let Row { li, text, chord_x, intro, marker, gap } = &rows[idx as usize];
             if text.is_empty() {
                 continue;
             }
-            if let Some(m) = marker {
-                // Shown only while the break is actually happening, with a countdown.
+            // (is the break happening now, seconds left in it)
+            let break_state = |m: Mk| -> (bool, f64) {
                 let t = pos + app.offset;
                 let last = stamps.len().saturating_sub(1);
-                let (active, remain) = match *m {
+                match m {
                     Mk::Lead => (current.is_none(), stamps[0] - t),
                     Mk::After(i) => (
                         current == Some(i) && t >= stamps[i] + est_sung(&lines[i]),
@@ -6172,7 +6946,27 @@ mod ui {
                         current == Some(last) && t >= stamps[last] + est_sung(&lines[last]),
                         0.0,
                     ),
-                };
+                }
+            };
+            if let (Some(m), Some(x)) = (gap, chord_x) {
+                // play-along chords of a solo / instrumental break, only while it lasts
+                if !break_state(*m).0 {
+                    continue;
+                }
+                let w = crate::util::width(text.as_str()) as u16;
+                let xs = (inner.x + *x as u16).min(inner.right().saturating_sub(w)).max(inner.x);
+                f.render_widget(
+                    Paragraph::new(Line::styled(
+                        text.as_str(),
+                        Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+                    )),
+                    Rect { x: xs, y: inner.y + y, width: w.min(inner.right() - xs), height: 1 },
+                );
+                continue;
+            }
+            if let Some(m) = marker {
+                // Shown only while the break is actually happening, with a countdown.
+                let (active, remain) = break_state(*m);
                 if !active {
                     continue;
                 }
@@ -6304,6 +7098,11 @@ mod ui {
             format!("{} + cover accent", th.source)
         } else {
             th.source.clone()
+        };
+        // "terminal colors (no usable colour file)" → "terminal colors" when hidden
+        let source = match source.find(" (") {
+            Some(i) if app.args.hide_color_warning && source.starts_with("terminal colors") => source[..i].to_string(),
+            _ => source,
         };
         let chords_info = if app.chords_on {
             use crate::app::ChordsState as CS;
@@ -6482,12 +7281,23 @@ mod tests {
     }
 
     #[test]
+    fn track_identity_never_empty_and_tuning_clean() {
+        assert!(!util::normalize_track("(Live)").is_empty());
+        assert!(!util::normalize_track("---").is_empty());
+        assert_eq!(util::normalize_track("Song - 1999"), "song - 1999");
+        let store: serde_json::Value = serde_json::from_str(r#"{"tuning":{"name":"","value":""}}"#).unwrap();
+        assert!(ug::find_key(&store, "tuning").is_some());
+    }
+
+    #[test]
     fn chords_align_on_cell_width() {
         // each Hangul syllable is two cells wide, so a chord over the 3rd char sits at cell 4
         let text: Vec<char> = "안녕하세요".chars().collect();
-        assert_eq!(ui::chord_line(&[(2, "Am".into())], &text, 0, false), "    Am");
+        assert_eq!(ui::chord_line(&[(2, "Am".into())], &text, 99, 0, false), "    Am");
+        // pulled left to fit instead of overflowing
+        assert_eq!(ui::chord_line(&[(2, "Am7".into())], &text, 6, 0, false), "   Am7");
         let text: Vec<char> = "Åäö".chars().collect();
-        assert_eq!(ui::chord_line(&[(2, "G".into())], &text, 0, false), "  G");
+        assert_eq!(ui::chord_line(&[(2, "G".into())], &text, 99, 0, false), "  G");
     }
 
     #[test]
@@ -6720,11 +7530,15 @@ mod tests {
         assert!(bigfont::render("one two three four five six seven", 20, 2).is_none());
         assert!(bigfont::render("supercalifragilistic", 30, 3).is_none());
         assert!(bigfont::render("你好", 60, 3).is_none());
-        // curly quotes and ellipsis work; accented letters fall back to real text rather
-        // than being drawn as their ASCII lookalike (Å → A)
+        // curly quotes and ellipsis work
         assert!(bigfont::render("Cafe – don’t…", 100, 1).is_some());
-        assert!(bigfont::render("Café", 100, 1).is_none());
-        assert!(bigfont::render("ÅÄÖ", 100, 1).is_none());
+        // accented letters are drawn with their accent, not as the ASCII lookalike
+        let plain = bigfont::render("AAO", 100, 1).unwrap();
+        let acc = bigfont::render("ÅÄÖ", 100, 1).unwrap();
+        assert_eq!(acc.len(), plain.len());
+        assert_ne!(acc, plain);
+        assert!(bigfont::render("Café", 100, 1).is_some());
+        assert!(bigfont::render("ß", 100, 1).is_none());
     }
 
     #[test]
@@ -6996,6 +7810,7 @@ mod tests {
             disc_no: None,
             content_created: String::new(),
             volume: None,
+            url: String::new(),
         }
     }
 
@@ -7009,6 +7824,141 @@ mod tests {
         // different songs / artists stay different
         assert_ne!(base, k("Metallica", "Sad But True", "Metallica"));
         assert_ne!(base, k("Megadeth", "Enter Sandman", "Metallica"));
+    }
+
+    #[tokio::test]
+    async fn display_stays_on_first_spelling_of_a_track() {
+        use clap::Parser;
+        let args = cli::Args::parse_from(["music_display"]);
+        let theme = theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+        let mut a = snap("Metallica", "Enter Sandman", "Metallica");
+        a.content_created = "1991-08-12".into();
+        app.apply(AppEvent::Player(Some(a)));
+        let mut b = snap("Metallica", "Enter Sandman - Remastered 2021", "Metallica (Deluxe Edition)");
+        b.content_created = "2021-09-10".into();
+        for s in [b.clone(), snap("Metallica", "Enter Sandman", "Metallica"), b] {
+            app.apply(AppEvent::Player(Some(s)));
+            let shown = app.snap.as_ref().unwrap();
+            assert_eq!(shown.album, "Metallica");
+            assert_eq!(shown.title, "Enter Sandman");
+            assert_eq!(shown.content_created, "1991-08-12");
+        }
+    }
+
+    #[test]
+    fn key_is_estimated_from_chords() {
+        let sheet = |names: &[&str]| chords::Sheet {
+            lines: vec![chords::SheetLine {
+                text: "la la la la la la la la".into(),
+                chords: names.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(chords::estimate_key(&sheet(&["C", "G", "Am", "F", "C", "G", "F", "C"])).as_deref(), Some("C"));
+        assert_eq!(chords::estimate_key(&sheet(&["Am", "F", "C", "G", "Am", "F", "G", "Am"])).as_deref(), Some("Am"));
+        assert_eq!(chords::estimate_key(&sheet(&["C", "G"])), None);
+    }
+
+    #[tokio::test]
+    async fn translation_falls_back_to_libretranslate_on_429() {
+        let (site, log) = scripted_site(vec![
+            ("/g/dict", vec![R::Http(429, "", String::new())]),
+            ("/g?", vec![R::Http(429, "", String::new())]),
+            ("/libre", vec![R::Http(200, "Content-Type: application/json\r\n", r#"{"translatedText":"hello"}"#.into())]),
+        ]);
+        let cfg = translate::Cfg {
+            google_base: Some(format!("{site}/g")),
+            fallback: true,
+            fallback_url: format!("{site}/libre"),
+            fallback_key: Some("k".into()),
+        };
+        let src = vec!["hola".to_string(), "♪".to_string(), "adiós".to_string()];
+        let (out, backend) = translate::lines(&reqwest::Client::new(), &cfg, "en", &src).await.unwrap();
+        assert_eq!(backend, "libretranslate");
+        assert_eq!(out, vec!["hello", "♪", "hello"]);
+        // once Google said 429 the rest of the song goes straight to the fallback
+        assert!(log.lock().unwrap().iter().filter(|l| l.contains("/g")).count() <= 4);
+        // no fallback: a limited Google is an error
+        let off = translate::Cfg { fallback: false, ..cfg };
+        assert!(translate::lines(&reqwest::Client::new(), &off, "en", &src).await.is_err());
+    }
+
+    #[test]
+    fn dict_chrome_response_parses() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"sentences":[{"trans":"Hi ","orig":"x"},{"trans":"there"}]}"#).unwrap();
+        assert_eq!(translate::parse_dict(&a).as_deref(), Some("Hi there"));
+        let b: serde_json::Value = serde_json::from_str(r#"["Hi"]"#).unwrap();
+        assert_eq!(translate::parse_dict(&b).as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn cjk_wrapping_keeps_punctuation_off_line_starts() {
+        let rows = ui::wrap("今日は、いい天気です。", 8);
+        assert!(rows.iter().all(|r| crate::util::width(r) <= 8), "{rows:?}");
+        assert!(rows.iter().all(|r| !r.starts_with(['、', '。'])), "{rows:?}");
+        assert_eq!(rows.concat(), "今日は、いい天気です。");
+        let big = bigfont::render_scaled("HI", 60, 3, 2).unwrap();
+        assert_eq!(big.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn local_files_fall_back_to_their_own_tags() {
+        use clap::Parser;
+        assert_eq!(tags::title_from_url("file:///music/My%20Song.flac"), "My Song");
+        let args = cli::Args::parse_from(["music_display"]);
+        let theme = theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+        let url = "file:///music/My%20Song.flac";
+        app.local_tags.insert(
+            url.into(),
+            tags::Tags { title: "Real Title".into(), artist: "Band".into(), album: "LP".into(), year: "1999".into(), track: Some(3), ..Default::default() },
+        );
+        let mut s = snap("", "My Song", "");
+        s.url = url.into();
+        app.apply(AppEvent::Player(Some(s)));
+        let shown = app.snap.as_ref().unwrap();
+        assert_eq!((shown.title.as_str(), shown.artist.as_str(), shown.album.as_str()), ("Real Title", "Band", "LP"));
+        assert_eq!((shown.content_created.as_str(), shown.track_no), ("1999", Some(3)));
+    }
+
+    #[test]
+    fn every_menu_row_saves_a_known_config_key() {
+        for set in app::Setting::ALL {
+            for k in set.config_keys() {
+                assert!(config::KEYS.iter().any(|c| c.name == *k), "{k}");
+            }
+            assert!(!set.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn base_title_strips_credits_and_editions() {
+        let b = year::base_title;
+        assert_eq!(b("Song (feat. Someone)"), "Song");
+        assert_eq!(b("Song ft. Someone"), "Song");
+        assert_eq!(b("Song - Demo"), "Song");
+        assert_eq!(b("Song - Remastered 2011"), "Song");
+        assert_eq!(b("Song [Live] (Remix)"), "Song");
+        assert_eq!(b("(Intro)"), "(Intro)");
+        assert_eq!(b("Plain"), "Plain");
+    }
+
+    #[test]
+    fn solo_chords_are_kept_for_the_break() {
+        let sheet = chords::parse_chordpro(
+            "[Am]walking down the [G]road tonight\n[C]  [G]  [Am]  [F]\n[Am]standing in the [G]rain again\n",
+        );
+        let lyrics = vec![
+            (1.0, "walking down the road tonight".to_string()),
+            (30.0, "standing in the rain again".to_string()),
+        ];
+        let a = chords::align(&sheet, &lyrics);
+        assert_eq!(a.per_line[0].len(), 2);
+        assert_eq!(a.gaps[0], vec![vec!["C", "G", "Am", "F"]]);
+        assert!(a.gaps[1].is_empty());
     }
 
     enum R {
@@ -7321,7 +8271,7 @@ mod tests {
         // print-config round-trips through the parser
         let text = config::render(&a, &nowhere, false);
         let table: toml::Table = text.parse().unwrap();
-        assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir"), "{text}");
+        assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir" || k.name == "translate_fallback_key"), "{text}");
         assert!(text.contains("# chords_dir"));
     }
 
