@@ -317,7 +317,11 @@ async fn run(
                     // The side panel or the library button came or went: wipe the screen and
                     // draw it again, so no old cover image (Sixel / iTerm2) is left behind.
                     if app.layout_key() != layout {
-                        terminal.clear()?;
+                        // not `terminal.clear()`: that asks the terminal for its cursor position,
+                        // and the answer can time out (or be eaten by the event stream), which
+                        // ended the app with "The cursor position could not be read…"
+                        let area = terminal.size()?;
+                        terminal.resize(area.into())?;
                         terminal.draw(|f| ui::draw(f, &mut app))?;
                     }
                     app.dirty = false;
