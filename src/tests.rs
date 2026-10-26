@@ -2524,6 +2524,7 @@ async fn pump(
     until: impl Fn(&app::App) -> bool,
 ) {
     for _ in 0..200 {
+        app.preload_tick();
         if until(app) {
             return;
         }
@@ -2853,10 +2854,10 @@ async fn the_lists_preload_in_the_background_one_after_the_other() {
     let (base, log) = lib_site();
     let (mut app, mut rx) = spotify_app(&base, "preload");
     app.start_preload();
-    assert!([0usize, 1, 3, 4].iter().all(|i| app.lib.tabs[*i].loading), "marked as on their way");
-    assert!(!app.lib.tabs[browser::TAB_LIKED].loading, "Liked Songs (up to 1000 songs) waits until it is opened");
+    assert_eq!(log.lock().unwrap().len(), 0, "nothing leaves before the first tick");
     pump(&mut app, &mut rx, |a| [0usize, 1, 3, 4].iter().all(|i| a.lib.tabs[*i].loaded)).await;
     assert_eq!(hits(&log, "/me/playlists") + hits(&log, "/me/albums") + hits(&log, "/me/following") + hits(&log, "/me/player/recently-played"), 4);
+    assert!(!app.lib.tabs[browser::TAB_LIKED].loaded, "Liked Songs (up to 1000 songs) waits until it is opened");
     // when the browser opens later everything is there, nothing is asked for
     let before = log.lock().unwrap().len();
     app.run(app::Action::Library);
@@ -2903,7 +2904,7 @@ async fn retry_after_holds_back_the_next_request() {
 }
 
 #[tokio::test]
-async fn the_preload_waits_for_retry_after() {
+async fn a_rate_limit_ends_the_preload() {
     let (base, log) = scripted_site(vec![
         ("GET /me HTTP", vec![R::Http(200, JSON_HDR, r#"{"id":"me1"}"#.into())]),
         ("/me/player/recently-played", vec![R::Http(429, "Retry-After: 1\r\n", String::new()), R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())]),
@@ -2912,14 +2913,51 @@ async fn the_preload_waits_for_retry_after() {
         ("/me/following", vec![R::Http(200, JSON_HDR, FOLLOWING_JSON.into())]),
     ]);
     let (mut app, mut rx) = spotify_app(&base, "preloadwait");
-    let t0 = Instant::now();
     app.start_preload();
-    pump(&mut app, &mut rx, |a| a.lib.tabs[1].loaded).await;
-    // the first list was refused; the next ones were not even asked for until the window ended
-    assert!(t0.elapsed() >= Duration::from_millis(900), "{:?}", t0.elapsed());
-    assert!(app.lib.tabs[0].error.is_some());
+    pump(&mut app, &mut rx, |a| a.lib.tabs[0].error.is_some()).await;
+    // the first list was refused: the next tick inside the window drops the rest, so they
+    // are not asked for even after it
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    app.preload_tick();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    for _ in 0..5 {
+        app.preload_tick();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
     assert_eq!(hits(&log, "recently-played"), 1);
+    assert_eq!(hits(&log, "/me/playlists"), 0);
+    // opening a tab asks again once the window has run out
+    app.run(app::Action::Library);
+    app.handle(key(crossterm::event::KeyCode::Char('2')));
+    pump(&mut app, &mut rx, |a| a.lib.tabs[1].loaded).await;
     assert_eq!(hits(&log, "/me/playlists"), 1);
+}
+
+#[test]
+fn rate_limit_waits_are_kept_in_full_and_said_in_words() {
+    assert_eq!(spotify::explain(429, "", Some(69812)), "Spotify is rate limiting: try again in 19 h 24 min");
+    assert_eq!(spotify::explain(429, "", Some(7200)), "Spotify is rate limiting: try again in 2 h");
+    assert_eq!(spotify::explain(429, "", Some(300)), "Spotify is rate limiting: try again in 5 min");
+    assert_eq!(spotify::explain(429, "", Some(30)), "Spotify is rate limiting: try again in 30 s");
+}
+
+#[tokio::test]
+async fn a_long_retry_after_is_not_cut_short_and_no_header_backs_off() {
+    let (base, _log) = scripted_site(vec![(
+        "/me/player/pause",
+        vec![
+            R::Http(429, "Retry-After: 69812\r\n", String::new()),
+        ],
+    )]);
+    let api = spotify::Api::new(reqwest::Client::new(), "cid", "").with_fake_server(&base);
+    let _ = api.run(spotify::Cmd::Pause).await.unwrap_err();
+    let left = api.paused_for().unwrap();
+    assert!(left > Duration::from_secs(69000), "{left:?}");
+    // without a header the wait doubles with every 429 in a row
+    let (base, _log) = scripted_site(vec![("/me/player/pause", vec![R::Http(429, "", String::new())])]);
+    let api = spotify::Api::new(reqwest::Client::new(), "cid", "").with_fake_server(&base);
+    let _ = api.run(spotify::Cmd::Pause).await.unwrap_err();
+    assert!(api.paused_for().unwrap() <= Duration::from_secs(5));
 }
 
 // ── side panel, overlay, button and the mouse ──────────────────────────

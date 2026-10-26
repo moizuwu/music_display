@@ -5,7 +5,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, mpsc::UnboundedSender};
 
@@ -190,10 +190,46 @@ pub fn api_error(status: u16, body: &str) -> ApiError {
 
 /// What the footer says about a failed request: the cases a person can do something about
 /// get a sentence, anything else is Spotify's own text.
+/// A wait in words: `45 s`, `12 min`, `19 h 24 min`.
+fn wait_text(secs: u64) -> String {
+    match secs {
+        0..120 => format!("{secs} s"),
+        120..7200 => format!("{} min", secs.div_ceil(60)),
+        _ => match secs.div_ceil(60) % 60 {
+            0 => format!("{} h", secs.div_ceil(60) / 60),
+            m => format!("{} h {m} min", secs.div_ceil(60) / 60),
+        },
+    }
+}
+
+/// How long to stay quiet after a 429: Spotify's `Retry-After` in full (at most a week), else
+/// 5 s that double with every 429 in a row (`strikes`), up to 5 minutes.
+fn pause_secs(retry_after: Option<u64>, strikes: u32) -> u64 {
+    match retry_after {
+        Some(n) => n.clamp(1, 7 * 86400),
+        None => (5u64 << strikes.min(6)).min(300),
+    }
+}
+
+/// The saved end of a pause (unix seconds) as time left from `now`, if it is still ahead.
+fn pause_left(until: u64, now: u64) -> Option<Duration> {
+    until.checked_sub(now).filter(|s| *s > 0).map(Duration::from_secs)
+}
+
+/// The pause a 429 set in an earlier run: it keeps counting while the app is closed, so
+/// starting again does not ask Spotify before it said it is ready.
+fn saved_pause() -> Option<std::time::Instant> {
+    if cfg!(test) {
+        return None; // the tests share one folder
+    }
+    let until = read_json("ratelimit.json")?["until"].as_u64()?;
+    Some(std::time::Instant::now() + pause_left(until, now_secs())?)
+}
+
 pub fn explain(status: u16, msg: &str, retry_after: Option<u64>) -> String {
     match status {
         429 => match retry_after {
-            Some(n) => format!("Spotify is rate limiting: try again in {n} s"),
+            Some(n) => format!("Spotify is rate limiting: try again in {}", wait_text(n)),
             None => "Spotify is rate limiting: try again in a moment".into(),
         },
         403 if msg.to_ascii_uppercase().contains("PREMIUM") => "Spotify Premium is needed for this".into(),
@@ -654,7 +690,15 @@ pub struct Api {
     pub mpris: Arc<AtomicBool>,
     /// After a 429: no request leaves before this moment (Spotify's `Retry-After`).
     pause_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// 429s in a row without a `Retry-After`, to back off further each time.
+    strikes: Arc<AtomicU32>,
 }
+
+/// How often `/me/player` is asked (ms): another device plays / nothing plays / an MPRIS
+/// player is on screen. Position is worked out in between, and a command polls at once.
+const POLL_PLAYING_MS: u64 = 3000;
+const POLL_IDLE_MS: u64 = 5000;
+const POLL_MPRIS_MS: u64 = 10_000;
 
 impl Api {
     pub fn new(http: reqwest::Client, client_id: &str, daemon: &str) -> Self {
@@ -668,7 +712,8 @@ impl Api {
             me: Arc::new(Mutex::new(String::new())),
             wake: Arc::new(Notify::new()),
             mpris: Arc::new(AtomicBool::new(false)),
-            pause_until: Arc::new(std::sync::Mutex::new(None)),
+            pause_until: Arc::new(std::sync::Mutex::new(saved_pause())),
+            strikes: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -678,11 +723,21 @@ impl Api {
         until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
     }
 
-    /// Spotify said "slow down": nothing is sent for `secs` seconds (5 when it didn't say).
+    /// Spotify said "slow down": nothing is sent for as long as it asked (see `pause_secs`),
+    /// and the end is saved so a restart keeps waiting too.
     fn pause_for(&self, secs: Option<u64>) {
+        let strikes = if secs.is_none() { self.strikes.fetch_add(1, Ordering::Relaxed) } else { 0 };
+        let wait = Duration::from_secs(pause_secs(secs, strikes));
         if let Ok(mut p) = self.pause_until.lock() {
-            let until = std::time::Instant::now() + Duration::from_secs(secs.unwrap_or(5).clamp(1, 3600));
-            *p = Some(p.map_or(until, |old| old.max(until)));
+            let until = std::time::Instant::now() + wait;
+            let until = p.map_or(until, |old| old.max(until));
+            *p = Some(until);
+            #[cfg(not(test))]
+            {
+                let end = now_secs() + until.saturating_duration_since(std::time::Instant::now()).as_secs();
+                let _ = std::fs::create_dir_all(dir());
+                let _ = std::fs::write(dir().join("ratelimit.json"), json!({ "until": end }).to_string());
+            }
         }
     }
 
@@ -769,6 +824,7 @@ impl Api {
             let e = api_error(status, &text);
             return Err(ApiError::new(explain(status, &e.msg, retry_after), status));
         }
+        self.strikes.store(0, Ordering::Relaxed);
         Ok(serde_json::from_str(&text).ok())
     }
 
@@ -1128,7 +1184,7 @@ impl Api {
         Ok(crate::setup::parse_devices(&json!({ "devices": self.devices().await? })))
     }
 
-    /// Keep `/me/player` coming: every 1.5 s while another device plays, slower while paused
+    /// Keep `/me/player` coming: every 3 s while another device plays, slower while paused
     /// or while an MPRIS player is on screen; at once after a command (`wake`).
     pub async fn remote_loop(self, tx: UnboundedSender<AppEvent>) {
         loop {
@@ -1136,9 +1192,9 @@ impl Api {
             let mpris = self.mpris.load(Ordering::Relaxed);
             let wait = match &r {
                 Err(e) if e.status == 401 => 30_000,
-                _ if mpris => 5000,
-                Ok(Some(x)) if x.snap.status == Status::Playing => 1500,
-                _ => 3000,
+                _ if mpris => POLL_MPRIS_MS,
+                Ok(Some(x)) if x.snap.status == Status::Playing => POLL_PLAYING_MS,
+                _ => POLL_IDLE_MS,
             };
             // never ask again before Spotify's Retry-After has run out
             let wait = wait.max(self.paused_for().map_or(0, |d| d.as_millis() as u64 + 100));

@@ -308,6 +308,7 @@ async fn run(
                 while let Ok(m) = rx.try_recv() { app.apply(m); }
             }
             _ = tick.tick() => {
+                app.preload_tick();
                 // Redraw when something changed, while the lyric scroll is easing,
                 // or ~10×/s during playback (clock, progress bar, lyric line changes).
                 let periodic = app.playing() && last_draw.elapsed() >= Duration::from_millis(100);

@@ -406,6 +406,17 @@ impl Setting {
     }
 }
 
+/// The library lists load in the background after the start: the first one after this, then
+/// one every `PRELOAD_GAP`.
+#[cfg(not(test))]
+const PRELOAD_DELAY: Duration = Duration::from_secs(15);
+#[cfg(not(test))]
+const PRELOAD_GAP: Duration = Duration::from_secs(4);
+#[cfg(test)]
+const PRELOAD_DELAY: Duration = Duration::ZERO;
+#[cfg(test)]
+const PRELOAD_GAP: Duration = Duration::from_millis(150);
+
 pub const LANGS: &[&str] = &["en", "sv", "de", "fr", "es", "it", "pt", "nl", "ja", "ko", "zh-CN", "ru", "ar"];
 
 /// Click targets recorded during the last render.
@@ -567,7 +578,9 @@ pub struct App {
     /// `d`: the device picker, while it is open.
     pub devices: Option<DevicePicker>,
     /// The background load of the main lists after Spotify came on.
-    preload_task: Option<JoinHandle<()>>,
+    /// Library tabs still to be loaded in the background, and when the next one is due.
+    preload_queue: std::collections::VecDeque<usize>,
+    preload_at: Option<Instant>,
 }
 
 impl App {
@@ -672,7 +685,8 @@ impl App {
             login_msg: None,
             settings_edit: None,
             devices: None,
-            preload_task: None,
+            preload_queue: Default::default(),
+            preload_at: None,
         };
         app.sync_queue_tab();
         app.translate_on = app.args.translate;
@@ -2100,9 +2114,7 @@ impl App {
         if let Some(t) = self.spot_task.take() {
             t.abort();
         }
-        if let Some(t) = self.preload_task.take() {
-            t.abort();
-        }
+        self.preload_queue.clear();
         self.spot = None;
         self.args.spotify = false;
         self.spot_status = None;
@@ -2481,35 +2493,31 @@ impl App {
     /// never before Spotify's Retry-After has run out) so they are in memory when the browser
     /// opens. Only runs once Spotify is on and logged in; nothing is written to disk.
     pub fn start_preload(&mut self) {
-        let Some(api) = self.spot.clone() else { return };
-        if let Some(t) = self.preload_task.take() {
-            t.abort();
+        if self.spot.is_none() {
+            return;
         }
-        let tabs: Vec<usize> = [0usize, 1, 3, 4]
+        self.preload_queue = [0usize, 1, 3, 4]
             .into_iter()
             .filter(|i| !self.lib.tabs[*i].loading && !self.lib.tabs[*i].fresh(browser::FRESH))
             .collect();
-        for i in &tabs {
-            self.lib.tabs[*i].loading = true;
+        self.preload_at = Some(Instant::now() + PRELOAD_DELAY);
+    }
+
+    /// Load the queued tabs one at a time, a few seconds apart, so the start does not spend
+    /// Spotify's request budget in one burst. A tab opened (and so loaded) meanwhile is skipped,
+    /// and a rate limit ends the whole thing: the browser asks again when a tab is opened.
+    pub fn preload_tick(&mut self) {
+        if self.preload_queue.is_empty() || self.preload_at.is_none_or(|t| Instant::now() < t) {
+            return;
         }
-        let tx = self.tx.clone();
-        self.preload_task = Some(tokio::spawn(async move {
-            for i in tabs {
-                if let Some(left) = api.paused_for() {
-                    tokio::time::sleep(left).await;
-                }
-                let r = match i {
-                    0 => api.recent().await,
-                    1 => api.playlists().await,
-                    3 => api.albums().await,
-                    _ => api.artists().await,
-                };
-                if tx.send(AppEvent::Spotify(spotify::Reply::Tab(i, r.map_err(|e| e.msg)))).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        }));
+        if self.spot.as_ref().is_none_or(|a| a.paused_for().is_some()) {
+            self.preload_queue.clear();
+            return;
+        }
+        if let Some(i) = self.preload_queue.pop_front() {
+            self.load_tab(i, false);
+            self.preload_at = Some(Instant::now() + PRELOAD_GAP);
+        }
     }
 
     /// On the Search tab with nothing searched yet, the field is ready for typing.
