@@ -879,7 +879,7 @@ fn spotify_state_becomes_a_snapshot() {
             ]}
         }
     });
-    let r = spotify::parse_state(&p, |n| n == "Desktop (spotifyd)").unwrap();
+    let r = spotify::parse_state(&p, |n| n == "Living Room PC").unwrap();
     let s = &r.snap;
     assert!(!r.local && r.device == "Pixel 8");
     assert_eq!((s.title.as_str(), s.artist.as_str(), s.album.as_str()), ("Song", "A, B", "LP"));
@@ -941,6 +941,8 @@ fn spotify_errors_read_like_spotify_wrote_them() {
 #[tokio::test]
 async fn remote_playback_shows_only_without_an_mpris_player() {
     let mut app = test_app();
+    app.args.spotify = true;
+    app.start_spotify();
     let remote = |title: &str| {
         let p = serde_json::json!({"is_playing": true, "device": {"name": "Phone"},
             "item": {"uri": "spotify:track:r", "name": title, "duration_ms": 100000, "artists": [{"name": "X"}], "album": {"name": "Y"}}});
@@ -1568,4 +1570,290 @@ fn genius_lookup_with_fake_site_and_cache() {
 #[test]
 fn percent() {
     assert_eq!(util::percent_decode("/a%20b/c%C3%A9.jpg"), "/a b/cé.jpg");
+}
+
+// ── Spotify in the settings menu ───────────────────────────────────────
+
+fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+    use crossterm::event::{Event, KeyEvent, KeyModifiers};
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// An app whose settings go to a scratch config file (never the real one).
+fn settings_app(name: &str) -> (app::App, std::path::PathBuf) {
+    let mut app = test_app();
+    let cfg = tmp(name).join("config.toml");
+    let _ = std::fs::remove_file(&cfg);
+    app.args.config = Some(cfg.clone());
+    (app, cfg)
+}
+
+fn remote_event(title: &str) -> AppEvent {
+    let p = serde_json::json!({"is_playing": true, "device": {"name": "Phone"},
+        "item": {"uri": "spotify:track:r", "name": title, "duration_ms": 100000, "artists": [{"name": "X"}], "album": {"name": "Y"}}});
+    AppEvent::Spotify(spotify::Reply::Remote(Ok(spotify::parse_state(&p, |_| false).map(Box::new))))
+}
+
+#[test]
+fn settings_menu_has_headers_and_a_status_line_between_the_rows() {
+    use app::{Setting, SettingsRow as Row};
+    let rows = Setting::rows();
+    assert_eq!(rows[0], Row::Header("General"));
+    let sp = rows.iter().position(|r| *r == Row::Header("Spotify")).unwrap();
+    assert_eq!(rows[sp + 1], Row::Status);
+    let on = Setting::ALL.iter().position(|s| *s == Setting::SpotifyOn).unwrap();
+    assert_eq!(rows[sp + 2], Row::Item(on));
+    // every setting is drawn exactly once, in order; headers and status are never selectable
+    let items: Vec<usize> = rows.iter().filter_map(|r| if let Row::Item(i) = r { Some(*i) } else { None }).collect();
+    assert_eq!(items, (0..Setting::ALL.len()).collect::<Vec<_>>());
+    // the action rows own no config key; the toggle and the texts do
+    assert!(Setting::SpotifyLogin.config_keys().is_empty() && Setting::SpotifyLogout.config_keys().is_empty());
+    assert_eq!(Setting::SpotifyOn.config_keys(), ["spotify"]);
+    assert_eq!(Setting::SpotifyClientId.config_keys(), ["spotify_client_id"]);
+    assert_eq!(Setting::SpotifyDevice.config_keys(), ["spotify_device"]);
+}
+
+#[test]
+fn text_input_edits_at_the_cursor() {
+    use browser::{Edit, TextInput};
+    use crossterm::event::KeyCode as K;
+    let mut t = TextInput::with("abc");
+    assert_eq!(t.cursor, 3);
+    t.insert('d');
+    t.key(K::Left);
+    t.key(K::Backspace);
+    assert_eq!(t.text, "abd");
+    t.key(K::Home);
+    t.key(K::Delete);
+    assert_eq!(t.text, "bd");
+    assert_eq!(t.shown(), "▏bd");
+    t.key(K::End);
+    t.key(K::Char('å'));
+    t.key(K::Left);
+    assert_eq!((t.text.as_str(), t.shown().as_str()), ("bdå", "bd▏å"));
+    t.key(K::Backspace);
+    assert_eq!(t.text, "bå");
+    assert_eq!(t.key(K::Enter), Some(Edit::Submit));
+    assert_eq!(t.key(K::Esc), Some(Edit::Cancel));
+    // the empty field is fine
+    let mut e = TextInput::default();
+    e.key(K::Backspace);
+    e.key(K::Delete);
+    assert_eq!(e.shown(), "▏");
+}
+
+#[test]
+fn hints_drop_whole_items_never_cut_one() {
+    let items = ["tab/1-5", "enter play", "a queue", "esc"];
+    assert_eq!(browser::fit_items(&items, 100), "tab/1-5 · enter play · a queue · esc");
+    assert_eq!(browser::fit_items(&items, 25), "tab/1-5 · enter play");
+    assert_eq!(browser::fit_items(&items, 19), "tab/1-5");
+    assert_eq!(browser::fit_items(&items, 3), "");
+}
+
+#[tokio::test]
+async fn client_id_is_typed_into_the_menu_and_saved() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("cid");
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::SpotifyClientId).unwrap();
+    assert_eq!(app.setting_value(app::Setting::SpotifyClientId), "not set");
+    app.handle(key(K::Enter));
+    assert!(app.settings_edit.is_some());
+    // q and s are letters now, they don't close the menu
+    for c in "qs1AbC".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    assert!(app.show_settings);
+    app.handle(key(K::Enter));
+    assert!(app.settings_edit.is_none());
+    assert_eq!(app.args.spotify_client_id.as_deref(), Some("qs1AbC"));
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify_client_id"].as_str(), Some("qs1AbC"));
+    // only the start of it is shown
+    assert_eq!(app.setting_value(app::Setting::SpotifyClientId), "qs1AbC…");
+    // something that can't be an ID is refused, Esc leaves it as it was
+    app.handle(key(K::Enter));
+    app.handle(key(K::Char('!')));
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.spotify_client_id.as_deref(), Some("qs1AbC"));
+    assert!(app.settings_note.as_deref().unwrap_or("").contains("Client ID"));
+    app.settings_note = None;
+    app.handle(key(K::Enter));
+    app.handle(key(K::Char('x')));
+    app.handle(key(K::Esc));
+    assert!(app.settings_edit.is_none());
+    assert_eq!(app.args.spotify_client_id.as_deref(), Some("qs1AbC"));
+    // Esc with nothing being typed closes the menu again
+    app.handle(key(K::Esc));
+    assert!(!app.show_settings);
+}
+
+#[tokio::test]
+async fn device_name_can_be_emptied() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("devname");
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::SpotifyDevice).unwrap();
+    assert_eq!(app.args.spotify_device, "");
+    assert_eq!(app.setting_value(app::Setting::SpotifyDevice), "none");
+    app.handle(key(K::Enter));
+    for c in "Desktop".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.spotify_device, "Desktop");
+    app.handle(key(K::Enter));
+    for _ in 0..7 {
+        app.handle(key(K::Backspace));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.spotify_device, "");
+    // an empty name is a valid saved value
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify_device"].as_str(), Some(""));
+}
+
+#[tokio::test]
+async fn spotify_turns_on_and_off_from_settings_without_a_restart() {
+    let (mut app, cfg) = settings_app("onoff");
+    assert!(app.spot.is_none());
+    app.change_setting(app::Setting::SpotifyOn, 1);
+    assert!(app.spot.is_some() && app.args.spotify);
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify"].as_bool(), Some(true));
+    // not logged in (the test token dir is empty): the menu says so
+    assert_eq!(app.spotify_status(), "not logged in");
+    // a song playing on another device shows up ...
+    app.apply(remote_event("Phone Song"));
+    assert!(app.remote_active());
+    // ... and goes away with the switch; a late answer of the stopped client is ignored
+    app.change_setting(app::Setting::SpotifyOn, 1);
+    assert!(app.spot.is_none() && !app.args.spotify && app.snap.is_none() && app.remote.is_none());
+    app.apply(remote_event("Late"));
+    assert!(app.snap.is_none());
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify"].as_bool(), Some(false));
+    assert_eq!(app.spotify_status(), "off · not logged in");
+}
+
+#[tokio::test]
+async fn nothing_spotify_happens_while_it_is_off() {
+    let mut app = test_app();
+    app.start_spotify(); // `spotify` is false: no client, no task
+    assert!(app.spot.is_none());
+    // the Spotify keys only explain how to turn it on
+    app.run(app::Action::Library);
+    assert!(!app.lib.open);
+    assert!(app.note_text().unwrap_or("").contains("Settings"));
+}
+
+#[tokio::test]
+async fn login_progress_shows_in_the_status_line() {
+    use spotify::{LoginMsg, LoginStep, Reply};
+    let (mut app, _cfg) = settings_app("login");
+    app.args.spotify = true;
+    app.start_spotify();
+    // without a Client ID the login doesn't even start
+    app.change_setting(app::Setting::SpotifyLogin, 1);
+    assert!(app.settings_note.as_deref().unwrap_or("").contains("Client ID"));
+    assert_eq!(app.setting_value(app::Setting::SpotifyLogin), "");
+    app.apply(AppEvent::Spotify(Reply::Login(LoginMsg::Step(LoginStep::Url("https://x".into())))));
+    assert_eq!(app.spotify_status(), "not logged in");
+    app.apply(AppEvent::Spotify(Reply::Login(LoginMsg::Step(LoginStep::Opened(false)))));
+    assert!(app.spotify_status().contains("didn't open"));
+    app.apply(AppEvent::Spotify(Reply::Login(LoginMsg::Done(Err("can't listen on 127.0.0.1:8897".into())))));
+    assert_eq!(app.spotify_status(), "can't listen on 127.0.0.1:8897");
+    app.apply(AppEvent::Spotify(Reply::Login(LoginMsg::Done(Ok(())))));
+    assert_eq!(app.spotify_status(), "not logged in", "the new client looks for the token again");
+    assert!(app.spot.is_some());
+    // a refused refresh token reads as expired
+    app.spot_status = Some("login failed: invalid_grant".into());
+    assert_eq!(app.spotify_status(), "token expired: log in again");
+    // a login that finishes while Spotify is off still counts
+    app.stop_spotify();
+    app.apply(AppEvent::Spotify(Reply::Login(LoginMsg::Done(Err("login timed out".into())))));
+    assert_eq!(app.spotify_status(), "login timed out");
+}
+
+#[tokio::test]
+async fn login_callback_needs_the_right_state() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let waiting = tokio::spawn(async move { spotify::wait_for_code(&l, "good").await });
+    let get = |target: &'static str| async move {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        out
+    };
+    assert!(get("/favicon.ico").await.starts_with("HTTP/1.1 404"));
+    assert!(get("/callback?code=evil&state=bad").await.contains("Login failed"));
+    assert!(!waiting.is_finished(), "a wrong state doesn't end the wait");
+    assert!(get("/callback?code=abc&state=good").await.contains("Logged in"));
+    assert_eq!(waiting.await.unwrap().unwrap(), "abc");
+}
+
+#[test]
+fn an_empty_spotifyd_name_never_matches_a_device() {
+    use serde_json::json;
+    let http = reqwest::Client::new();
+    let dev = |id: &str, name: &str, kind: &str| json!({"id": id, "name": name, "type": kind});
+    // no spotifyd name set (the default): a device without a name is not "this PC" ...
+    let api = spotify::Api::new(http.clone(), "id", "").with_host("pawtix");
+    assert!(!api.is_local(""));
+    assert!(api.is_local("pawtix") && api.is_local("PAWTIX"), "the Spotify app is named after the host");
+    let unnamed = vec![dev("a", "", "Speaker")];
+    assert!(api.local_device(&unnamed).is_none());
+    // ... while the host name still finds the app, and "Computer" is still a fallback
+    let devs = vec![dev("a", "", "Speaker"), dev("b", "Pawtix", "Computer"), dev("c", "Phone", "Smartphone")];
+    assert_eq!(api.local_device(&devs).unwrap()["id"], "b");
+    let other = vec![dev("a", "", "Speaker"), dev("d", "Something", "Computer")];
+    assert_eq!(api.local_device(&other).unwrap()["id"], "d");
+    // an unknown host name and no name set: nothing matches by name at all
+    let api = spotify::Api::new(http.clone(), "id", "").with_host("");
+    assert!(!api.is_local("") && !api.is_local("pawtix"));
+    // with a name set, spotifyd counts, but the app still comes first
+    let api = spotify::Api::new(http, "id", "kitchen").with_host("pawtix");
+    assert!(api.is_local("kitchen"));
+    let both = vec![dev("a", "kitchen", "Speaker"), dev("b", "pawtix", "Computer")];
+    assert_eq!(api.local_device(&both).unwrap()["id"], "b");
+    assert_eq!(api.local_device(&both[..1]).unwrap()["id"], "a");
+}
+
+#[tokio::test]
+async fn the_client_only_talks_to_the_server_it_was_given() {
+    let body = r#"{"is_playing":true,"progress_ms":5000,"device":{"name":"Phone","volume_percent":30},"item":{"uri":"spotify:track:z","name":"Zed","duration_ms":90000,"artists":[{"name":"Q"}],"album":{"name":"W"}}}"#;
+    let (base, log) = scripted_site(vec![("/me/player", vec![R::Http(200, "Content-Type: application/json\r\n", body.into())])]);
+    let api = spotify::Api::new(reqwest::Client::new(), "id", "").with_fake_server(&base);
+    let r = api.state().await.unwrap().unwrap();
+    assert_eq!((r.snap.title.as_str(), r.device.as_str(), r.local), ("Zed", "Phone", false));
+    assert!(log.lock().unwrap()[0].starts_with("GET /me/player?additional_types=track"), "{:?}", log.lock().unwrap());
+    // the polling loop hands the same answer to the app
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = tokio::spawn(api.clone().remote_loop(tx));
+    match rx.recv().await {
+        Some(AppEvent::Spotify(spotify::Reply::Remote(Ok(Some(r))))) => assert_eq!(r.snap.title, "Zed"),
+        _ => panic!("the poller sent something else"),
+    }
+    poller.abort();
+}
+
+#[test]
+fn spotify_device_has_no_default_and_empty_is_valid_in_the_file() {
+    let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x"]);
+    let mut a = <cli::Args as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+    assert_eq!(a.spotify_device, "");
+    assert!(!a.spotify && a.spotify_client_id.is_none());
+    let path = tmp("emptydev").join("config.toml");
+    std::fs::write(&path, "spotify_device = \"\"\n").unwrap();
+    let mut w = Vec::new();
+    config::apply(&mut a, &m, &path, true, &mut |x| w.push(x));
+    assert!(w.is_empty(), "{w:?}");
+    assert!(config::render(&a, &path, true).contains("spotify_device = \"\""));
+    std::fs::write(&path, "spotify_device = \"My Speaker\"\n").unwrap();
+    config::apply(&mut a, &m, &path, true, &mut |x| w.push(x));
+    assert_eq!(a.spotify_device, "My Speaker");
 }

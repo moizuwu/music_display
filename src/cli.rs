@@ -180,8 +180,9 @@ pub struct Args {
     #[arg(long, value_name = "ID")]
     pub spotify_client_id: Option<String>,
 
-    /// Spotify Connect name of spotifyd on this PC (its `device_name`) [config: spotify_device]
-    #[arg(long, default_value = "Desktop (spotifyd)", value_name = "NAME")]
+    /// Spotify Connect name of spotifyd on this PC (its `device_name`); empty = only the Spotify
+    /// app on this computer counts as "this PC" [config: spotify_device]
+    #[arg(long, default_value = "", value_name = "NAME")]
     pub spotify_device: String,
 
     /// Log in to Spotify in the browser, save the token and exit [no config key]

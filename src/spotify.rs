@@ -34,12 +34,19 @@ pub fn redirect_uri() -> String {
 // ── storage ────────────────────────────────────────────────────────────
 
 /// `~/.local/state/music_display/spotify` (the token lives here, mode 600).
+#[cfg(not(test))]
 pub fn dir() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("music_display")
         .join("spotify")
+}
+
+/// Tests never see (or delete) the real token.
+#[cfg(test)]
+pub fn dir() -> PathBuf {
+    std::env::temp_dir().join(format!("music_display-test-{}", std::process::id())).join("spotify")
 }
 
 fn read_json(name: &str) -> Option<Value> {
@@ -212,9 +219,24 @@ fn save_token(tok: &Value, old_refresh: &str, client_id: &str) -> Res<Value> {
 
 // ── login (--spotify-login) ────────────────────────────────────────────
 
+/// What the login tells whoever started it (the command line prints it, the settings menu
+/// shows it), so nothing is ever printed from inside the TUI.
+pub enum LoginStep {
+    /// The authorize link, always sent first.
+    Url(String),
+    /// Whether `xdg-open` could be started.
+    Opened(bool),
+}
+
+/// Login progress for the app: a step, or the end.
+pub enum LoginMsg {
+    Step(LoginStep),
+    Done(Result<(), String>),
+}
+
 /// Browser login with PKCE (no client secret): open the authorize page, catch the redirect
 /// on [`PORT`], swap the code for tokens and save them.
-pub async fn login(client_id: &str) -> anyhow::Result<()> {
+pub async fn login(client_id: &str, say: &(dyn Fn(LoginStep) + Send + Sync)) -> anyhow::Result<()> {
     if client_id.trim().is_empty() {
         anyhow::bail!(
             "no client ID: create an app at https://developer.spotify.com/dashboard, add the redirect URI {} \
@@ -240,13 +262,15 @@ pub async fn login(client_id: &str) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT))
         .await
         .map_err(|e| anyhow::anyhow!("can't listen on 127.0.0.1:{PORT}: {e}"))?;
-    println!("Log in to Spotify in your browser. If it didn't open, visit:\n\n{url}\n");
-    println!("(The app's redirect URI must be exactly {})", redirect_uri());
-    let _ = std::process::Command::new("xdg-open")
+    say(LoginStep::Url(url.to_string()));
+    let opened = std::process::Command::new("xdg-open")
         .arg(url.as_str())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .is_ok();
+    say(LoginStep::Opened(opened));
     let code = match tokio::time::timeout(Duration::from_secs(LOGIN_TIMEOUT), wait_for_code(&listener, &state)).await {
         Ok(r) => r?,
         Err(_) => anyhow::bail!("login timed out"),
@@ -265,12 +289,11 @@ pub async fn login(client_id: &str) -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!(e.msg))?;
     save_token(&tok, "", client_id).map_err(|e| anyhow::anyhow!(e.msg))?;
-    println!("Logged in. The token is in {}", dir().join("token.json").display());
     Ok(())
 }
 
 /// Answer requests on the login port until the one carrying our `state` arrives.
-async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> anyhow::Result<String> {
+pub async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> anyhow::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
@@ -508,6 +531,8 @@ pub enum Reply {
     Liked { uri: String, liked: bool },
     /// A [`Cmd`] finished: a note to show, or what went wrong.
     Done(Result<String, String>),
+    /// The login started from the settings menu made progress or ended.
+    Login(LoginMsg),
 }
 
 #[derive(Clone)]
@@ -517,6 +542,8 @@ pub struct Api {
     /// spotifyd's Spotify Connect name.
     daemon: String,
     host: String,
+    /// The API root (a fake server in tests).
+    base: String,
     token: Arc<Mutex<Option<Value>>>,
     me: Arc<Mutex<String>>,
     /// Poll `/me/player` again now (after a command).
@@ -532,6 +559,7 @@ impl Api {
             client_id: client_id.to_string(),
             daemon: daemon.to_string(),
             host: hostname(),
+            base: API.to_string(),
             token: Arc::new(Mutex::new(None)),
             me: Arc::new(Mutex::new(String::new())),
             wake: Arc::new(Notify::new()),
@@ -539,9 +567,33 @@ impl Api {
         }
     }
 
+    /// Test hook: talk to a fake server at `base` with a token that never expires, so nothing
+    /// reads the token file or reaches the real service.
+    #[cfg(test)]
+    pub fn with_fake_server(mut self, base: &str) -> Self {
+        self.base = base.trim_end_matches('/').to_string();
+        self.token = Arc::new(Mutex::new(Some(
+            json!({"access_token": "test", "refresh_token": "test", "expires_at": u64::MAX}),
+        )));
+        self
+    }
+
+    /// Test hook: pretend this computer has another host name.
+    #[cfg(test)]
+    pub fn with_host(mut self, host: &str) -> Self {
+        self.host = host.to_string();
+        self
+    }
+
+    /// The device is spotifyd, by the name it was given in the settings. Without one set, no
+    /// device counts as spotifyd (an empty name must never match anything).
+    fn is_daemon(&self, name: &str) -> bool {
+        !self.daemon.is_empty() && name == self.daemon
+    }
+
     /// The Spotify app on this computer (Spotify names it after the host) or spotifyd.
     pub fn is_local(&self, name: &str) -> bool {
-        name == self.daemon || (!self.host.is_empty() && name.eq_ignore_ascii_case(&self.host))
+        self.is_daemon(name) || (!self.host.is_empty() && name.eq_ignore_ascii_case(&self.host))
     }
 
     /// A valid access token; refreshed (one at a time) when it ran out.
@@ -571,7 +623,7 @@ impl Api {
 
     /// One request; `None` for an empty answer. `path` may be a full `next` URL.
     async fn call(&self, method: Method, path: &str, query: &[(&str, String)], body: Option<Value>) -> Res<Option<Value>> {
-        let url = if path.starts_with("http") { path.to_string() } else { format!("{API}{path}") };
+        let url = if path.starts_with("http") { path.to_string() } else { format!("{}{path}", self.base) };
         let token = self.access_token().await?;
         let mut req = self.http.request(method.clone(), &url).bearer_auth(token).query(query);
         req = match body {
@@ -772,13 +824,14 @@ impl Api {
         Ok(self.get("/me/player/devices", &[]).await?["devices"].as_array().cloned().unwrap_or_default())
     }
 
-    /// Where "this PC" plays: the Spotify app when it is open, else spotifyd.
-    fn local_device<'a>(&self, devs: &'a [Value]) -> Option<&'a Value> {
+    /// Where "this PC" plays: the Spotify app when it is open (named after the host, or any
+    /// device of type "Computer"), else spotifyd when its name is set.
+    pub fn local_device<'a>(&self, devs: &'a [Value]) -> Option<&'a Value> {
         let name = |d: &Value| s(&d["name"]);
         devs.iter()
-            .find(|d| name(d) != self.daemon && self.is_local(&name(d)))
-            .or_else(|| devs.iter().find(|d| s(&d["type"]) == "Computer" && name(d) != self.daemon))
-            .or_else(|| devs.iter().find(|d| name(d) == self.daemon))
+            .find(|d| !self.is_daemon(&name(d)) && self.is_local(&name(d)))
+            .or_else(|| devs.iter().find(|d| s(&d["type"]) == "Computer" && !self.is_daemon(&name(d))))
+            .or_else(|| devs.iter().find(|d| self.is_daemon(&name(d))))
     }
 
     /// Nothing active: pick where to play (this PC, else any device).

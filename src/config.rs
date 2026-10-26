@@ -60,7 +60,7 @@ pub const KEYS: &[Key] = &[
     k!("mouse", Kind::Bool, "no_mouse"),
     k!("spotify", Kind::Bool, "spotify"),
     k!("spotify_client_id", Kind::Str, "spotify_client_id"),
-    k!("spotify_device", Kind::Str, "spotify_device"),
+    k!("spotify_device", Kind::Text, "spotify_device"),
 ];
 
 pub fn default_path() -> PathBuf {

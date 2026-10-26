@@ -62,6 +62,11 @@ mod player;
 mod spotify;
 
 // ════════════════════════════════════════════════════════════════════════════
+// Library browser / settings widgets (text input, lists, device picker)
+// ════════════════════════════════════════════════════════════════════════════
+mod browser;
+
+// ════════════════════════════════════════════════════════════════════════════
 // Release-year resolution: contentCreated → cache → MusicBrainz → iTunes
 // ════════════════════════════════════════════════════════════════════════════
 mod tags;
@@ -187,7 +192,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if args.spotify_login {
-        return spotify::login(args.spotify_client_id.as_deref().unwrap_or("")).await;
+        let say = |step: spotify::LoginStep| match step {
+            spotify::LoginStep::Url(url) => {
+                println!("Log in to Spotify in your browser. If it didn't open, visit:\n\n{url}\n");
+                println!("(The app's redirect URI must be exactly {})", spotify::redirect_uri());
+            }
+            spotify::LoginStep::Opened(_) => {}
+        };
+        spotify::login(args.spotify_client_id.as_deref().unwrap_or(""), &say).await?;
+        println!("Logged in. The token is in {}", spotify::dir().join("token.json").display());
+        return Ok(());
     }
     if args.spotify_logout {
         println!("{}", if spotify::logout() { "Logged out of Spotify." } else { "Not logged in." });
@@ -227,15 +241,13 @@ async fn main() -> Result<()> {
     picker.set_background_color(bg);
 
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-    let app = app::App::new(args, theme, picker, tx.clone());
+    let mut app = app::App::new(args, theme, picker, tx.clone());
 
     // Player workers: periodic poll + instant change stream.
     tokio::spawn(app.ctl.clone().poll_loop(tx.clone()));
     tokio::spawn(app.ctl.clone().follow_loop(tx.clone()));
     // Spotify Web API: playback on other devices, `local` / volume for this one.
-    if let Some(api) = app.spot.clone() {
-        tokio::spawn(api.remote_loop(tx.clone()));
-    }
+    app.start_spotify();
 
     let res = run(&mut terminal, app, rx).await;
 
