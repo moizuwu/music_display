@@ -179,6 +179,11 @@ mod cli {
         #[arg(long, default_value = "en")]
         pub translate_lang: String,
 
+        /// Languages that are never translated, comma separated, e.g. `sv,fi` (lines the service
+        /// detects as one of them stay as written) [config: translate_skip]
+        #[arg(long, default_value = "", value_name = "CODES")]
+        pub translate_skip: String,
+
         /// Fall back to LibreTranslate when Google Translate is rate-limited or unreachable
         /// [config: translate_fallback]
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
@@ -228,6 +233,8 @@ mod config {
         Int(i64, i64),
         Float(f64, f64),
         Str,
+        /// A string that may be empty.
+        Text,
     }
 
     pub struct Key {
@@ -270,6 +277,7 @@ mod config {
         k!("lyrics_retries", Kind::Int(0, 10), "lyrics_retries"),
         k!("translate", Kind::Bool, "translate"),
         k!("translate_lang", Kind::Str, "translate_lang"),
+        k!("translate_skip", Kind::Text, "translate_skip"),
         k!("translate_fallback", Kind::Bool, "translate_fallback"),
         k!("translate_fallback_url", Kind::Str, "translate_fallback_url"),
         k!("translate_fallback_key", Kind::Str, "translate_fallback_key"),
@@ -288,6 +296,7 @@ mod config {
     fn check(kind: &Kind, v: &toml::Value) -> Result<(), String> {
         match kind {
             Kind::Bool => v.as_bool().map(|_| ()).ok_or("expected true or false".into()),
+            Kind::Text => v.as_str().map(|_| ()).ok_or("expected a string".into()),
             Kind::Str => match v.as_str() {
                 Some(s) if !s.trim().is_empty() => Ok(()),
                 _ => Err("expected a non-empty string".into()),
@@ -350,6 +359,7 @@ mod config {
             "lyrics_retries" => args.lyrics_retries = i() as u32,
             "translate" => args.translate = b(),
             "translate_lang" => args.translate_lang = st(),
+            "translate_skip" => args.translate_skip = st(),
             "translate_fallback" => args.translate_fallback = b(),
             "translate_fallback_url" => args.translate_fallback_url = st(),
             "translate_fallback_key" => args.translate_fallback_key = Some(st()),
@@ -472,6 +482,7 @@ mod config {
         line("lyrics_retries", args.lyrics_retries.to_string());
         line("translate", args.translate.to_string());
         line("translate_lang", q(&args.translate_lang));
+        line("translate_skip", q(&args.translate_skip));
         line("translate_fallback", args.translate_fallback.to_string());
         line("translate_fallback_url", q(&args.translate_fallback_url));
         if args.translate_fallback_key.is_some() {
@@ -2096,6 +2107,18 @@ mod translate {
         pub fallback: bool,
         pub fallback_url: String,
         pub fallback_key: Option<String>,
+        /// Lines the service detects as one of these languages (`sv`, `de`…) stay as they are.
+        pub skip: Vec<String>,
+    }
+
+    /// The source language Google detected: `[[…],null,"sv"]`.
+    pub fn detected(v: &Value) -> Option<String> {
+        v.get(2).and_then(Value::as_str).map(base_code)
+    }
+
+    /// `zh-CN` → `zh`, case-insensitive.
+    pub fn base_code(c: &str) -> String {
+        c.split(['-', '_']).next().unwrap_or(c).trim().to_lowercase()
     }
 
     /// Why one request failed: `Limited` / `Net` switch to the fallback, `Other` is retried.
@@ -2153,23 +2176,23 @@ mod translate {
     }
 
     /// `gtx`, then `dict-chrome-ex` when the first is limited or unreachable.
-    async fn google(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Result<String, Fail> {
+    async fn google(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Result<(String, Option<String>), Fail> {
         let (u1, u2) = match &cfg.google_base {
             Some(b) => (b.clone(), format!("{b}/dict")),
             None => (GTX.to_string(), DICT.to_string()),
         };
-        match get(c, &u1, "gtx", lang, text).await.map(|v| parse(&v)) {
-            Ok(Some(t)) => return Ok(t),
-            Ok(None) | Err(Fail::Other) => {}
+        match get(c, &u1, "gtx", lang, text).await.map(|v| (parse(&v), detected(&v))) {
+            Ok((Some(t), det)) => return Ok((t, det)),
+            Ok((None, _)) | Err(Fail::Other) => {}
             Err(_) => {}
         }
         match get(c, &u2, "dict-chrome-ex", lang, text).await {
-            Ok(v) => parse_dict(&v).ok_or(Fail::Other),
+            Ok(v) => parse_dict(&v).map(|t| (t, None)).ok_or(Fail::Other),
             Err(e) => Err(e),
         }
     }
 
-    async fn libre(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Option<String> {
+    async fn libre(c: &reqwest::Client, cfg: &Cfg, lang: &str, text: &str) -> Option<(String, Option<String>)> {
         // LibreTranslate wants "zh", not "zh-CN"
         let target = lang.split('-').next().unwrap_or(lang);
         let mut body = json!({ "q": text, "source": "auto", "target": target, "format": "text" });
@@ -2187,7 +2210,11 @@ mod translate {
             return None;
         }
         let v = r.json::<Value>().await.ok()?;
-        v.get("translatedText")?.as_str().filter(|t| !t.is_empty()).map(str::to_string)
+        let det = v
+            .pointer("/detectedLanguage/language")
+            .and_then(Value::as_str)
+            .map(base_code);
+        v.get("translatedText")?.as_str().filter(|t| !t.is_empty()).map(|t| (t.to_string(), det))
     }
 
     async fn line(c: &reqwest::Client, cfg: &Cfg, use_fallback: &AtomicBool, lang: &str, l: String) -> Option<String> {
@@ -2199,7 +2226,7 @@ mod translate {
             // one retry for a plain failure: a single dropped request shouldn't leave a line
             for _ in 0..2 {
                 match google(c, cfg, lang, t).await {
-                    Ok(x) => return Some(x),
+                    Ok((x, det)) => return Some(keep_skipped(cfg, det, x, &l)),
                     Err(Fail::Other) => continue,
                     Err(_) => {
                         // limited / unreachable: stay on the fallback for the rest of the song
@@ -2211,7 +2238,18 @@ mod translate {
                 }
             }
         }
-        if cfg.fallback { libre(c, cfg, lang, t).await } else { None }
+        if !cfg.fallback {
+            return None;
+        }
+        libre(c, cfg, lang, t).await.map(|(x, det)| keep_skipped(cfg, det, x, &l))
+    }
+
+    /// The original line when its language is on the skip list, else the translation.
+    fn keep_skipped(cfg: &Cfg, detected: Option<String>, translated: String, original: &str) -> String {
+        match detected {
+            Some(d) if cfg.skip.contains(&d) => original.to_string(),
+            _ => translated,
+        }
     }
 
     /// Translate every line (order preserved; a line that fails keeps its original text).
@@ -4443,6 +4481,7 @@ mod app {
         MemberParts,
         Translate,
         TranslateLang,
+        TranslateSkip,
         TranslateFallback,
         Minimal,
         BigLyrics,
@@ -4467,6 +4506,7 @@ mod app {
             Setting::MemberParts,
             Setting::Translate,
             Setting::TranslateLang,
+            Setting::TranslateSkip,
             Setting::TranslateFallback,
             Setting::Minimal,
             Setting::BigLyrics,
@@ -4491,6 +4531,7 @@ mod app {
                 Setting::MemberParts => "Member parts (experimental)",
                 Setting::Translate => "Translate lyrics",
                 Setting::TranslateLang => "Translate into",
+                Setting::TranslateSkip => "Never translate",
                 Setting::TranslateFallback => "LibreTranslate fallback",
                 Setting::Minimal => "Minimal view",
                 Setting::BigLyrics => "Big active line",
@@ -4517,6 +4558,7 @@ mod app {
                 Setting::MemberParts => &["member_parts"],
                 Setting::Translate => &["translate"],
                 Setting::TranslateLang => &["translate_lang"],
+                Setting::TranslateSkip => &["translate_skip"],
                 Setting::TranslateFallback => &["translate_fallback"],
                 Setting::Minimal => &["minimal_view"],
                 Setting::BigLyrics => &["big_lyrics"],
@@ -4646,6 +4688,8 @@ mod app {
         pub show_settings: bool,
         pub settings_sel: usize,
         pub settings_top: usize,
+        /// The language the "Never translate" row is pointing at.
+        skip_cursor: usize,
         /// Last settings-save problem, shown in the menu.
         pub settings_note: Option<String>,
         /// `K`: show translated lyrics.
@@ -4740,6 +4784,7 @@ mod app {
                 show_settings: false,
                 settings_sel: 0,
                 settings_top: 0,
+                skip_cursor: 0,
                 settings_note: None,
                 translate_on: false,
                 translate_state: TranslateState::Idle,
@@ -5322,6 +5367,7 @@ mod app {
                 fallback: self.args.translate_fallback,
                 fallback_url: self.args.translate_fallback_url.clone(),
                 fallback_key: self.args.translate_fallback_key.clone(),
+                skip: self.skip_langs(),
             };
             self.tasks.push(tokio::spawn(async move {
                 let lines = translate::lines(&c, &cfg, &lang, &lines).await;
@@ -5338,6 +5384,35 @@ mod app {
         /// Browsing hands the view back to the playing line after a few idle seconds.
         pub fn browse_expired(&self) -> bool {
             self.browse != 0.0 && self.browse_at.elapsed() > Duration::from_secs(6)
+        }
+
+        /// The `translate_skip` codes, normalised (`SV, zh-CN` → `["sv", "zh"]`).
+        pub fn skip_langs(&self) -> Vec<String> {
+            self.args
+                .translate_skip
+                .split(',')
+                .map(translate::base_code)
+                .filter(|c| !c.is_empty())
+                .collect()
+        }
+
+        /// Add / remove one language from the never-translate list.
+        fn toggle_skip(&mut self, code: &str) {
+            let mut all = self.skip_langs();
+            let code = translate::base_code(code);
+            match all.iter().position(|c| *c == code) {
+                Some(i) => {
+                    all.remove(i);
+                }
+                None => all.push(code),
+            }
+            self.args.translate_skip = all.join(",");
+            // what was translated under the old list is stale
+            self.translations.clear();
+            self.translate_inflight = None;
+            self.translate_state = TranslateState::Idle;
+            self.snap_scroll = true;
+            self.ensure_translation();
         }
 
         fn toggle_translate(&mut self) {
@@ -5360,6 +5435,13 @@ mod app {
                 Setting::MemberParts => onoff(self.args.member_parts),
                 Setting::Translate => onoff(self.translate_on),
                 Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
+                Setting::TranslateSkip => {
+                    // `< sv [x] >`: ←/→ pick a language, space adds or removes it
+                    let code = LANGS[self.skip_cursor % LANGS.len()];
+                    let on = self.skip_langs().contains(&translate::base_code(code));
+                    let list = self.args.translate_skip.clone();
+                    format!("< {code} {} >{}", if on { "[x]" } else { "[ ]" }, if list.is_empty() { String::new() } else { format!("  ({list})") })
+                }
                 Setting::TranslateFallback => onoff(self.args.translate_fallback),
                 Setting::Minimal => onoff(self.minimal),
                 Setting::BigLyrics => onoff(self.big_lyrics),
@@ -5407,6 +5489,14 @@ mod app {
                     self.translate_state = TranslateState::Idle;
                     self.snap_scroll = true;
                     self.ensure_translation();
+                }
+                Setting::TranslateSkip => {
+                    if dir == 0 {
+                        self.toggle_skip(LANGS[self.skip_cursor % LANGS.len()]);
+                    } else {
+                        let n = LANGS.len() as i32;
+                        self.skip_cursor = (self.skip_cursor as i32 + dir).rem_euclid(n) as usize;
+                    }
                 }
                 Setting::TranslateFallback => self.args.translate_fallback = !self.args.translate_fallback,
                 Setting::Minimal => self.set_minimal(!self.minimal),
@@ -5463,6 +5553,7 @@ mod app {
                 ("member_parts", B(self.args.member_parts)),
                 ("translate", B(self.translate_on)),
                 ("translate_lang", S(self.args.translate_lang.clone())),
+                ("translate_skip", S(self.args.translate_skip.clone())),
                 ("translate_fallback", B(self.args.translate_fallback)),
                 ("big_scale", I(self.args.big_scale as i64)),
                 ("lyric_pad", I(self.args.lyric_pad as i64)),
@@ -5504,6 +5595,9 @@ mod app {
                 KeyCode::Home => self.settings_sel = 0,
                 KeyCode::End => self.settings_sel = n - 1,
                 KeyCode::Left | KeyCode::Char('h') => self.change_setting(Setting::ALL[self.settings_sel], -1),
+                KeyCode::Enter | KeyCode::Char(' ') if Setting::ALL[self.settings_sel] == Setting::TranslateSkip => {
+                    self.change_setting(Setting::TranslateSkip, 0)
+                }
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.change_setting(Setting::ALL[self.settings_sel], 1)
                 }
@@ -7150,9 +7244,13 @@ mod ui {
             "[ play ]"
         };
         labels.extend([("[ prev ]", 2), (play_lbl, 3), ("[ next ]", 4)]);
-        let gap = 2u16;
+        let gap = 1u16;
+        // `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 100% ] [ + ]`: a dash
+        // (with a space each side) sets the groups apart
+        let modes = labels.iter().filter(|l| l.1 < 2).count() as u16;
         let total: u16 = labels.iter().map(|l| l.0.chars().count() as u16).sum::<u16>()
-            + gap * (labels.len() as u16 - 1);
+            + gap * (labels.len() as u16 - 1)
+            + if modes > 0 { 2 } else { 0 };
         let vol_inline = vol_shown && total as usize + 3 + vol_w <= width as usize;
         let vol_row = vol_shown && !vol_inline;
         let [cover_a, _, meta_a, _, prog_a, _, btn_a, vol_a] = Layout::vertical([
@@ -7187,8 +7285,17 @@ mod ui {
         let transport_start = x;
         app.hits.shuffle = Rect::default();
         app.hits.repeat = Rect::default();
+        let sep = Style::new().fg(th.fade(0.5));
         for (l, id) in &labels {
             let w = l.chars().count() as u16;
+            if *id == 2 && modes > 0 {
+                // x already includes one gap after the last mode button
+                f.render_widget(
+                    Paragraph::new(Span::styled("-", sep)),
+                    Rect { x: x.min(btn_a.right().saturating_sub(1)), y: btn_a.y, width: 1, height: 1 },
+                );
+                x = x.saturating_add(2);
+            }
             let r = Rect {
                 x,
                 y: btn_a.y,
@@ -7225,6 +7332,11 @@ mod ui {
         app.hits.vol_area = Rect::default();
         if vol_shown && (vol_inline || vol_a.height > 0) {
             let (row, x0) = if vol_inline {
+                // " - " between the transport buttons and the volume control
+                f.render_widget(
+                    Paragraph::new(Span::styled("-", sep)),
+                    Rect { x: (transport_start + total + 1).min(btn_a.right().saturating_sub(1)), y: btn_a.y, width: 1, height: 1 },
+                );
                 (btn_a, transport_start + total + 3)
             } else {
                 (vol_a, vol_a.x + vol_a.width.saturating_sub(vol_w as u16) / 2)
@@ -7350,6 +7462,23 @@ mod ui {
     }
 
     // ── lyrics ──────────────────────────────────────────────────────────────
+    /// Chord columns of `orig` (char columns in its single-spaced text) moved to the same
+    /// relative place in `trans`, snapped to the start of the nearest word.
+    pub fn remap_chords(cs: &[(usize, String)], orig: &str, trans: &str) -> Vec<(usize, String)> {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (o, t) = (norm(orig), norm(trans));
+        let (ol, tl) = (o.chars().count().max(1), t.chars().count());
+        let starts: Vec<usize> = chords::words_pos(&t).into_iter().map(|(s, _)| s).collect();
+        let mut out: Vec<(usize, String)> = Vec::new();
+        for (c, name) in cs {
+            let want = (*c as f64 / ol as f64 * tl as f64).round() as usize;
+            let col = starts.iter().copied().min_by_key(|s| s.abs_diff(want)).unwrap_or(0);
+            out.push((col, name.clone()));
+        }
+        out.sort_by_key(|c| c.0);
+        out
+    }
+
     /// Closing punctuation (CJK and Latin) that must not start a wrapped line.
     fn no_line_start(c: char) -> bool {
         matches!(
@@ -7768,8 +7897,9 @@ mod ui {
             LyricsState::Ready(Lyrics::Plain(l)) => (l.clone(), None),
         };
         let plain = matches!(app.lyrics, LyricsState::Ready(Lyrics::Plain(_)));
-        // Translated text replaces the original line by line; the chord sheet is matched on
-        // the original wording, so chords are hidden while a translation is shown.
+        // Translated text replaces the original line by line; chord columns, which point at
+        // the original words, are carried over to the same relative place in the translation.
+        let original = lines.clone();
         let mut lines = lines;
         let translated = match app.translation() {
             Some(t) if t.len() == lines.len() => {
@@ -7794,10 +7924,20 @@ mod ui {
             0
         };
 
-        let aligned: Option<chords::Aligned> = (app.chords_on && !plain && !translated)
+        let aligned: Option<chords::Aligned> = (app.chords_on && !plain)
             .then(|| app.aligned.clone())
             .flatten()
-            .filter(|a| a.usable());
+            .filter(|a| a.usable())
+            .map(|mut a| {
+                if translated {
+                    for (i, cs) in a.per_line.iter_mut().enumerate() {
+                        if let (Some(o), Some(t)) = (original.get(i), lines.get(i)) {
+                            *cs = remap_chords(cs, o, t);
+                        }
+                    }
+                }
+                a
+            });
         let tr = app.chord_shift();
         let flats = app.use_flats();
 
@@ -8995,6 +9135,7 @@ mod tests {
             fallback: true,
             fallback_url: format!("{site}/libre"),
             fallback_key: Some("k".into()),
+            skip: vec![],
         };
         let src = vec!["hola".to_string(), "♪".to_string(), "adiós".to_string()];
         let (out, backend) = translate::lines(&reqwest::Client::new(), &cfg, "en", &src).await.unwrap();
@@ -9005,6 +9146,25 @@ mod tests {
         // no fallback: a limited Google is an error
         let off = translate::Cfg { fallback: false, ..cfg };
         assert!(translate::lines(&reqwest::Client::new(), &off, "en", &src).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn skipped_languages_are_left_as_written() {
+        let (site, _log) = scripted_site(vec![
+            ("tl=en&q=hej", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["hello","hej"]],null,"sv"]"#.into())]),
+            ("tl=en&q=hola", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["hello","hola"]],null,"es"]"#.into())]),
+        ]);
+        let cfg = translate::Cfg {
+            google_base: Some(format!("{site}/g")),
+            fallback: false,
+            skip: vec!["sv".into()],
+            ..Default::default()
+        };
+        let src = vec!["hej".to_string(), "hola".to_string()];
+        let (out, _) = translate::lines(&reqwest::Client::new(), &cfg, "en", &src).await.unwrap();
+        assert_eq!(out, vec!["hej", "hello"]);
+        assert_eq!(translate::base_code("SV"), "sv");
+        assert_eq!(translate::base_code("zh-CN"), "zh");
     }
 
     #[test]
@@ -9183,6 +9343,18 @@ mod tests {
         assert_eq!(original, k("Cat & Dog", "Cat & Dog (Deluxe Edition)"));
         assert_eq!(original, k("Cat & Dog - Remastered 2021", "Cat & Dog"));
         assert_eq!(util::version_marker("Song", "Album"), None);
+    }
+
+    #[test]
+    fn chords_follow_the_translation() {
+        let cs = vec![(0, "Am".to_string()), (12, "G".to_string())];
+        // "walking down the road" -> two chords at the start of word 1 and word 3
+        let out = ui::remap_chords(&cs, "walking down the road", "gå ner för vägen idag");
+        assert_eq!(out[0], (0, "Am".to_string()));
+        assert!(out[1].0 >= 6 && out[1].0 <= 13, "{out:?}");
+        // always lands on a word start of the translated line
+        let starts = [0, 3, 7, 11, 18];
+        assert!(out.iter().all(|c| starts.contains(&c.0)), "{out:?}");
     }
 
     #[test]
