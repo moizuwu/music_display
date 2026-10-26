@@ -50,6 +50,8 @@ chords_context = 99            # 99 = chords on every line; N = active line + N 
 volume_step = 5                # percent per + / - / wheel notch
 interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
+translate = false              # start with translated lyrics (toggle with K)
+translate_lang = "en"          # language lyrics are translated into
 minimal_view = false           # start in the minimal view
 mouse = true                   # false = don't capture the mouse
 ```
@@ -78,6 +80,7 @@ mouse = true                   # false = don't capture the mouse
 | `--minimal` | start in the minimal teleprompter view (also `M`). |
 | `--interlude-secs N` | a silence between two lyric lines longer than N seconds shows `[ Instrumental / Solo ]` (with a countdown) while it lasts; also before the first and after the last line. |
 | `--lyrics-retries N` | retries after a failed lyrics request (timeouts, 429 with `Retry-After`, disconnects, 5xx), 0.5 s / 1 s / 2 s backoff. |
+| `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords are hidden while a translation is shown. |
 | `--volume-step N` | percent per volume change. |
 | `--no-mouse` | don't capture the mouse. |
 
@@ -92,6 +95,7 @@ mouse = true                   # false = don't capture the mouse
 | `m` | mute / restore |
 | `,` / `.` | lyric offset −0.1 s / +0.1 s |
 | `l` | show / hide the lyrics |
+| `K` | translate lyrics on / off (cached per song while the app runs) |
 | `b` | big-font active line |
 | `g` | chords on / off |
 | `t` / `T` | transpose chords up / down one semitone |
@@ -99,6 +103,7 @@ mouse = true                   # false = don't capture the mouse
 | `0` | back to the sheet's own capo |
 | `D` | chord diagram panel |
 | `M` | minimal teleprompter view |
+| `s` | settings menu: toggles and steppers for chords, translation, minimal view, big lyrics, spacing, cava and more. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `q` / `Esc` | quit |
@@ -110,6 +115,8 @@ The volume control follows the player: changes made elsewhere (media keys, the S
 ## Metadata panel
 
 `Release` shows the full `YYYY-MM-DD` when the player reports it (otherwise the year from MusicBrainz/iTunes). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so with chords off — or a sheet without them — these fields are simply hidden. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
+
+`Tuning` (shown while chords are on) is the song's original guitar tuning (Standard, Drop D, Half Step Down…) from Ultimate Guitar's page metadata or a `{tuning: …}` line in a ChordPro file; it is also shown in the chord diagram panel title.
 
 The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot show the **sounding** key (shapes + capo); the Capo row says which shapes you finger, e.g. `Capo 3  (shapes in C#m)`. Changing the capo with `[` / `]` re-spells the shapes (and the diagrams) but leaves the sounding key alone.
 
