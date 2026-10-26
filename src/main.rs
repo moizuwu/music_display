@@ -124,6 +124,11 @@ mod cli {
         #[arg(long)]
         pub chords_ug: bool,
 
+        /// Experimental: show which group member sings each line, scraped from Genius
+        /// (unofficial, off by default; results are cached) [config: member_parts]
+        #[arg(long)]
+        pub member_parts: bool,
+
         /// Diagnose the Ultimate Guitar lookup for one song, print the steps and exit [no config key]
         #[arg(long, num_args = 2, value_names = ["ARTIST", "TITLE"])]
         pub chords_probe: Option<Vec<String>>,
@@ -257,6 +262,7 @@ mod config {
         k!("hide_color_warning", Kind::Bool, "hide_color_warning"),
         k!("chords", Kind::Bool, "chords"),
         k!("chords_ug", Kind::Bool, "chords_ug"),
+        k!("member_parts", Kind::Bool, "member_parts"),
         k!("chords_dir", Kind::Str, "chords_dir"),
         k!("chords_context", Kind::Int(0, 99), "chords_context"),
         k!("volume_step", Kind::Int(1, 50), "volume_step"),
@@ -336,6 +342,7 @@ mod config {
             "hide_color_warning" => args.hide_color_warning = b(),
             "chords" => args.chords = b(),
             "chords_ug" => args.chords_ug = b(),
+            "member_parts" => args.member_parts = b(),
             "chords_dir" => args.chords_dir = Some(PathBuf::from(st())),
             "chords_context" => args.chords_context = i() as u16,
             "volume_step" => args.volume_step = i() as u32,
@@ -454,6 +461,7 @@ mod config {
         line("hide_color_warning", args.hide_color_warning.to_string());
         line("chords", args.chords.to_string());
         line("chords_ug", args.chords_ug.to_string());
+        line("member_parts", args.member_parts.to_string());
         match &args.chords_dir {
             Some(d) => line("chords_dir", q(&d.display().to_string())),
             None => line("# chords_dir", "\"~/.local/share/music_display/chords\"  # default".into()),
@@ -502,6 +510,21 @@ mod util {
         let out = fold(&s);
         // "(Live)" or "---" as the whole title: keep it rather than collapse to nothing
         if out.is_empty() { fold(orig) } else { out }
+    }
+
+    /// The language or content a release is explicitly marked with in its title or album
+    /// ("(English Version)", "Japanese Ver.", "Instrumental"): such a release has different
+    /// lyrics from the original, so it is a different track however alike the names are.
+    pub fn version_marker(title: &str, album: &str) -> Option<String> {
+        use regex::Regex;
+        use std::sync::LazyLock;
+        static LANG: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\b(english|korean|japanese|chinese|mandarin|cantonese|spanish|french|german|italian|portuguese|russian|thai|vietnamese|indonesian|turkish|arabic|hindi)\s*(ver\.?|version)\b|\b(instrumental)\b").unwrap()
+        });
+        [title, album].iter().find_map(|s| {
+            LANG.captures(s)
+                .map(|c| c.get(1).or_else(|| c.get(3)).map_or("", |m| m.as_str()).to_lowercase())
+        })
     }
 
     /// Terminal cell width of a char (0 for combining marks, 2 for CJK/Hangul/emoji).
@@ -894,13 +917,60 @@ mod player {
     use tokio::sync::{Notify, mpsc::UnboundedSender};
 
     /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
-    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}";
+    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Status {
         Playing,
         Paused,
         Stopped,
+    }
+
+    /// `playerctl loop` state.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Loop {
+        None,
+        Track,
+        Playlist,
+    }
+
+    impl Loop {
+        /// The next state when the repeat button is pressed: off -> playlist -> track -> off.
+        pub fn next(self) -> Loop {
+            match self {
+                Loop::None => Loop::Playlist,
+                Loop::Playlist => Loop::Track,
+                Loop::Track => Loop::None,
+            }
+        }
+
+        /// The argument `playerctl loop` takes.
+        pub fn arg(self) -> &'static str {
+            match self {
+                Loop::None => "None",
+                Loop::Track => "Track",
+                Loop::Playlist => "Playlist",
+            }
+        }
+    }
+
+    /// `playerctl shuffle` prints `On` / `Off`; anything else means the player has none.
+    pub fn parse_shuffle(out: &str) -> Option<bool> {
+        match out.trim() {
+            "On" => Some(true),
+            "Off" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// `playerctl loop` prints `None` / `Track` / `Playlist`.
+    pub fn parse_loop(out: &str) -> Option<Loop> {
+        match out.trim() {
+            "None" => Some(Loop::None),
+            "Track" => Some(Loop::Track),
+            "Playlist" => Some(Loop::Playlist),
+            _ => None,
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -919,19 +989,29 @@ mod player {
         pub volume: Option<f64>,
         /// `xesam:url` — a `file://` path for locally played audio.
         pub url: String,
+        /// `mpris:trackid` — the player's own id for the item (Spotify track URI…).
+        pub track_id: String,
+        /// The MPRIS instance this came from (`spotify`, `vlc`…).
+        pub player: String,
+        /// Shuffle / repeat state (`None` if the player has neither); filled in by the
+        /// poller from the last `playerctl shuffle` / `loop` read, not by [`parse`].
+        pub shuffle: Option<bool>,
+        pub repeat: Option<Loop>,
     }
 
     impl Snapshot {
-        /// Identity of the track; changes ⇒ refetch year/lyrics. Case, spacing and
-        /// edition/remaster suffixes are ignored, so "Metallica" and "Metallica (Remastered
-        /// Deluxe Box Set)" are the same track and don't regenerate any state.
+        /// Identity of the track; changes ⇒ refetch year/lyrics. First artist and the bare
+        /// song title only: case, spacing, edition / remaster / live suffixes, guest credits
+        /// and the album are ignored, so every release of a song is the same track, except one
+        /// marked as another language or instrumental (see `version_marker`).
         pub fn key(&self) -> u64 {
-            let clean = |s: &str| crate::util::normalize_track(s);
+            let first_artist = self.artist.split(", ").next().unwrap_or(&self.artist);
             crate::util::fnv1a(&format!(
                 "{}\0{}\0{}",
-                clean(&self.artist),
-                clean(&self.title),
-                clean(&self.album)
+                crate::util::normalize_track(first_artist),
+                crate::util::normalize_track(&crate::year::base_title(&self.title)),
+                // an English / Japanese / instrumental release is not the original song
+                crate::util::version_marker(&self.title, &self.album).unwrap_or_default(),
             ))
         }
     }
@@ -975,6 +1055,10 @@ mod player {
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 1.0)),
             url: url.to_string(),
+            track_id: f.get(12).map_or("", |v| v.trim()).to_string(),
+            player: f.get(13).map_or("", |v| v.trim()).to_string(),
+            shuffle: None,
+            repeat: None,
         })
     }
 
@@ -987,6 +1071,9 @@ mod player {
         pub repoll: Arc<Notify>,
         /// The follow task restarts its `playerctl --follow` when this fires.
         switched: Arc<Notify>,
+        /// Last shuffle / repeat read, stamped onto every snapshot (the follow task and the
+        /// poller both send them).
+        modes: Arc<std::sync::RwLock<(Option<bool>, Option<Loop>)>>,
     }
 
     fn player_args(player: &str) -> Vec<String> {
@@ -1021,6 +1108,7 @@ mod player {
                 base: Arc::new(std::sync::RwLock::new(player_args(&expand(player)))),
                 repoll: Arc::new(Notify::new()),
                 switched: Arc::new(Notify::new()),
+                modes: Arc::new(std::sync::RwLock::new((None, None))),
             }
         }
 
@@ -1069,16 +1157,45 @@ mod player {
             parse(&String::from_utf8_lossy(&out.stdout))
         }
 
+        /// One `playerctl <cmd>` read; `None` if it failed (no player, or unsupported).
+        async fn read_mode(&self, cmd: &str) -> Option<String> {
+            let out = self.cmd().arg(cmd).output().await.ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+
+        async fn refresh_modes(&self) {
+            let shuffle = self.read_mode("shuffle").await.and_then(|o| parse_shuffle(&o));
+            let repeat = self.read_mode("loop").await.and_then(|o| parse_loop(&o));
+            if let Ok(mut m) = self.modes.write() {
+                *m = (shuffle, repeat);
+            }
+        }
+
+        fn with_modes(&self, mut s: Snapshot) -> Snapshot {
+            if let Ok(m) = self.modes.read() {
+                (s.shuffle, s.repeat) = *m;
+            }
+            s
+        }
+
         /// Periodic poll (keeps position accurate) — wakes early when `repoll` is notified.
+        /// Shuffle / repeat are re-read about every 2 s, and right after a command.
         pub async fn poll_loop(self, tx: UnboundedSender<AppEvent>) {
+            let mut modes_at: Option<tokio::time::Instant> = None;
             loop {
-                let snap = self.poll_once().await;
+                if modes_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                    self.refresh_modes().await;
+                    modes_at = Some(tokio::time::Instant::now());
+                }
+                let snap = self.poll_once().await.map(|s| self.with_modes(s));
                 if tx.send(AppEvent::Player(snap)).is_err() {
                     return;
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(400)) => {}
-                    _ = self.repoll.notified() => {}
+                    _ = self.repoll.notified() => modes_at = None,
                 }
             }
         }
@@ -1101,7 +1218,7 @@ mod player {
                             tokio::select! {
                                 line = lines.next_line() => match line {
                                     Ok(Some(line)) => {
-                                        if tx.send(AppEvent::Player(parse(&line))).is_err() {
+                                        if tx.send(AppEvent::Player(parse(&line).map(|s| self.with_modes(s)))).is_err() {
                                             return;
                                         }
                                     }
@@ -1563,8 +1680,41 @@ mod lyrics {
             .map(|p| ("plain", p.clone()))
     }
 
-    /// Best search hit: synced with matching duration > synced > plain/instrumental.
-    fn pick(recs: Vec<Rec>, length: f64) -> Option<(&'static str, String)> {
+    pub fn is_hangul(c: char) -> bool {
+        matches!(c as u32, 0xAC00..=0xD7A3 | 0x1100..=0x11FF | 0x3130..=0x318F)
+    }
+
+    /// Share of the letters in `text` that are Hangul (0.0 when there are no letters).
+    pub fn hangul_ratio(text: &str) -> f32 {
+        let (mut h, mut n) = (0usize, 0usize);
+        for c in text.chars().filter(|c| c.is_alphabetic()) {
+            n += 1;
+            h += is_hangul(c) as usize;
+        }
+        if n == 0 { 0.0 } else { h as f32 / n as f32 }
+    }
+
+    /// Whether a lyric text is mostly Hangul.
+    fn is_hangul_text(text: &str) -> bool {
+        hangul_ratio(text) >= 0.3
+    }
+
+    /// Best search hit: synced with matching duration > synced > plain/instrumental. In a
+    /// Korean context (`korean`, or any candidate being mostly Hangul) the more-Hangul text
+    /// wins among equals, so the Hangul lyrics beat the romanized ones.
+    /// Which script the wanted lyrics are in.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Lang {
+        /// Nothing known: Hangul is preferred only if the candidates themselves are Hangul.
+        Auto,
+        Korean,
+        /// An explicitly non-Korean release (e.g. "English Version"): Hangul text is wrong.
+        Other,
+    }
+
+    fn pick(recs: Vec<Rec>, length: f64, lang: Lang) -> Option<(&'static str, String)> {
+        let korean = lang == Lang::Korean
+            || (lang == Lang::Auto && recs.iter().any(|r| classify(r).is_some_and(|c| is_hangul_text(&c.1))));
         let close = |r: &Rec| length <= 0.0 || r.duration.is_none_or(|d| (d - length).abs() <= 4.0);
         let rank = |r: &Rec| match (classify(r).map(|c| c.0), close(r)) {
             (Some("synced"), true) => 0,
@@ -1573,9 +1723,18 @@ mod lyrics {
             (Some(_), false) => 3,
             (None, _) => 9,
         };
+        // Hangul first within the synced > plain order, then the duration match
+        let hangul = |r: &Rec| match classify(r) {
+            Some((_, t)) if korean => 1000 - (hangul_ratio(&t) * 1000.0) as u32,
+            // a non-Korean release: the least Hangul wins
+            Some((_, t)) if lang == Lang::Other => (hangul_ratio(&t) * 1000.0) as u32,
+            _ => 0,
+        };
+        let kind = |r: &Rec| rank(r) / 2 * 2; // 0 synced, 2 plain, 8 none
         recs.iter()
             .filter(|r| rank(r) < 9)
-            .min_by_key(|r| rank(r))
+            .filter(|r| lang != Lang::Other || !classify(r).is_some_and(|c| is_hangul_text(&c.1)))
+            .min_by_key(|r| (kind(r), hangul(r), rank(r)))
             .and_then(classify)
     }
 
@@ -1742,6 +1901,17 @@ mod lyrics {
 
         let cleaned = crate::year::clean(title);
         let first = artist.split(", ").next().unwrap_or(artist).to_string();
+        // a Korean title or artist: romanized lyrics are worth a search for Hangul ones
+        let hint = title.chars().chain(artist.chars()).any(is_hangul);
+        let lang = match crate::util::version_marker(title, album).as_deref() {
+            Some("korean") => Lang::Korean,
+            Some("instrumental") | None if hint => Lang::Korean,
+            Some(_) => Lang::Other,
+            None => Lang::Auto,
+        };
+        let korean = lang == Lang::Korean;
+        // Hangul text is the wrong answer for an explicitly non-Korean release
+        let classify = |r: &Rec| classify(r).filter(|c| lang != Lang::Other || !is_hangul_text(&c.1));
         let mut failure: Option<&'static str> = None;
         let mut result: Option<(&'static str, String)> = None;
         let mut retries = policy.retries;
@@ -1765,13 +1935,25 @@ mod lyrics {
             Step::Failed(w) => note(w, &mut retries),
         }
 
+        // good enough to stop: synced, and Hangul when the song is Korean
+        let done = |r: &Option<(&'static str, String)>| {
+            r.as_ref().is_some_and(|r| r.0 == "synced" && (!korean || is_hangul_text(&r.1)))
+        };
+
         // (b) first artist + cleaned title, no album / duration
-        if result.as_ref().is_none_or(|r| r.0 != "synced") {
+        if !done(&result) {
             let q = [("artist_name", first.as_str()), ("track_name", cleaned.as_str())];
             match get(c, base, &q, retries, &policy).await {
                 Step::Hit(r) => {
                     if let Some(hit) = classify(&r) {
-                        if result.as_ref().is_none_or(|x| x.0 != "synced" && hit.0 == "synced") {
+                        let better = match &result {
+                            None => true,
+                            Some(x) => {
+                                (x.0 != "synced" && hit.0 == "synced")
+                                    || (korean && is_hangul_text(&hit.1) && !is_hangul_text(&x.1))
+                            }
+                        };
+                        if better {
                             result = Some(hit);
                         }
                     }
@@ -1782,7 +1964,7 @@ mod lyrics {
         }
 
         // (c) search: cleaned title, then the raw title, then the first artist alone
-        if result.as_ref().is_none_or(|r| r.0 != "synced") {
+        if !done(&result) {
             let mut tries = vec![(artist.to_string(), cleaned.clone())];
             if cleaned != title {
                 tries.push((artist.to_string(), title.to_string()));
@@ -1793,11 +1975,19 @@ mod lyrics {
             for (a, t) in tries {
                 match search(c, base, &a, &t, retries, &policy).await {
                     Step::Hit(recs) => {
-                        if let Some(hit) = pick(recs, length) {
-                            if result.as_ref().is_none_or(|r| r.0 != "synced") {
+                        if let Some(hit) = pick(recs, length, lang) {
+                            let better = match &result {
+                                None => true,
+                                Some(x) => {
+                                    (x.0 != "synced"
+                                        && !(hit.0 != "synced" && korean && is_hangul_text(&x.1) && !is_hangul_text(&hit.1)))
+                                        || (korean && is_hangul_text(&hit.1) && !is_hangul_text(&x.1))
+                                }
+                            };
+                            if better {
                                 result = Some(hit);
                             }
-                            if result.as_ref().is_some_and(|r| r.0 == "synced") {
+                            if done(&result) {
                                 break;
                             }
                         }
@@ -1837,6 +2027,48 @@ mod lyrics {
                 }
                 Lyrics::NotFound
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rec(synced: &str, plain: &str, duration: f64) -> Rec {
+            Rec {
+                synced: (!synced.is_empty()).then(|| synced.to_string()),
+                plain: (!plain.is_empty()).then(|| plain.to_string()),
+                instrumental: None,
+                duration: Some(duration),
+            }
+        }
+
+        #[test]
+        fn hangul_share() {
+            assert_eq!(hangul_ratio(""), 0.0);
+            assert_eq!(hangul_ratio("hello world"), 0.0);
+            assert_eq!(hangul_ratio("안녕하세요"), 1.0);
+            let r = hangul_ratio("안녕 hi"); // 2 of 4 letters
+            assert!((r - 0.5).abs() < 1e-6, "{r}");
+        }
+
+        #[test]
+        fn pick_prefers_hangul_only_in_korean_context() {
+            let roman = "[00:01.00]saranghae neomu\n[00:05.00]gaji ma";
+            let hangul = "[00:01.00]사랑해 너무\n[00:05.00]가지 마";
+            let recs = || vec![rec(roman, "", 200.0), rec(hangul, "", 200.0)];
+            // Korean title/artist: the Hangul synced lyrics win over the romanized ones
+            assert_eq!(pick(recs(), 200.0, Lang::Korean).unwrap().1, hangul);
+            // an "English Version" never takes the Hangul lyrics
+            assert_eq!(pick(recs(), 200.0, Lang::Other).unwrap().1, roman);
+            // a Hangul candidate also makes the context Korean by itself
+            assert_eq!(pick(recs(), 200.0, Lang::Auto).unwrap().1, hangul);
+            // no Hangul candidate and no hint: plain first-come ranking
+            let eng = vec![rec("[00:01.00]one", "", 200.0), rec("[00:01.00]two", "", 200.0)];
+            assert_eq!(pick(eng, 200.0, Lang::Auto).unwrap().1, "[00:01.00]one");
+            // synced still beats plain Hangul
+            let mixed = vec![rec("", "사랑해", 200.0), rec(roman, "", 200.0)];
+            assert_eq!(pick(mixed, 200.0, Lang::Korean).unwrap().0, "synced");
         }
     }
 }
@@ -3525,6 +3757,272 @@ mod ug {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Member parts (experimental, opt-in: --member-parts). Genius has no open API for this, so
+// the song page is scraped for section headers like `[Verse 1: Jimin]` and everything
+// is written to fail soft and silent.
+// ════════════════════════════════════════════════════════════════════════════
+mod genius {
+    use crate::chords;
+    use crate::util::{cache_dir, fnv1a, now_secs};
+    use ratatui::style::Color;
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    pub const BASE: &str = "https://genius.com";
+    // looks like a normal browser, as for Ultimate Guitar
+    const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+    const NEG_TTL: u64 = 7 * 24 * 3600;
+
+    /// One lyric line and the members singing it (empty = unknown / everyone).
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Part {
+        pub members: Vec<String>,
+        pub text: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct CacheEntry {
+        kind: String, // found | none
+        parts: Vec<Part>,
+        saved: u64,
+    }
+
+    /// A stable colour per member name, from the terminal's own ANSI palette.
+    pub fn color(name: &str) -> Color {
+        const PALETTE: [Color; 8] = [
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::LightYellow,
+            Color::LightGreen,
+            Color::LightBlue,
+            Color::LightRed,
+            Color::Magenta,
+            Color::Green,
+        ];
+        PALETTE[(fnv1a(&name.to_lowercase()) % PALETTE.len() as u64) as usize]
+    }
+
+    // ── page parsing ───────────────────────────────────────────────────────
+    /// `[Verse 1: Jimin]` → `["Jimin"]`, `[Chorus: Jungkook, V]` → both, `[Pre-Chorus: RM &
+    /// SUGA]` → both. `Some(vec![])` for a header without names (`[Bridge]`); `None` if the
+    /// line isn't a header.
+    pub fn parse_header(line: &str) -> Option<Vec<String>> {
+        let inner = line.trim().strip_prefix('[')?.strip_suffix(']')?;
+        let Some((_, names)) = inner.split_once(':') else {
+            return Some(Vec::new());
+        };
+        let mut out: Vec<String> = Vec::new();
+        for n in names.replace(" and ", ",").split([',', '&', '+', ';', '/']) {
+            // "Jin (진)" → "Jin"
+            let n = n.split('(').next().unwrap_or("").trim();
+            if !n.is_empty() && n.chars().count() <= 24 && !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        }
+        Some(out)
+    }
+
+    /// The inner HTML of every `data-lyrics-container` div (tag-depth aware).
+    fn containers(html: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut from = 0;
+        while let Some(i) = html[from..].find("data-lyrics-container") {
+            let at = from + i;
+            let Some(open_end) = html[at..].find('>').map(|e| at + e + 1) else { break };
+            let (mut depth, mut pos) = (1usize, open_end);
+            let mut end = html.len();
+            while let Some(lt) = html[pos..].find('<').map(|l| pos + l) {
+                let rest = &html[lt..];
+                if rest.starts_with("<div") {
+                    depth += 1;
+                } else if rest.starts_with("</div") {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = lt;
+                        break;
+                    }
+                }
+                pos = lt + 1;
+            }
+            out.push(&html[open_end..end]);
+            from = end.max(open_end);
+        }
+        out
+    }
+
+    /// Container HTML → text: `<br>` is a newline, other tags vanish (and the contents of
+    /// `data-exclude-from-selection` blocks with them), entities are decoded.
+    fn text_of(html: &str) -> String {
+        let (mut out, mut skip, mut pos) = (String::new(), 0usize, 0usize);
+        while pos < html.len() {
+            let Some(lt) = html[pos..].find('<').map(|l| pos + l) else {
+                if skip == 0 {
+                    out.push_str(&html[pos..]);
+                }
+                break;
+            };
+            if skip == 0 {
+                out.push_str(&html[pos..lt]);
+            }
+            let Some(gt) = html[lt..].find('>').map(|g| lt + g) else { break };
+            let tag = html[lt + 1..gt].trim().to_ascii_lowercase();
+            if tag.starts_with("div") {
+                if skip > 0 {
+                    skip += 1;
+                } else if tag.contains("data-exclude-from-selection") {
+                    skip = 1;
+                }
+            } else if tag.starts_with("/div") {
+                skip = skip.saturating_sub(1);
+            } else if skip == 0 && (tag == "br" || tag.starts_with("br ") || tag.starts_with("br/")) {
+                out.push('\n');
+            }
+            pos = gt + 1;
+        }
+        crate::ug::unescape(&out)
+    }
+
+    /// A song page → its lines, each with the members of the section it sits in.
+    pub fn parse_page(html: &str) -> Vec<Part> {
+        let mut parts = Vec::new();
+        let mut members: Vec<String> = Vec::new();
+        for c in containers(html) {
+            for line in text_of(c).lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match parse_header(line) {
+                    Some(m) => members = m,
+                    None => parts.push(Part { members: members.clone(), text: line.to_string() }),
+                }
+            }
+        }
+        parts
+    }
+
+    /// Path (`/Bts-dynamite-lyrics`) of the best song hit in a `search/multi` reply: the
+    /// title and artist must both really be the ones asked for.
+    pub fn best_hit(reply: &Value, artist: &str, title: &str) -> Option<String> {
+        let want_t = chords::norm(&crate::year::clean(title));
+        let want_a = chords::norm(artist.split(", ").next().unwrap_or(artist));
+        let mut best: Option<(f32, String)> = None;
+        let sections = reply.pointer("/response/sections")?.as_array()?;
+        for hit in sections.iter().filter_map(|s| s.get("hits")?.as_array()).flatten() {
+            if hit.get("type").and_then(Value::as_str).is_some_and(|t| t != "song") {
+                continue;
+            }
+            let Some(r) = hit.get("result") else { continue };
+            let text = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("");
+            let song = chords::norm(&crate::year::clean(text("title")));
+            let art = chords::norm(
+                r.pointer("/primary_artist/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| text("artist_names")),
+            );
+            let t = chords::dice(&want_t, &song);
+            let artist_ok =
+                !art.is_empty() && (art.contains(&want_a) || want_a.contains(&art) || chords::dice(&want_a, &art) >= 0.7);
+            let path = match (text("path"), text("url")) {
+                ("", "") => continue,
+                ("", u) => u.split_once("://").and_then(|(_, h)| h.find('/').map(|i| h[i..].to_string())).unwrap_or_default(),
+                (p, _) => p.to_string(),
+            };
+            if t >= 0.7 && artist_ok && !path.is_empty() && best.as_ref().is_none_or(|(b, _)| t > *b) {
+                best = Some((t, path));
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// Per synced lyric line, the members singing it: Genius lines are matched in order
+    /// (a short look-ahead window, so a skipped line doesn't derail the rest). A line with
+    /// no match, or in an unattributed section, gets an empty list.
+    pub fn attribute(parts: &[Part], lyrics: &[String]) -> Vec<Vec<String>> {
+        let norms: Vec<String> = parts.iter().map(|p| chords::norm(&p.text)).collect();
+        let mut out = vec![Vec::new(); lyrics.len()];
+        let mut j = 0usize;
+        for (li, text) in lyrics.iter().enumerate() {
+            let n = chords::norm(text);
+            if n.is_empty() {
+                continue;
+            }
+            let mut best: Option<(usize, f32)> = None;
+            for (k, s) in norms.iter().enumerate().skip(j).take(12) {
+                let d = chords::dice(&n, s);
+                if d >= 0.6 && best.is_none_or(|(_, b)| d > b) {
+                    best = Some((k, d));
+                }
+            }
+            if let Some((k, _)) = best {
+                j = k + 1;
+                out[li] = parts[k].members.clone();
+            }
+        }
+        out
+    }
+
+    // ── network ────────────────────────────────────────────────────────────
+    async fn get(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<String, String> {
+        let r = c
+            .get(url)
+            .query(query)
+            .header(reqwest::header::USER_AGENT, UA)
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.8")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("network error ({})", e.without_url()))?;
+        let st = r.status();
+        if !st.is_success() {
+            return Err(format!("HTTP {} from genius", st.as_u16()));
+        }
+        r.text().await.map_err(|e| format!("read error ({e})"))
+    }
+
+    fn cache_path(artist: &str, title: &str) -> std::path::PathBuf {
+        cache_dir().join(format!("members-{:016x}.json", fnv1a(&format!("{artist}\0{title}"))))
+    }
+
+    /// Cache → search → song page. `Ok(None)` = Genius has nothing usable (remembered for a
+    /// week); `Err` is never cached.
+    pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Result<Option<Vec<Part>>, String> {
+        let path = cache_path(artist, title);
+        if let Ok(txt) = tokio::fs::read_to_string(&path).await {
+            if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
+                if e.kind == "found" {
+                    return Ok(Some(e.parts));
+                } else if now_secs().saturating_sub(e.saved) < NEG_TTL {
+                    return Ok(None);
+                }
+            }
+        }
+        let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
+        let body = get(c, &format!("{base}/api/search/multi"), &[("q", &q)]).await?;
+        let reply: Value = serde_json::from_str(&body).map_err(|_| "unreadable genius reply".to_string())?;
+        let parts = match best_hit(&reply, artist, title) {
+            Some(p) => parse_page(&get(c, &format!("{base}{p}"), &[]).await?),
+            None => Vec::new(),
+        };
+        // a page without a single member header is no use, however many lines it has
+        let parts = if parts.iter().any(|p| !p.members.is_empty()) { Some(parts) } else { None };
+        let entry = match &parts {
+            Some(p) => CacheEntry { kind: "found".into(), parts: p.clone(), saved: now_secs() },
+            None => CacheEntry { kind: "none".into(), parts: Vec::new(), saved: now_secs() },
+        };
+        if let Ok(j) = serde_json::to_string(&entry) {
+            let _ = tokio::fs::write(&path, j).await;
+        }
+        Ok(parts)
+    }
+
+    /// Lookup for the app: any failure just means no member tags.
+    pub async fn fetch(c: reqwest::Client, artist: String, title: String) -> Vec<Part> {
+        lookup(&c, BASE, &artist, &title).await.ok().flatten().unwrap_or_default()
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Guitar chord diagrams (standard tuning, strings low E → high e)
 // ════════════════════════════════════════════════════════════════════════════
 mod diagram {
@@ -3739,6 +4237,11 @@ pub enum AppEvent {
         lang: String,
         lines: Result<(Vec<String>, &'static str), String>,
     },
+    /// Lines with the members singing them, from Genius (empty = nothing usable).
+    Members {
+        key: u64,
+        parts: Vec<genius::Part>,
+    },
     Cava(Vec<u16>),
     /// Informational status while cava has produced nothing yet.
     CavaNote(String),
@@ -3769,6 +4272,8 @@ mod app {
         PlayPause,
         Next,
         Prev,
+        Shuffle,
+        Repeat,
         SeekBack,
         SeekFwd,
         SyncEarlier,
@@ -3818,6 +4323,8 @@ mod app {
         bind!("Playback", "space", "play / pause", [KeyCode::Char(' ')], PlayPause),
         bind!("Playback", "n", "next track", [KeyCode::Char('n')], Next),
         bind!("Playback", "p", "previous track", [KeyCode::Char('p')], Prev),
+        bind!("Playback", "z", "shuffle on / off", [KeyCode::Char('z')], Shuffle),
+        bind!("Playback", "r", "repeat: off / playlist / track", [KeyCode::Char('r')], Repeat),
         bind!("Playback", "←", "seek back 5 s", [KeyCode::Left], SeekBack),
         bind!("Playback", "→", "seek forward 5 s", [KeyCode::Right], SeekFwd),
         bind!("Playback", "+", "volume up", [KeyCode::Char('+'), KeyCode::Char('=')], VolUp),
@@ -3851,7 +4358,7 @@ mod app {
     /// kept next to the table): (group, gesture, what it does).
     pub const MOUSE: &[(&str, &str, &str)] = &[
         ("Playback", "click bar", "seek there"),
-        ("Playback", "click buttons", "prev / play / next"),
+        ("Playback", "click buttons", "shuf / rep / prev / play / next"),
         ("Playback", "click - / +", "volume down / up"),
         ("Playback", "click vol %", "mute / restore"),
         ("Playback", "wheel: volume", "volume up / down"),
@@ -3933,6 +4440,7 @@ mod app {
         Player,
         Chords,
         ChordsUg,
+        MemberParts,
         Translate,
         TranslateLang,
         TranslateFallback,
@@ -3956,6 +4464,7 @@ mod app {
             Setting::Player,
             Setting::Chords,
             Setting::ChordsUg,
+            Setting::MemberParts,
             Setting::Translate,
             Setting::TranslateLang,
             Setting::TranslateFallback,
@@ -3979,6 +4488,7 @@ mod app {
                 Setting::Player => "Player source",
                 Setting::Chords => "Chords",
                 Setting::ChordsUg => "Ultimate Guitar (next track)",
+                Setting::MemberParts => "Member parts (experimental)",
                 Setting::Translate => "Translate lyrics",
                 Setting::TranslateLang => "Translate into",
                 Setting::TranslateFallback => "LibreTranslate fallback",
@@ -4004,6 +4514,7 @@ mod app {
                 Setting::Player => &["player"],
                 Setting::Chords => &["chords"],
                 Setting::ChordsUg => &["chords_ug"],
+                Setting::MemberParts => &["member_parts"],
                 Setting::Translate => &["translate"],
                 Setting::TranslateLang => &["translate_lang"],
                 Setting::TranslateFallback => &["translate_fallback"],
@@ -4038,6 +4549,8 @@ mod app {
     #[derive(Default)]
     pub struct Hits {
         pub progress: Rect,
+        pub shuffle: Rect,
+        pub repeat: Rect,
         pub prev: Rect,
         pub play: Rect,
         pub next: Rect,
@@ -4089,6 +4602,12 @@ mod app {
         pub transpose: i32,
         /// Per-track capo chosen with `[` / `]`; `None` = the sheet's own capo.
         pub capo_override: Option<u8>,
+
+        /// Genius lines with their members for this track (`--member-parts`).
+        member_src: Vec<genius::Part>,
+        /// Per lyric line, the members singing it (empty = unknown); the lyrics panel tags
+        /// lines with these.
+        pub members: Vec<Vec<String>>,
 
         pub show_lyrics: bool,
         pub show_cava: bool,
@@ -4144,6 +4663,8 @@ mod app {
         pub browse: f64,
         browse_at: Instant,
         pub local_tags: std::collections::HashMap<String, tags::Tags>,
+        /// When the player we are showing last reported in.
+        player_seen: Instant,
         tags_asked: std::collections::HashSet<String>,
     }
 
@@ -4179,6 +4700,8 @@ mod app {
                 aligned: None,
                 transpose: 0,
                 capo_override: None,
+                member_src: Vec::new(),
+                members: Vec::new(),
                 placement,
                 big_lyrics: args.big_lyrics,
                 base_primary: theme.primary,
@@ -4227,6 +4750,7 @@ mod app {
                 browse: 0.0,
                 browse_at: Instant::now(),
                 local_tags: Default::default(),
+                player_seen: Instant::now(),
                 tags_asked: Default::default(),
             };
             app.translate_on = app.args.translate;
@@ -4280,7 +4804,13 @@ mod app {
                     self.lyrics = LyricsState::Ready(lyrics);
                     self.snap_scroll = true;
                     self.realign();
+                    self.realign_members();
                     self.ensure_translation();
+                    self.dirty = true;
+                }
+                AppEvent::Members { key, parts } if key == self.track_key => {
+                    self.member_src = parts;
+                    self.realign_members();
                     self.dirty = true;
                 }
                 AppEvent::Chords { key, sheet, capo } if key == self.track_key => {
@@ -4383,7 +4913,29 @@ mod app {
             if s.url.starts_with("file://") {
                 self.merge_local_tags(&mut s);
             }
-            let key = s.key();
+            if let Ok(path) = std::env::var("MUSIC_DISPLAY_DEBUG") {
+                use std::io::Write;
+                let path = if path == "1" { crate::util::cache_dir().join("snapshots.log") } else { path.into() };
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(f, "{:?}", s);
+                }
+            }
+            // Several players at once (`any`, a list): stay with the one being shown while it
+            // reports in, unless another one starts playing while ours doesn't.
+            if let Some(o) = &self.snap {
+                if !s.player.is_empty() && !o.player.is_empty() && s.player != o.player {
+                    let ours_quiet = self.player_seen.elapsed() > Duration::from_secs(3);
+                    let takeover = s.status == Status::Playing && o.status != Status::Playing;
+                    if !ours_quiet && !takeover {
+                        return;
+                    }
+                }
+            }
+            self.player_seen = Instant::now();
+            let mut key = s.key();
+            if key != self.track_key && self.same_recording(&s) {
+                key = self.track_key;
+            }
             let new_track = key != self.track_key;
             // Same track, different spelling of the strings (edition names, art): keep what
             // is already on screen and only fill in what was missing.
@@ -4427,6 +4979,8 @@ mod app {
                 self.aligned = None;
                 self.transpose = 0;
                 self.capo_override = None;
+                self.member_src.clear();
+                self.members.clear();
                 self.chords_state = ChordsState::Idle;
                 self.translate_state = TranslateState::Idle;
                 self.translate_inflight = None;
@@ -4459,6 +5013,10 @@ mod app {
                     let lyrics = lyrics::fetch(c, a, t, al, len, policy).await;
                     let _ = tx.send(AppEvent::Lyrics { key, lyrics });
                 }));
+            }
+
+            if new_track && self.args.member_parts {
+                self.fetch_members(key, &s.artist, &s.title);
             }
 
             // with Ultimate Guitar on, the sheet is also fetched while chords are hidden, so the
@@ -4515,6 +5073,25 @@ mod app {
             if changed {
                 self.dirty = true;
             }
+        }
+
+        /// A snapshot whose strings changed but that is still the item already playing: the
+        /// player's own id is unchanged, or the position runs on where it was (a real track
+        /// change starts near 0 or jumps) with the same length.
+        fn same_recording(&self, s: &Snapshot) -> bool {
+            let Some(o) = &self.snap else { return false };
+            if self.track_key == 0 || o.player != s.player {
+                return false;
+            }
+            if !s.track_id.is_empty() && s.track_id == o.track_id {
+                return true;
+            }
+            if !s.url.is_empty() && s.url == o.url {
+                return true;
+            }
+            let same_len = o.length > 0.0 && (o.length - s.length).abs() <= 1.0;
+            let runs_on = s.position > 2.0 && (self.position() - s.position).abs() < 1.5;
+            same_len && runs_on
         }
 
         /// Fill what the player left empty from the file's own tags; ask for them once.
@@ -4600,6 +5177,37 @@ mod app {
                 let capo = App::load_capo(key).await;
                 let _ = tx.send(AppEvent::Chords { key, sheet, capo });
             }));
+        }
+
+        fn fetch_members(&mut self, key: u64, artist: &str, title: &str) {
+            let (c, tx) = (self.client.clone(), self.tx.clone());
+            let (a, t) = (artist.to_string(), title.to_string());
+            self.tasks.push(tokio::spawn(async move {
+                let parts = genius::fetch(c, a, t).await;
+                let _ = tx.send(AppEvent::Members { key, parts });
+            }));
+        }
+
+        /// Place the Genius members on the lyric lines (cheap; redone when either side changes).
+        fn realign_members(&mut self) {
+            self.members = match self.lyric_lines() {
+                Some(l) if !self.member_src.is_empty() => genius::attribute(&self.member_src, &l),
+                _ => Vec::new(),
+            };
+        }
+
+        fn toggle_member_parts(&mut self) {
+            self.args.member_parts = !self.args.member_parts;
+            if self.args.member_parts {
+                if let Some(s) = &self.snap {
+                    let (a, t, key) = (s.artist.clone(), s.title.clone(), self.track_key);
+                    self.fetch_members(key, &a, &t);
+                }
+            } else {
+                self.member_src.clear();
+                self.members.clear();
+            }
+            self.dirty = true;
         }
 
         /// Match the sheet onto the synced lyrics (cheap; redone when either side changes).
@@ -4749,6 +5357,7 @@ mod app {
                 Setting::Player => format!("< {} >", self.args.player),
                 Setting::Chords => onoff(self.chords_on),
                 Setting::ChordsUg => onoff(self.args.chords_ug),
+                Setting::MemberParts => onoff(self.args.member_parts),
                 Setting::Translate => onoff(self.translate_on),
                 Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
                 Setting::TranslateFallback => onoff(self.args.translate_fallback),
@@ -4784,6 +5393,7 @@ mod app {
                 }
                 Setting::Chords => self.toggle_chords(),
                 Setting::ChordsUg => self.args.chords_ug = !self.args.chords_ug,
+                Setting::MemberParts => self.toggle_member_parts(),
                 Setting::Translate => self.toggle_translate(),
                 Setting::TranslateLang => {
                     let cur = LANGS.iter().position(|l| *l == self.args.translate_lang);
@@ -4850,6 +5460,7 @@ mod app {
                 ("player", S(self.args.player.clone())),
                 ("chords", B(self.chords_on)),
                 ("chords_ug", B(self.args.chords_ug)),
+                ("member_parts", B(self.args.member_parts)),
                 ("translate", B(self.translate_on)),
                 ("translate_lang", S(self.args.translate_lang.clone())),
                 ("translate_fallback", B(self.args.translate_fallback)),
@@ -4988,6 +5599,10 @@ mod app {
                             self.set_position(target);
                             self.ctl.seek_to(target);
                         }
+                    } else if self.hits.shuffle.contains(pos) {
+                        self.toggle_shuffle();
+                    } else if self.hits.repeat.contains(pos) {
+                        self.cycle_repeat();
                     } else if self.hits.prev.contains(pos) {
                         self.ctl.send(&["previous"]);
                     } else if self.hits.play.contains(pos) {
@@ -5028,6 +5643,8 @@ mod app {
                 Action::PlayPause => self.play_pause(),
                 Action::Next => self.ctl.send(&["next"]),
                 Action::Prev => self.ctl.send(&["previous"]),
+                Action::Shuffle => self.toggle_shuffle(),
+                Action::Repeat => self.cycle_repeat(),
                 Action::SeekBack => self.seek_rel(-5.0),
                 Action::SeekFwd => self.seek_rel(5.0),
                 Action::SyncEarlier => self.nudge(-0.1),
@@ -5132,6 +5749,24 @@ mod app {
             let target = (ts - self.offset).max(0.0);
             self.set_position(target);
             self.ctl.seek_to(target);
+        }
+
+        /// Flip shuffle (shown at once; the next poll reports what the player really did).
+        fn toggle_shuffle(&mut self) {
+            if let Some(s) = self.snap.as_mut().filter(|s| s.shuffle.is_some()) {
+                s.shuffle = s.shuffle.map(|b| !b);
+                self.ctl.send(&["shuffle", "Toggle"]);
+            }
+        }
+
+        /// Repeat: off -> playlist -> track -> off.
+        fn cycle_repeat(&mut self) {
+            if let Some(s) = self.snap.as_mut() {
+                if let Some(r) = s.repeat.map(|r| r.next()) {
+                    s.repeat = Some(r);
+                    self.ctl.send(&["loop", r.arg()]);
+                }
+            }
         }
 
         fn play_pause(&mut self) {
@@ -5374,13 +6009,305 @@ mod bigfont {
         Some([mark, g[0] | g[1], g[2], g[3], g[4], g[5], g[6]])
     }
 
-    fn glyph(c: char) -> Option<[u8; 7]> {
-        base_glyph(c).or_else(|| accented(c))
+    /// One drawable character: `w` pixel columns, bit `w - 1 - x` of a row is column `x`.
+    #[derive(Clone, Copy)]
+    struct Glyph {
+        w: usize,
+        rows: [u16; 8],
     }
 
-    /// Upper-case; `None` if the font can't draw the character (Hangul, Arabic… make
-    /// the caller fall back to normal text).
-    fn fold(c: char) -> Option<char> {
+    fn latin(c: char) -> Option<Glyph> {
+        let g = base_glyph(c).or_else(|| accented(c))?;
+        let mut rows = [0u16; 8];
+        for (r, b) in rows.iter_mut().zip(g) {
+            *r = b as u16;
+        }
+        Some(Glyph { w: 5, rows })
+    }
+
+    /// Compact 3×5 variant for panels too narrow for the normal font (letters, digits and a
+    /// little punctuation; everything else is `None`).
+    fn compact_glyph(c: char) -> Option<Glyph> {
+        let g: [u8; 5] = match c {
+            ' ' => [0; 5],
+            'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
+            'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+            'C' => [0b011, 0b100, 0b100, 0b100, 0b011],
+            'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
+            'E' => [0b111, 0b100, 0b110, 0b100, 0b111],
+            'F' => [0b111, 0b100, 0b110, 0b100, 0b100],
+            'G' => [0b011, 0b100, 0b101, 0b101, 0b011],
+            'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+            'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+            'J' => [0b001, 0b001, 0b001, 0b101, 0b010],
+            'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
+            'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
+            'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
+            'N' => [0b110, 0b101, 0b101, 0b101, 0b101],
+            'O' => [0b010, 0b101, 0b101, 0b101, 0b010],
+            'P' => [0b110, 0b101, 0b110, 0b100, 0b100],
+            'Q' => [0b010, 0b101, 0b101, 0b110, 0b011],
+            'R' => [0b110, 0b101, 0b110, 0b101, 0b101],
+            'S' => [0b011, 0b100, 0b010, 0b001, 0b110],
+            'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+            'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+            'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+            'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
+            'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
+            'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
+            'Z' => [0b111, 0b001, 0b010, 0b100, 0b111],
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b110, 0b001, 0b010, 0b100, 0b111],
+            '3' => [0b110, 0b001, 0b010, 0b001, 0b110],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b110, 0b001, 0b110],
+            '6' => [0b011, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b110],
+            '.' => [0, 0, 0, 0, 0b010],
+            ',' => [0, 0, 0, 0b010, 0b100],
+            '!' => [0b010, 0b010, 0b010, 0, 0b010],
+            '?' => [0b110, 0b001, 0b010, 0, 0b010],
+            '\'' => [0b010, 0b010, 0, 0, 0],
+            '"' => [0b101, 0b101, 0, 0, 0],
+            '-' => [0, 0, 0b111, 0, 0],
+            ':' => [0, 0b010, 0, 0b010, 0],
+            '(' => [0b010, 0b100, 0b100, 0b100, 0b010],
+            ')' => [0b010, 0b001, 0b001, 0b001, 0b010],
+            '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
+            '+' => [0, 0b010, 0b111, 0b010, 0],
+            '=' => [0, 0b111, 0, 0b111, 0],
+            '_' => [0, 0, 0, 0, 0b111],
+            _ => return None,
+        };
+        let mut rows = [0u16; 8];
+        for (r, b) in rows.iter_mut().zip(g) {
+            *r = b as u16;
+        }
+        Some(Glyph { w: 3, rows })
+    }
+
+    // ── Hangul: syllables are composed from a few jamo shapes ───────────────
+    type Canvas = [[bool; 8]; 8];
+
+    /// 5×5 shapes of the basic consonants: ㄱ ㄴ ㄷ ㄹ ㅁ ㅂ ㅅ ㅇ ㅈ ㅊ ㅋ ㅌ ㅍ ㅎ.
+    const CONS: [[u8; 5]; 14] = [
+        [0b11111, 0b00001, 0b00001, 0b00001, 0b00001],
+        [0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        [0b11111, 0b10000, 0b10000, 0b10000, 0b11111],
+        [0b11111, 0b00001, 0b11111, 0b10000, 0b11111],
+        [0b11111, 0b10001, 0b10001, 0b10001, 0b11111],
+        [0b10001, 0b10001, 0b11111, 0b10001, 0b11111],
+        [0b00100, 0b00100, 0b01010, 0b01010, 0b10001],
+        [0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+        [0b11111, 0b00100, 0b01010, 0b01010, 0b10001],
+        [0b00100, 0b11111, 0b00100, 0b01010, 0b10001],
+        [0b11111, 0b00001, 0b11111, 0b00001, 0b00001],
+        [0b11111, 0b10000, 0b11111, 0b10000, 0b11111],
+        [0b11111, 0b01010, 0b01010, 0b01010, 0b11111],
+        [0b00100, 0b11111, 0b01110, 0b10001, 0b01110],
+    ];
+
+    /// Initial consonant index (0–18) → (index into [`CONS`], drawn twice for ㄲ ㄸ ㅃ ㅆ ㅉ).
+    fn cons_shape(id: u8) -> (usize, bool) {
+        match id {
+            0 => (0, false),
+            1 => (0, true),
+            2 => (1, false),
+            3 => (2, false),
+            4 => (2, true),
+            5 => (3, false),
+            6 => (4, false),
+            7 => (5, false),
+            8 => (5, true),
+            9 => (6, false),
+            10 => (6, true),
+            11 => (7, false),
+            12 => (8, false),
+            13 => (8, true),
+            14 => (9, false),
+            15 => (10, false),
+            16 => (11, false),
+            17 => (12, false),
+            _ => (13, false),
+        }
+    }
+
+    /// Final consonant 1–27 → one or two initial-consonant indices (clusters like ㄳ are two).
+    fn final_parts(t: u32) -> (u8, Option<u8>) {
+        match t {
+            1 => (0, None),
+            2 => (1, None),
+            3 => (0, Some(9)),
+            4 => (2, None),
+            5 => (2, Some(12)),
+            6 => (2, Some(18)),
+            7 => (3, None),
+            8 => (5, None),
+            9 => (5, Some(0)),
+            10 => (5, Some(6)),
+            11 => (5, Some(7)),
+            12 => (5, Some(9)),
+            13 => (5, Some(16)),
+            14 => (5, Some(17)),
+            15 => (5, Some(18)),
+            16 => (6, None),
+            17 => (7, None),
+            18 => (7, Some(9)),
+            19 => (9, None),
+            20 => (10, None),
+            21 => (11, None),
+            22 => (12, None),
+            23 => (14, None),
+            24 => (15, None),
+            25 => (16, None),
+            26 => (17, None),
+            _ => (18, None),
+        }
+    }
+
+    /// Draw consonant `id` into the `w`×`h` box at (`x0`, `y0`), resampled from its 5×5 shape.
+    fn stamp(cv: &mut Canvas, id: u8, x0: usize, y0: usize, w: usize, h: usize) {
+        let (shape, double) = cons_shape(id);
+        if double && w >= 2 {
+            let w1 = w.div_ceil(2);
+            stamp_one(cv, shape, x0, y0, w1, h);
+            stamp_one(cv, shape, x0 + w1, y0, w - w1, h);
+        } else {
+            stamp_one(cv, shape, x0, y0, w, h);
+        }
+    }
+
+    fn stamp_one(cv: &mut Canvas, shape: usize, x0: usize, y0: usize, w: usize, h: usize) {
+        for y in 0..h {
+            for x in 0..w {
+                let (sx, sy) = ((2 * x + 1) * 5 / (2 * w), (2 * y + 1) * 5 / (2 * h));
+                if CONS[shape][sy] & (1 << (4 - sx)) != 0 && x0 + x < 8 && y0 + y < 8 {
+                    cv[y0 + y][x0 + x] = true;
+                }
+            }
+        }
+    }
+
+    /// Vertical vowel (ㅏ ㅐ ㅑ ㅒ ㅓ ㅔ ㅕ ㅖ ㅣ = 0–7, 20) in the `w`×`h` box at (`x0`, `y0`).
+    fn vowel_vertical(cv: &mut Canvas, v: u32, x0: usize, w: usize, y0: usize, h: usize) {
+        let right = x0 + w - 1;
+        let mid = y0 + (h - 1) / 2;
+        let ticks: Vec<usize> = match v {
+            0 | 1 | 4 | 5 => vec![mid],
+            2 | 3 | 6 | 7 => vec![y0 + h / 4, y0 + h - 1 - h / 4],
+            _ => vec![],
+        };
+        let stems: Vec<usize> = match v {
+            0 | 2 => vec![x0],
+            1 | 3 => vec![x0, right],
+            4 | 6 => vec![right],
+            5 | 7 => vec![right - 1, right],
+            _ => vec![x0 + (w - 1) / 2],
+        };
+        for &x in &stems {
+            for row in cv.iter_mut().skip(y0).take(h) {
+                row[x] = true;
+            }
+        }
+        for &y in &ticks {
+            let span = match v {
+                0 | 2 => x0 + 1..=right,
+                1 | 3 => x0 + 1..=right - 1,
+                4 | 6 => x0..=right - 1,
+                _ => x0..=right - 2,
+            };
+            for x in span {
+                cv[y][x] = true;
+            }
+        }
+    }
+
+    /// Horizontal vowel (ㅗ ㅛ ㅜ ㅠ ㅡ = 8, 12, 13, 17, 18) over columns `xa..=xb`, rows `y0..y0 + h`.
+    fn vowel_horizontal(cv: &mut Canvas, v: u32, (xa, xb): (usize, usize), y0: usize, h: usize) {
+        let rise = h.saturating_sub(1).min(2);
+        let bar = match v {
+            8 | 12 => y0 + h - 1,
+            13 | 17 => y0,
+            _ => y0 + h / 2,
+        };
+        cv[bar][xa..=xb].fill(true);
+        let nubs: Vec<usize> = match v {
+            8 | 13 => vec![(xa + xb) / 2],
+            12 | 17 => vec![xa + 1, xb - 1],
+            _ => vec![],
+        };
+        for x in nubs {
+            for k in 1..=rise {
+                let y = if matches!(v, 8 | 12) { bar - k } else { bar + k };
+                cv[y][x] = true;
+            }
+        }
+    }
+
+    /// Compose a syllable block (U+AC00–U+D7A3) in an 8×8 pixel cell.
+    fn hangul(c: char) -> Option<Glyph> {
+        let idx = (c as u32).checked_sub(0xAC00).filter(|i| *i < 11172)?;
+        let (l, v, t) = ((idx / 588) as u8, (idx % 588) / 28, idx % 28);
+        let mut cv: Canvas = [[false; 8]; 8];
+        // with a final consonant the body is squeezed into the top 5 rows
+        let body = if t > 0 { 5 } else { 8 };
+        match v {
+            0..=7 | 20 => {
+                stamp(&mut cv, l, 0, 0, 4, body);
+                vowel_vertical(&mut cv, v, 5, 3, 0, body);
+            }
+            8 | 12 | 13 | 17 | 18 => {
+                let ih = if t > 0 { 3 } else { 5 };
+                stamp(&mut cv, l, 1, 0, 6, ih);
+                vowel_horizontal(&mut cv, v, (1, 6), ih, body - ih);
+            }
+            _ => {
+                // compound: horizontal part under the initial, vertical part on the right
+                let hh = if t > 0 { 2 } else { 3 };
+                stamp(&mut cv, l, 0, 0, 4, body - hh);
+                let (hor, ver) = match v {
+                    9 => (8, 0),
+                    10 => (8, 1),
+                    11 => (8, 20),
+                    14 => (13, 4),
+                    15 => (13, 5),
+                    16 => (13, 20),
+                    _ => (18, 20),
+                };
+                vowel_horizontal(&mut cv, hor, (0, 3), body - hh, hh);
+                vowel_vertical(&mut cv, ver, 5, 3, 0, body);
+            }
+        }
+        if t > 0 {
+            match final_parts(t) {
+                (a, None) => stamp(&mut cv, a, 1, 5, 6, 3),
+                (a, Some(b)) => {
+                    stamp(&mut cv, a, 1, 5, 3, 3);
+                    stamp(&mut cv, b, 4, 5, 3, 3);
+                }
+            }
+        }
+        let mut rows = [0u16; 8];
+        for (r, line) in rows.iter_mut().zip(cv) {
+            for (x, on) in line.iter().enumerate() {
+                if *on {
+                    *r |= 1 << (7 - x);
+                }
+            }
+        }
+        Some(Glyph { w: 8, rows })
+    }
+
+    fn glyph(c: char, compact: bool) -> Option<Glyph> {
+        if compact { compact_glyph(c) } else { latin(c).or_else(|| hangul(c)) }
+    }
+
+    /// Upper-case; `None` if the font can't draw the character (CJK ideographs, Arabic…
+    /// make the caller fall back to normal text).
+    fn fold(c: char, compact: bool) -> Option<char> {
         let c = match c {
             '’' | '‘' | '`' | '´' => '\'',
             '“' | '”' => '"',
@@ -5394,12 +6321,17 @@ mod bigfont {
                 }
             }
         };
-        glyph(c).map(|_| c)
+        glyph(c, compact).map(|_| c)
     }
 
-    /// Columns used by one glyph incl. the 1-column gap after it; a space is 3 columns.
-    fn advance(c: char) -> usize {
-        if c == ' ' { 3 } else { 6 }
+    /// Columns used by one glyph incl. the 1-column gap after it: Latin 6, Hangul 9; a space
+    /// is 3 columns (2 in the compact font).
+    fn advance(c: char, compact: bool) -> usize {
+        if c == ' ' {
+            if compact { 2 } else { 3 }
+        } else {
+            glyph(c, compact).map_or(6, |g| g.w + 1)
+        }
     }
 
     /// Render `text` as rows of half-block characters, at most `max_cols` wide and
@@ -5414,12 +6346,21 @@ mod bigfont {
     /// [`render`] with every pixel drawn `scale` (1–3) times as wide and tall; a piece is
     /// then `4 * scale` rows tall.
     pub fn render_scaled(text: &str, max_cols: usize, max_chunks: usize, scale: usize) -> Option<Vec<String>> {
-        let scale = scale.clamp(1, 3);
-        let advance = |c: char| advance(c) * scale;
+        render_with(text, max_cols, max_chunks, scale, false)
+    }
+
+    /// The compact 3×5 font (Latin letters and digits only): a piece is 3 rows tall.
+    pub fn render_compact(text: &str, max_cols: usize, max_chunks: usize) -> Option<Vec<String>> {
+        render_with(text, max_cols, max_chunks, 1, true)
+    }
+
+    fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, compact: bool) -> Option<Vec<String>> {
+        let scale = if compact { 1 } else { scale.clamp(1, 3) };
+        let adv = |c: char| advance(c, compact) * scale;
         let text = text.replace('…', "...");
         let mut words: Vec<Vec<char>> = Vec::new();
         for w in text.split_whitespace() {
-            words.push(w.chars().map(fold).collect::<Option<Vec<_>>>()?);
+            words.push(w.chars().map(|c| fold(c, compact)).collect::<Option<Vec<_>>>()?);
         }
         if words.is_empty() {
             return None;
@@ -5430,17 +6371,17 @@ mod bigfont {
         let mut cur: Vec<char> = Vec::new();
         let mut cur_w = 0usize; // columns incl. the trailing gap
         for w in words {
-            let ww: usize = w.iter().map(|&c| advance(c)).sum();
+            let ww: usize = w.iter().map(|&c| adv(c)).sum();
             if ww - 1 > max_cols {
                 return None;
             }
-            if !cur.is_empty() && cur_w + advance(' ') + ww - 1 > max_cols {
+            if !cur.is_empty() && cur_w + adv(' ') + ww - 1 > max_cols {
                 chunks.push(std::mem::take(&mut cur));
                 cur_w = 0;
             }
             if !cur.is_empty() {
                 cur.push(' ');
-                cur_w += advance(' ');
+                cur_w += adv(' ');
             }
             cur_w += ww;
             cur.extend(w);
@@ -5450,24 +6391,26 @@ mod bigfont {
             return None;
         }
 
+        // pixel rows per piece: 8 (7 + 1 blank) or 6 (5 + 1 blank), so they pair up into
+        // half-block rows
+        let grid_h = if compact { 6 } else { 8 };
         let mut rows = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             if i > 0 {
                 rows.push(String::new());
             }
-            // pixel grid: 8 rows (7 + 1 blank so they pair up into 4 half-block rows)
-            let mut px: Vec<Vec<bool>> = vec![Vec::new(); 8];
+            let mut px: Vec<Vec<bool>> = vec![Vec::new(); grid_h];
             for &c in chunk {
-                let g = glyph(c).unwrap_or([0; 7]);
                 if c == ' ' {
                     for row in px.iter_mut() {
-                        row.extend([false; 3]);
+                        row.extend(std::iter::repeat_n(false, advance(' ', compact)));
                     }
                     continue;
                 }
+                let g = glyph(c, compact).unwrap_or(Glyph { w: 5, rows: [0; 8] });
                 for (y, row) in px.iter_mut().enumerate() {
-                    for x in 0..5 {
-                        row.push(y < 7 && g[y] & (1 << (4 - x)) != 0);
+                    for x in 0..g.w {
+                        row.push(g.rows[y] & (1 << (g.w - 1 - x)) != 0);
                     }
                     row.push(false);
                 }
@@ -5485,7 +6428,7 @@ mod bigfont {
                     })
                     .collect();
             }
-            for pair in 0..4 * scale {
+            for pair in 0..grid_h / 2 * scale {
                 let (top, bot) = (&px[pair * 2], &px[pair * 2 + 1]);
                 rows.push(
                     top.iter()
@@ -6036,9 +6979,9 @@ mod ui {
     }
 
     // ── left column ─────────────────────────────────────────────────────────
-    /// The metadata block: Track No | Tuning, Release | Capo, BPM | Key (each pair falls back
-    /// to two rows when the panel is too narrow). Tuning / Capo / BPM / Key are hidden when
-    /// no source provides them; without a capo the tuning takes the Capo slot.
+    /// The metadata block: Track / Artist / Album, then Track No and Release on the left and
+    /// Tuning, Capo, BPM, Key one per row in a right-hand column (see [`meta_grid`]). Those
+    /// four are hidden when no source provides them.
     fn meta_lines(app: &App, snap: &crate::player::Snapshot, avail: usize) -> Vec<Line<'static>> {
         let th = &app.theme;
         let label = |s: &str| {
@@ -6068,26 +7011,6 @@ mod ui {
             YearState::NotFound => "N/A".to_string(),
         });
 
-        // `left` and an optional `right` (label, value) on one row, or two rows if too wide.
-        let pair = |out: &mut Vec<Line<'static>>, left: Vec<Span<'static>>, right: Option<Vec<Span<'static>>>| {
-            let w = |v: &[Span]| v.iter().map(|s| s.width()).sum::<usize>();
-            match right {
-                Some(r) if w(&left) + 2 + w(&r) <= avail => {
-                    let pad = avail - w(&left) - w(&r);
-                    let mut row = left;
-                    row.push(Span::raw(" ".repeat(pad)));
-                    row.extend(r);
-                    out.push(Line::from(row));
-                }
-                Some(r) => {
-                    out.push(Line::from(left));
-                    let mut row = vec![Span::raw(" ".repeat(13))];
-                    row.extend(r);
-                    out.push(Line::from(row));
-                }
-                None => out.push(Line::from(left)),
-            }
-        };
         let tag = |name: &str, v: String| {
             vec![
                 Span::styled(
@@ -6123,21 +7046,54 @@ mod ui {
         let tuning = (app.chords_on || app.show_diagrams)
             .then(|| app.tuning().map(|t| tag("Tuning:", t.to_string())))
             .flatten();
-        // Track No | Tuning, Release | Capo, BPM | Key. Without a Capo the tuning takes
-        // the Capo slot on the Release row.
-        let (tuning_top, release_right) = match (&capo_tag, tuning) {
-            (Some(_), t) => (t, capo_tag),
-            (None, t) => (None, t),
-        };
-        let last = out.pop().unwrap_or_default();
-        pair(&mut out, last.spans, tuning_top);
-        pair(&mut out, vec![label("Release"), val(date)], release_right);
         let keytxt = app
             .keys()
             .map(|(sounding, _)| tag("Key:", format!("{} / {}", sounding.long(), sounding.camelot())));
-        if app.bpm().is_some() || keytxt.is_some() {
-            let bpm = app.bpm().map_or("—".to_string(), |b| b.to_string());
-            pair(&mut out, vec![label("BPM"), val(bpm)], keytxt);
+        let bpm = app.bpm().map(|b| tag("BPM:", b.to_string()));
+        let last = out.pop().unwrap_or_default();
+        let left = vec![last.spans, vec![label("Release"), val(date)]];
+        let right: Vec<_> = [tuning, capo_tag, bpm, keytxt].into_iter().flatten().collect();
+        out.extend(meta_grid(left, right, avail));
+        out
+    }
+
+    /// Two columns: `left` rows at the start, `right` rows left-aligned at one shared column
+    /// (`avail` minus the widest right item). Right items beyond the left rows get an empty
+    /// left side. When the columns don't fit side by side, the right items follow below,
+    /// indented under the values.
+    pub fn meta_grid(
+        left: Vec<Vec<Span<'static>>>,
+        right: Vec<Vec<Span<'static>>>,
+        avail: usize,
+    ) -> Vec<Line<'static>> {
+        let w = |v: &[Span]| v.iter().map(|s| s.width()).sum::<usize>();
+        let left_w = left.iter().map(|v| w(v)).max().unwrap_or(0);
+        let right_w = right.iter().map(|v| w(v)).max().unwrap_or(0);
+        let mut out = Vec::new();
+        if right.is_empty() || left_w + 2 + right_w > avail {
+            out.extend(left.into_iter().map(Line::from));
+            for r in right {
+                let mut row = vec![Span::raw(" ".repeat(13))];
+                row.extend(r);
+                out.push(Line::from(row));
+            }
+            return out;
+        }
+        let start = avail - right_w;
+        let mut left = left.into_iter();
+        let mut right = right.into_iter();
+        loop {
+            let (l, r) = (left.next(), right.next());
+            if l.is_none() && r.is_none() {
+                break;
+            }
+            let mut row = l.unwrap_or_default();
+            if let Some(r) = r {
+                let pad = start.saturating_sub(w(&row));
+                row.push(Span::raw(" ".repeat(pad)));
+                row.extend(r);
+            }
+            out.push(Line::from(row));
         }
         out
     }
@@ -6176,8 +7132,28 @@ mod ui {
             format!("[ {}% ]", app.volume_pct().unwrap_or(0))
         };
         let vol_w = 5 + 1 + 8 + 1 + 5; // "[ - ] [ 100% ] [ + ]"
-        let transport_w = 8 + 2 + 9 + 2 + 8;
-        let vol_inline = vol_shown && transport_w + 3 + vol_w <= width as usize;
+        let rep_lbl = match snap.repeat {
+            Some(crate::player::Loop::Track) => "[ rep 1 ]",
+            _ => "[ rep ]",
+        };
+        // shuffle / repeat buttons exist only for what the player reports
+        let mut labels: Vec<(&str, u8)> = Vec::new();
+        if snap.shuffle.is_some() {
+            labels.push(("[ shuf ]", 0));
+        }
+        if snap.repeat.is_some() {
+            labels.push((rep_lbl, 1));
+        }
+        let play_lbl = if snap.status == Status::Playing {
+            "[ pause ]"
+        } else {
+            "[ play ]"
+        };
+        labels.extend([("[ prev ]", 2), (play_lbl, 3), ("[ next ]", 4)]);
+        let gap = 2u16;
+        let total: u16 = labels.iter().map(|l| l.0.chars().count() as u16).sum::<u16>()
+            + gap * (labels.len() as u16 - 1);
+        let vol_inline = vol_shown && total as usize + 3 + vol_w <= width as usize;
         let vol_row = vol_shown && !vol_inline;
         let [cover_a, _, meta_a, _, prog_a, _, btn_a, vol_a] = Layout::vertical([
             Constraint::Min(0),
@@ -6206,19 +7182,12 @@ mod ui {
         app.hits.progress = timed_bar(f, &th, prog_a, pos, snap.length);
 
         // Buttons
-        let play_lbl = if snap.status == Status::Playing {
-            "[ pause ]"
-        } else {
-            "[ play ]"
-        };
-        let labels = ["[ prev ]", play_lbl, "[ next ]"];
-        let gap = 2u16;
-        let total: u16 = labels.iter().map(|l| l.chars().count() as u16).sum::<u16>() + gap * 2;
         let full = if vol_inline { total + 3 + vol_w as u16 } else { total };
         let mut x = btn_a.x + btn_a.width.saturating_sub(full) / 2;
         let transport_start = x;
-        let mut rects = [Rect::default(); 3];
-        for (i, l) in labels.iter().enumerate() {
+        app.hits.shuffle = Rect::default();
+        app.hits.repeat = Rect::default();
+        for (l, id) in &labels {
             let w = l.chars().count() as u16;
             let r = Rect {
                 x,
@@ -6226,18 +7195,28 @@ mod ui {
                 width: w.min(btn_a.right().saturating_sub(x)),
                 height: 1,
             };
-            let style = if i == 1 {
+            let on = match id {
+                0 => snap.shuffle == Some(true),
+                1 => snap.repeat.is_some_and(|r| r != crate::player::Loop::None),
+                _ => false,
+            };
+            let style = if *id == 3 || on {
                 Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+            } else if *id < 2 {
+                Style::new().fg(th.fade(0.5))
             } else {
                 Style::new().fg(th.text())
             };
             f.render_widget(Paragraph::new(Span::styled(*l, style)), r);
-            rects[i] = r;
+            match id {
+                0 => app.hits.shuffle = r,
+                1 => app.hits.repeat = r,
+                2 => app.hits.prev = r,
+                3 => app.hits.play = r,
+                _ => app.hits.next = r,
+            }
             x = x.saturating_add(w + gap);
         }
-        app.hits.prev = rects[0];
-        app.hits.play = rects[1];
-        app.hits.next = rects[2];
 
         // Volume: [ - ] [ 100% ] [ + ]   (click the percentage to mute)
         app.hits.vol_minus = Rect::default();
@@ -6526,90 +7505,201 @@ mod ui {
         Style::new().fg(th.fade(t.min(0.78)))
     }
 
+    /// Wrapped rows of a lyric line, each with the chord row (left offset, text) that sits
+    /// right above it — the same mapping the scrolling layout uses. Lines without chords
+    /// just get plain wrapped rows.
+    fn chord_rows(line: &str, cs: &[(usize, String)], width: usize, tr: i32, flats: bool) -> Vec<(String, Option<(usize, String)>)> {
+        if cs.is_empty() {
+            return wrap(line, width).into_iter().map(|t| (t, None)).collect();
+        }
+        let norm = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let chars: Vec<char> = norm.chars().collect();
+        let ranges = wrap_ranges(&norm, width);
+        let mut per_row: Vec<Vec<(usize, String)>> = vec![Vec::new(); ranges.len()];
+        for (c, name) in cs {
+            let r = ranges.iter().rposition(|(s, _)| *s <= *c).unwrap_or(0);
+            per_row[r].push((c.saturating_sub(ranges[r].0), name.clone()));
+        }
+        ranges
+            .iter()
+            .zip(per_row)
+            .map(|((rs, re), here)| {
+                let text: String = chars[*rs..*re].iter().collect();
+                let chord = (!here.is_empty()).then(|| {
+                    let x = width.saturating_sub(crate::util::width(&text)) / 2;
+                    (x, chord_line(&here, &chars[*rs..*re], width.saturating_sub(x), tr, flats))
+                });
+                (text, chord)
+            })
+            .collect()
+    }
+
+    /// Big-font rows for `text` in a panel `width` × `height`: the largest scale
+    /// (down to one) whose wrapped pieces (up to 4) leave at least 2 rows for the neighbouring lines;
+    /// failing that the compact 3×5 font. `None`: the caller falls back to bold wrapped text.
+    pub fn big_stage(text: &str, width: usize, height: u16, scale: usize) -> Option<Vec<String>> {
+        let fits = |rows: &Vec<String>| rows.len() as u16 + 2 <= height;
+        (1..=scale.clamp(1, 3))
+            .rev()
+            .find_map(|sc| bigfont::render_scaled(text, width, 4, sc).filter(fits))
+            .or_else(|| bigfont::render_compact(text, width, 4).filter(fits))
+    }
+
+    /// Everything [`draw_focus`] needs besides the frame, area and theme.
+    pub struct Focus<'a> {
+        pub lines: &'a [String],
+        /// The active line; `None` before the first line (the intro chords take the stage).
+        pub current: Option<usize>,
+        /// Blank rows between lines.
+        pub gap: usize,
+        /// Largest big-font scale to try.
+        pub scale: usize,
+        pub chords: Option<&'a chords::Aligned>,
+        pub tr: i32,
+        pub flats: bool,
+        /// `chords_context`: chords on the active line plus this many upcoming ones.
+        pub context: usize,
+        /// The active line is in an instrumental break: show its break chords under the stage.
+        pub in_break: bool,
+    }
+
     /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
     /// middle of the panel (big font if it fits, otherwise bold wrapped text), with the lines
-    /// before and after stacked outward from it.
-    fn draw_focus(
-        f: &mut Frame,
-        inner: Rect,
-        th: &Theme,
-        lines: &[String],
-        c: usize,
-        (gap, scale): (usize, usize),
-        chord_summary: Option<String>,
-    ) -> Vec<Option<usize>> {
+    /// before and after stacked outward from it, each with its chord row when it has chords.
+    /// Returns which lyric line each panel row belongs to (for click-to-seek).
+    pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Option<usize>> {
         let width = inner.width as usize;
-        // the biggest size that still leaves room for the neighbouring lines
-        let big = (1..=scale.clamp(1, 3))
-            .rev()
-            .find_map(|sc| bigfont::render_scaled(&lines[c], width, 3, sc).filter(|rows| rows.len() as u16 + 4 <= inner.height));
-        // which lyric line each panel row belongs to (for click-to-seek)
+        let (lines, c) = (fc.lines, fc.current);
+        let names = |v: &[String]| {
+            v.iter()
+                .map(|n| chords::transpose(n, fc.tr, fc.flats))
+                .collect::<Vec<_>>()
+                .join("   ")
+        };
+        let bold = Style::new().fg(th.primary()).add_modifier(Modifier::BOLD);
+        // which lyric line each panel row belongs to (chord rows and the intro belong to none)
         let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
-        let (stage, stage_style): (Vec<String>, Style) = match big {
-            Some(rows) => (rows, Style::new().fg(th.primary())),
+        let (stage, stage_style, stage_li): (Vec<String>, Style, Option<usize>) = match c {
+            Some(c) => match big_stage(&lines[c], width, inner.height, fc.scale) {
+                Some(rows) => (rows, Style::new().fg(th.primary()), Some(c)),
+                None => (wrap(&lines[c], width), bold, Some(c)),
+            },
             None => (
-                wrap(&lines[c], width),
-                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+                fc.chords.map_or_else(Vec::new, |a| a.intro.iter().map(|n| names(n)).collect()),
+                bold,
+                None,
             ),
         };
         let sh = (stage.len() as u16).min(inner.height);
         let top = inner.y + (inner.height - sh) / 2;
 
-        let put = |f: &mut Frame, y: i32, li: usize, text: &str, style: Style| {
+        let put = |f: &mut Frame, y: i32, li: Option<usize>, text: &str, style: Style| {
             if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
-                hits.borrow_mut()[(y - inner.y as i32) as usize] = Some(li);
+                hits.borrow_mut()[(y - inner.y as i32) as usize] = li;
                 f.render_widget(
-                    Paragraph::new(Line::styled(text.to_string(), style))
-                        .alignment(Alignment::Center),
-                    Rect {
-                        y: y as u16,
-                        height: 1,
-                        ..inner
-                    },
+                    Paragraph::new(Line::styled(text.to_string(), style)).alignment(Alignment::Center),
+                    Rect { y: y as u16, height: 1, ..inner },
+                );
+            }
+        };
+        // a chord row at its own left offset inside the panel
+        let put_at = |f: &mut Frame, y: i32, x: usize, text: &str, style: Style| {
+            if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
+                let w = (crate::util::width(text) as u16).min(inner.width);
+                let xs = (inner.x + x as u16).min(inner.right().saturating_sub(w)).max(inner.x);
+                f.render_widget(
+                    Paragraph::new(Line::styled(text.to_string(), style)),
+                    Rect { x: xs, y: y as u16, width: w, height: 1 },
                 );
             }
         };
 
         for (i, row) in stage.iter().take(sh as usize).enumerate() {
-            put(f, top as i32 + i as i32, c, row, stage_style);
+            put(f, top as i32 + i as i32, stage_li, row, stage_style);
         }
-        if let Some(cs) = chord_summary {
-            put(
-                f,
-                top as i32 - 1,
-                c,
-                &cs,
-                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
-            );
+        // summary of the active line's chords above the big text
+        if let Some(c) = c {
+            let summary = fc.chords.and_then(|a| a.per_line.get(c)).filter(|cs| !cs.is_empty()).map(|cs| {
+                let mut v: Vec<String> = cs.iter().map(|(_, n)| chords::transpose(n, fc.tr, fc.flats)).collect();
+                v.dedup();
+                v.join("   ")
+            });
+            if let Some(cs) = summary {
+                put(f, top as i32 - 1, Some(c), &cs, bold);
+            }
         }
+        // chords played during an instrumental break, right under the stage
+        let mut after = top as i32 + sh as i32 + 1;
+        if let (Some(c), Some(a), true) = (c, fc.chords, fc.in_break) {
+            for g in a.gaps.get(c).into_iter().flatten() {
+                put(f, after, None, &names(g), bold);
+                after += 1;
+            }
+        }
+
+        // the wrapped rows of line `li` with their chord rows (hidden outside `chords_context`)
+        let cur = c.map_or(-1, |c| c as i64);
+        let rows_of = |li: usize| {
+            let d = li as i64 - cur;
+            let shown = fc.context >= 99 || (d >= 0 && d <= fc.context as i64);
+            let cs = fc.chords.and_then(|a| a.per_line.get(li)).filter(|_| shown);
+            chord_rows(&lines[li], cs.map_or(&[], |v| v.as_slice()), width, fc.tr, fc.flats)
+        };
 
         // Earlier lines, nearest first, growing upward.
         let mut y = top as i32 - 2;
-        for k in 1..=c {
+        for k in 1..=c.unwrap_or(0) {
+            let li = c.unwrap_or(0) - k;
             let style = fade_style(th, k, true);
-            for row in wrap(&lines[c - k], width).iter().rev() {
-                put(f, y, c - k, row, style);
+            let chord_style = Style::new().fg(th.accent_fade(0.55));
+            for (text, chord) in rows_of(li).iter().rev() {
+                put(f, y, Some(li), text, style);
                 y -= 1;
+                if let Some((x, cl)) = chord {
+                    put_at(f, y, *x, cl, chord_style);
+                    y -= 1;
+                }
             }
-            y -= gap as i32;
+            y -= fc.gap as i32;
             if y < inner.y as i32 {
                 break;
             }
         }
         // Upcoming lines, growing downward.
-        let mut y = top as i32 + sh as i32 + 1;
-        for (k, line) in lines.iter().enumerate().skip(c + 1) {
-            let style = fade_style(th, k - c, false);
-            for row in wrap(line, width) {
-                put(f, y, k, &row, style);
+        let mut y = after;
+        for k in c.map_or(0, |c| c + 1)..lines.len() {
+            let style = fade_style(th, (k as i64 - cur) as usize, false);
+            let chord_style = Style::new().fg(th.accent_fade(0.35));
+            for (text, chord) in rows_of(k) {
+                if let Some((x, cl)) = chord {
+                    put_at(f, y, x, &cl, chord_style);
+                    y += 1;
+                }
+                put(f, y, Some(k), &text, style);
                 y += 1;
             }
-            y += gap as i32;
+            y += fc.gap as i32;
             if y >= inner.bottom() as i32 {
                 break;
             }
         }
         hits.into_inner()
+    }
+
+    /// `[Jimin] ` / `[Jimin, V] ` in each member's colour, dimmed; empty if the tag plus the
+    /// text (`text_w` columns) wouldn't fit in `width`.
+    fn member_tag(members: &[String], width: usize, text_w: usize) -> Vec<Span<'static>> {
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        let mut spans = vec![Span::styled("[", dim)];
+        for (i, m) in members.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(", ", dim));
+            }
+            spans.push(Span::styled(m.clone(), Style::new().fg(crate::genius::color(m)).add_modifier(Modifier::DIM)));
+        }
+        spans.push(Span::styled("] ", dim));
+        let w: usize = spans.iter().map(|s| s.width()).sum();
+        if w + text_w > width { Vec::new() } else { spans }
     }
 
     fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
@@ -6711,25 +7801,37 @@ mod ui {
         let tr = app.chord_shift();
         let flats = app.use_flats();
 
-        // Big-font mode uses the fixed "focus" layout instead of the scrolling one.
-        if app.big_lyrics && !plain && app.browse == 0.0 {
-            if let Some(c) = current {
-                app.lyric_scroll_target = app.lyric_scroll; // nothing left to animate
-                let summary = aligned.as_ref().and_then(|a| a.per_line.get(c)).and_then(|cs| {
-                    (!cs.is_empty()).then(|| {
-                        let mut names: Vec<String> = cs
-                            .iter()
-                            .map(|(_, n)| chords::transpose(n, tr, flats))
-                            .collect();
-                        names.dedup();
-                        names.join("   ")
-                    })
-                });
-                let rows = draw_focus(f, inner, &th, &lines, c, (gap, app.args.big_scale as usize), summary);
-                // top = 0: the row index is the offset from the panel's top edge
-                app.lyric_hits = crate::app::LyricHits { area: inner, top: 0, rows };
-                return;
-            }
+        // Big-font mode uses the fixed "focus" layout instead of the scrolling one — for the
+        // active line, or before the first line when there are intro chords to show.
+        let intro_chords = current.is_none() && aligned.as_ref().is_some_and(|a| !a.intro.is_empty());
+        if app.big_lyrics && !plain && app.browse == 0.0 && (current.is_some() || intro_chords) {
+            app.lyric_scroll_target = app.lyric_scroll; // nothing left to animate
+            // in a long silence after the line (same rule as the scrolling layout's markers)
+            let t = pos + app.offset;
+            let in_break = current.is_some_and(|c| {
+                let sung = stamps.get(c).copied().unwrap_or(f64::MAX) + est_sung(&lines[c]);
+                lines[c].trim() != "♪"
+                    && t >= sung
+                    && match stamps.get(c + 1) {
+                        Some(n) => n - stamps[c] > app.args.interlude_secs,
+                        None => length > 0.0 && length - stamps[c] > app.args.interlude_secs + est_sung(&lines[c]),
+                    }
+            });
+            let focus = Focus {
+                lines: &lines,
+                current,
+                gap,
+                scale: app.args.big_scale as usize,
+                chords: aligned.as_ref(),
+                tr,
+                flats,
+                context: app.args.chords_context as usize,
+                in_break,
+            };
+            let rows = draw_focus(f, inner, &th, &focus);
+            // top = 0: the row index is the offset from the panel's top edge
+            app.lyric_hits = crate::app::LyricHits { area: inner, top: 0, rows };
+            return;
         }
 
         // Wrap into rows, remembering which source line each row belongs to. Spacing rows
@@ -7024,6 +8126,22 @@ mod ui {
                 None if plain => Style::new().fg(th.fade(0.35)),
                 None => Style::new().fg(th.fade(0.55)),
             };
+            // `[Jimin]` tag before the first text row of the active line and its neighbours
+            let tag = current
+                .filter(|c| li.abs_diff(*c) <= 2)
+                .and_then(|_| app.members.get(*li))
+                .filter(|m| !m.is_empty() && (starts[*li]..idx as usize).all(|j| rows[j].chord_x.is_some()))
+                .map(|m| member_tag(m, width, crate::util::width(text.as_str())))
+                .filter(|t| !t.is_empty());
+            if let Some(tag) = tag {
+                let mut spans: Vec<Span> = tag;
+                spans.push(Span::styled(text.as_str(), style));
+                f.render_widget(
+                    Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+                    Rect { y: inner.y + y, height: 1, ..inner },
+                );
+                continue;
+            }
             f.render_widget(
                 Paragraph::new(Line::styled(text.as_str(), style)).alignment(Alignment::Center),
                 Rect {
@@ -7811,6 +8929,10 @@ mod tests {
             content_created: String::new(),
             volume: None,
             url: String::new(),
+            track_id: String::new(),
+            player: String::new(),
+            shuffle: None,
+            repeat: None,
         }
     }
 
@@ -7903,6 +9025,108 @@ mod tests {
         assert_eq!(big.len(), 8);
     }
 
+    #[test]
+    fn hangul_big_font_renders_blocks() {
+        // one 8-pixel-tall glyph row group = 4 text rows; "안녕" = 2 × 9 − 1 columns
+        let rows = bigfont::render("안녕", 60, 3).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.chars().count() == 17), "{rows:?}");
+        assert!(rows.iter().any(|r| r.contains('█')));
+        // scaling doubles both dimensions
+        let big = bigfont::render_scaled("안녕", 60, 3, 2).unwrap();
+        assert_eq!((big.len(), big[0].chars().count()), (8, 34));
+        // every syllable composes (initials, vowel classes, finals, clusters)
+        for c in ['가', '꿈', '봄', '왜', '읽', '값', '뷁', '힣', '쀍'] {
+            assert!(bigfont::render(&c.to_string(), 20, 1).is_some(), "{c}");
+        }
+    }
+
+    #[test]
+    fn mixed_latin_and_hangul_render_together() {
+        // H(6) I(6) space(3) 안(9) 녕(8, no trailing gap)
+        let rows = bigfont::render("Hi 안녕", 60, 3).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.chars().count() == 6 + 6 + 3 + 9 + 8), "{rows:?}");
+        // ideographs and Arabic still fall back to normal text
+        assert!(bigfont::render("你好", 60, 3).is_none());
+        assert!(bigfont::render("مرحبا", 60, 3).is_none());
+        assert!(bigfont::render_compact("안녕", 60, 3).is_none());
+    }
+
+    #[test]
+    fn compact_font_takes_over_when_the_normal_one_is_too_wide() {
+        // "HELLO" is 29 columns normally, 19 compact
+        assert!(bigfont::render_scaled("HELLO", 20, 4, 1).is_none());
+        let rows = bigfont::render_compact("HELLO", 20, 4).unwrap();
+        assert_eq!((rows.len(), rows[0].chars().count()), (3, 19));
+        let stage = ui::big_stage("Hello world", 20, 12, 3).unwrap();
+        assert_eq!(stage.len(), 3 + 1 + 3);
+        // too short for two pieces plus room for neighbours: bold text instead
+        assert!(ui::big_stage("Hello world", 20, 8, 3).is_none());
+        // wide panels still get the largest scale that fits
+        assert_eq!(ui::big_stage("HI", 60, 40, 3).unwrap().len(), 12);
+        assert_eq!(ui::big_stage("HI", 60, 12, 3).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
+        use clap::Parser;
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+        let args = cli::Args::parse_from(["music_display"]);
+        let theme = theme::load(&args);
+        let lines: Vec<String> = ["first line here", "second line here", "third line here"].map(String::from).to_vec();
+        let aligned = chords::Aligned {
+            per_line: vec![vec![(0, "Am".into())], vec![(0, "G".into())], vec![(0, "C".into())]],
+            matched: 3,
+            total: 3,
+            flats: false,
+            intro: vec![vec!["Dm".into()]],
+            gaps: vec![vec![vec!["F".into(), "E".into()]], vec![], vec![]],
+        };
+        let fc = |current, in_break| ui::Focus {
+            lines: &lines,
+            current,
+            gap: 0,
+            scale: 1,
+            chords: Some(&aligned),
+            tr: 0,
+            flats: false,
+            context: 99,
+            in_break,
+        };
+        let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        let area = Rect::new(0, 0, 40, 24);
+        let mut hits = Vec::new();
+        term.draw(|f| hits = ui::draw_focus(f, area, &theme, &fc(Some(1), false))).unwrap();
+        let screen = |t: &Terminal<TestBackend>| -> Vec<String> {
+            let b = t.backend().buffer();
+            (0..24).map(|y| (0..40).map(|x| b[(x, y)].symbol()).collect::<String>()).collect()
+        };
+        let text = screen(&term);
+        let row_of = |text: &[String], needle: &str| text.iter().position(|r| r.contains(needle)).unwrap();
+        // the next line's chord sits directly above its text and maps to no lyric line
+        let third = row_of(&text, "third line here");
+        assert!(text[third - 1].contains('C'));
+        assert_eq!(hits[third - 1], None);
+        assert_eq!(hits[third], Some(2));
+        let first = row_of(&text, "first line here");
+        assert_eq!(hits[first], Some(0));
+        assert_eq!(hits[first - 1], None);
+        assert!(text[first - 1].contains("Am"));
+        // break chords show under the stage only during a break
+        assert!(!text.iter().any(|r| r.contains("F   E")));
+        term.draw(|f| hits = ui::draw_focus(f, area, &theme, &fc(Some(0), true))).unwrap();
+        let text = screen(&term);
+        let brk = row_of(&text, "F   E");
+        assert_eq!(hits[brk], None);
+        // before the first line the intro chords take the stage, lines follow below
+        term.draw(|f| hits = ui::draw_focus(f, area, &theme, &fc(None, false))).unwrap();
+        let text = screen(&term);
+        let intro = row_of(&text, "Dm");
+        assert_eq!(hits[intro], None);
+        assert!(row_of(&text, "first line here") > intro);
+    }
+
     #[tokio::test]
     async fn local_files_fall_back_to_their_own_tags() {
         use clap::Parser;
@@ -7947,6 +9171,21 @@ mod tests {
     }
 
     #[test]
+    fn language_versions_are_their_own_track() {
+        let k = |t, al| snap("TXT", t, al).key();
+        let original = k("Cat & Dog", "Cat & Dog");
+        let english = k("Cat & Dog", "Cat & Dog (English Version)");
+        assert_ne!(original, english);
+        assert_eq!(english, k("Cat & Dog (English Ver.)", "Anything"));
+        assert_ne!(english, k("Cat & Dog", "Cat & Dog (Japanese Version)"));
+        assert_ne!(original, k("Cat & Dog - Instrumental", "Cat & Dog"));
+        // editions of the same recording still share one
+        assert_eq!(original, k("Cat & Dog", "Cat & Dog (Deluxe Edition)"));
+        assert_eq!(original, k("Cat & Dog - Remastered 2021", "Cat & Dog"));
+        assert_eq!(util::version_marker("Song", "Album"), None);
+    }
+
+    #[test]
     fn solo_chords_are_kept_for_the_break() {
         let sheet = chords::parse_chordpro(
             "[Am]walking down the [G]road tonight\n[C]  [G]  [Am]  [F]\n[Am]standing in the [G]rain again\n",
@@ -7959,6 +9198,54 @@ mod tests {
         assert_eq!(a.per_line[0].len(), 2);
         assert_eq!(a.gaps[0], vec![vec!["C", "G", "Am", "F"]]);
         assert!(a.gaps[1].is_empty());
+    }
+
+    fn test_app() -> app::App {
+        use clap::Parser;
+        let args = cli::Args::parse_from(["music_display"]);
+        let theme = theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx)
+    }
+
+    #[tokio::test]
+    async fn versions_of_a_playing_song_never_restart_it() {
+        let mut app = test_app();
+        let at = |mut s: player::Snapshot, pos: f64| {
+            s.position = pos;
+            s.player = "spotify".into();
+            s
+        };
+        app.apply(AppEvent::Player(Some(at(snap("Band", "Song", "Album"), 10.0))));
+        let key = app.snap.as_ref().unwrap().key();
+        // a new track resets the lyric offset, so a kept offset means nothing restarted
+        app.offset = 0.7;
+        // the player flips between releases the strings don't reveal as the same
+        for (i, (t, al)) in [
+            ("Song - Live at Wembley", "Live at Wembley"),
+            ("Song", "Greatest Hits"),
+            ("Song (feat. Guest)", "Album: Deluxe"),
+            ("Totally Different Name", "Album Super Deluxe Edition"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            app.apply(AppEvent::Player(Some(at(snap("Band", t, al), 10.2 + i as f64 * 0.2))));
+            let shown = app.snap.as_ref().unwrap();
+            assert_eq!((shown.title.as_str(), shown.album.as_str()), ("Song", "Album"), "{t}");
+            assert_eq!(app.offset, 0.7, "track restarted on {t}");
+        }
+        assert_eq!(app.snap.as_ref().unwrap().key(), key);
+        // a real next track (position back near 0) switches at once
+        app.apply(AppEvent::Player(Some(at(snap("Band", "Next One", "Album"), 0.3))));
+        assert_eq!(app.snap.as_ref().unwrap().title, "Next One");
+        assert_eq!(app.offset, 0.0);
+        // another player that isn't playing doesn't take over the display
+        let mut other = at(snap("Someone", "Video", ""), 50.0);
+        other.player = "firefox".into();
+        other.status = player::Status::Paused;
+        app.apply(AppEvent::Player(Some(other)));
+        assert_eq!(app.snap.as_ref().unwrap().title, "Next One");
     }
 
     enum R {
@@ -8290,10 +9577,11 @@ mod tests {
         assert_eq!(app::action_for(KeyCode::Char('M')), Some(A::Minimal));
         assert_eq!(app::action_for(KeyCode::Char('?')), Some(A::Help));
         assert_eq!(app::action_for(KeyCode::Esc), Some(A::Quit));
-        assert_eq!(app::action_for(KeyCode::Char('z')), None);
+        assert_eq!(app::action_for(KeyCode::Char('z')), Some(A::Shuffle));
+        assert_eq!(app::action_for(KeyCode::Char('x')), None);
         // every action can be triggered by some key
         for a in [
-            A::Quit, A::PlayPause, A::Next, A::Prev, A::SeekBack, A::SeekFwd, A::SyncEarlier,
+            A::Quit, A::PlayPause, A::Next, A::Prev, A::Shuffle, A::Repeat, A::SeekBack, A::SeekFwd, A::SyncEarlier,
             A::SyncLater, A::VolUp, A::VolDown, A::Mute, A::ToggleLyrics, A::ToggleBig,
             A::ToggleCava, A::ToggleChords, A::TransposeUp, A::TransposeDown, A::CapoDown,
             A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help,
@@ -8315,6 +9603,207 @@ mod tests {
         for m in MOUSE {
             assert!(text.contains(m.1) && text.contains(m.2));
         }
+    }
+
+
+    #[test]
+    fn korean_song_replaces_romanized_hit_with_hangul() {
+        let roman = r#"{"syncedLyrics":"[00:01.00]saranghae neomu\n[00:05.00]gaji ma","duration":200}"#;
+        let hangul = r#"{"syncedLyrics":"[00:01.00]사랑해 너무\n[00:05.00]가지 마","duration":200}"#;
+        let run = |artist: &str, title: &str, base: &str| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let c = reqwest::Client::new();
+            rt.block_on(lyrics::fetch_with(&c, base, artist, title, "", 200.0, fast(), false))
+        };
+        let site = || {
+            scripted_site(vec![
+                ("api/get", vec![R::Http(200, "", roman.into())]),
+                ("api/search", vec![R::Http(200, "", format!("[{roman},{hangul}]"))]),
+            ])
+        };
+        // Korean title: the romanized exact hit is not final, the search runs and Hangul wins
+        let (base, log) = site();
+        let l = run("방탄소년단", "사랑해", &base);
+        assert!(matches!(&l, lyrics::Lyrics::Synced(v) if v[0].1.starts_with("사랑")), "{l:?}");
+        assert!(log.lock().unwrap().iter().any(|r| r.contains("api/search")));
+        // not Korean: the first synced hit is kept and no search happens
+        let (base, log) = site();
+        let l = run("Someone", "Saranghae", &base);
+        assert!(matches!(&l, lyrics::Lyrics::Synced(v) if v[0].1.starts_with("sarang")), "{l:?}");
+        assert!(!log.lock().unwrap().iter().any(|r| r.contains("api/search")));
+    }
+
+    #[test]
+    fn meta_grid_aligns_the_right_column() {
+        let sp = |s: &str| vec![ratatui::text::Span::raw(s.to_string())];
+        let text = |l: &ratatui::text::Line| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        let left = || vec![sp("Track No  01-03"), sp("Release   1991-08-12")];
+        let right = |n: usize| {
+            ["Tuning: Drop D", "Capo: 2 (Am)", "BPM: 120", "Key: E Minor / 9A"]
+                .iter()
+                .take(n)
+                .map(|s| sp(s))
+                .collect::<Vec<_>>()
+        };
+        let rows: Vec<String> = ui::meta_grid(left(), right(4), 40).iter().map(text).collect();
+        // start column = 40 - widest right item (17)
+        assert_eq!(rows[0], format!("{:<23}Tuning: Drop D", "Track No  01-03"));
+        assert_eq!(rows[1], format!("{:<23}Capo: 2 (Am)", "Release   1991-08-12"));
+        assert_eq!(rows[2], format!("{:<23}BPM: 120", ""));
+        assert_eq!(rows[3], format!("{:<23}Key: E Minor / 9A", ""));
+        assert_eq!(rows.len(), 4);
+        // only the key: one right row, left side untouched below it
+        let rows: Vec<String> = ui::meta_grid(left(), vec![sp("Key: E Minor / 9A")], 40).iter().map(text).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].ends_with("Key: E Minor / 9A") && rows[0].chars().count() == 40);
+        assert_eq!(rows[1], "Release   1991-08-12");
+        // nothing on the right
+        assert_eq!(ui::meta_grid(left(), vec![], 40).len(), 2);
+        // too narrow: the right items follow below, indented under the values
+        let rows: Vec<String> = ui::meta_grid(left(), right(2), 30).iter().map(text).collect();
+        assert_eq!(rows, ["Track No  01-03", "Release   1991-08-12", "             Tuning: Drop D", "             Capo: 2 (Am)"]);
+    }
+
+    #[test]
+    fn shuffle_and_loop_output_is_parsed() {
+        use player::Loop;
+        assert_eq!(player::parse_shuffle("On\n"), Some(true));
+        assert_eq!(player::parse_shuffle("Off\n"), Some(false));
+        assert_eq!(player::parse_shuffle("No players found\n"), None);
+        assert_eq!(player::parse_shuffle(""), None);
+        assert_eq!(player::parse_loop("None\n"), Some(Loop::None));
+        assert_eq!(player::parse_loop("Track\n"), Some(Loop::Track));
+        assert_eq!(player::parse_loop("Playlist\n"), Some(Loop::Playlist));
+        assert_eq!(player::parse_loop("Some error"), None);
+        // off -> playlist -> track -> off, with the argument playerctl expects
+        assert_eq!(Loop::None.next(), Loop::Playlist);
+        assert_eq!(Loop::Playlist.next(), Loop::Track);
+        assert_eq!(Loop::Track.next(), Loop::None);
+        assert_eq!(Loop::Playlist.arg(), "Playlist");
+        // the metadata format carries neither; the poller stamps them on afterwards
+        assert!(snap("A", "T", "Al").shuffle.is_none() && snap("A", "T", "Al").repeat.is_none());
+    }
+
+    #[test]
+    fn member_parts_keys_and_shuffle_binds_exist() {
+        assert!(app::Setting::ALL.contains(&app::Setting::MemberParts));
+        assert_eq!(app::Setting::MemberParts.config_keys(), ["member_parts"]);
+        assert_eq!(app::action_for(crossterm::event::KeyCode::Char('z')), Some(app::Action::Shuffle));
+        assert_eq!(app::action_for(crossterm::event::KeyCode::Char('r')), Some(app::Action::Repeat));
+        let (a, _) = cfg_run("member_parts = true\n", &[]);
+        assert!(a.member_parts);
+        let (a, _) = cfg_run("member_parts = true\n", &["--member-parts"]);
+        assert!(a.member_parts);
+        let (a, _) = cfg_run("", &[]);
+        assert!(!a.member_parts, "off by default");
+    }
+
+    #[test]
+    fn genius_headers_become_member_lists() {
+        let h = |s: &str| genius::parse_header(s);
+        assert_eq!(h("[Verse 1: Jimin]"), Some(vec!["Jimin".to_string()]));
+        assert_eq!(h("[Chorus: Jungkook, V]"), Some(vec!["Jungkook".to_string(), "V".to_string()]));
+        assert_eq!(h("[Pre-Chorus: RM & SUGA]"), Some(vec!["RM".to_string(), "SUGA".to_string()]));
+        assert_eq!(h("[Bridge: Jin (진) and J-Hope]"), Some(vec!["Jin".to_string(), "J-Hope".to_string()]));
+        assert_eq!(h("[Outro]"), Some(vec![]));
+        assert_eq!(h("just a lyric"), None);
+    }
+
+    const GENIUS_PAGE: &str = r#"<html><body>
+<div class="Lyrics__Container" data-lyrics-container="true" class="x"><div data-exclude-from-selection="true"><div>Contributors</div></div>[Intro]<br/>Ooh<br/><a href="/1"><span>[Verse 1: Jimin]</span></a><br/>I&#x27;m in love &amp; blind<br/>Walking down the road<br/><br/>[Chorus: Jungkook, V]<br/>Stay with me tonight<br/></div>
+<div data-lyrics-container="true">[Verse 2: RM &amp; SUGA]<br>Rain on the window<br>Nothing left to say</div>
+<div class="footer">[Verse 9: Nobody]<br>ignored</div></body></html>"#;
+
+    fn mp(members: &[&str], text: &str) -> genius::Part {
+        genius::Part { members: members.iter().map(|m| m.to_string()).collect(), text: text.into() }
+    }
+
+    #[test]
+    fn genius_page_parses_sections_and_inherits_members() {
+        let parts = genius::parse_page(GENIUS_PAGE);
+        assert_eq!(
+            parts,
+            vec![
+                mp(&[], "Ooh"),
+                mp(&["Jimin"], "I'm in love & blind"),
+                mp(&["Jimin"], "Walking down the road"),
+                mp(&["Jungkook", "V"], "Stay with me tonight"),
+                mp(&["RM", "SUGA"], "Rain on the window"),
+                mp(&["RM", "SUGA"], "Nothing left to say"),
+            ]
+        );
+    }
+
+    #[test]
+    fn genius_lines_are_attributed_to_synced_lines_in_order() {
+        let parts = genius::parse_page(GENIUS_PAGE);
+        let lyrics: Vec<String> = [
+            "Ooh",
+            "I'm in love and blind", // wording differs slightly
+            "something the page doesn't have",
+            "Walking down the road",
+            "Stay with me tonight",
+            "Rain on the window",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let m = genius::attribute(&parts, &lyrics);
+        assert!(m[0].is_empty(), "intro line has no member");
+        assert_eq!(m[1], ["Jimin"]);
+        assert!(m[2].is_empty());
+        assert_eq!(m[3], ["Jimin"]);
+        assert_eq!(m[4], ["Jungkook", "V"]);
+        assert_eq!(m[5], ["RM", "SUGA"]);
+        // stable colour per name, whatever the case
+        assert_eq!(genius::color("Jimin"), genius::color("jimin"));
+    }
+
+    #[test]
+    fn genius_lookup_with_fake_site_and_cache() {
+        let search = serde_json::json!({"meta":{"status":200},"response":{"sections":[
+            {"type":"top_hit","hits":[{"type":"song","result":{"title":"Other Song","path":"/Bts-other-lyrics","primary_artist":{"name":"BTS"}}}]},
+            {"type":"song","hits":[
+                {"type":"song","result":{"title":"Dynamite (Türkçe Çeviri)","path":"/Genius-tr-dynamite-lyrics","primary_artist":{"name":"Genius Türkçe Çeviri"}}},
+                {"type":"song","result":{"title":"Dynamite","url":"https://genius.com/Bts-dynamite-lyrics","primary_artist":{"name":"BTS"}}}
+            ]}]}});
+        let artist = "BTS";
+        let title = "Dynamite GENIUSTEST";
+        assert_eq!(genius::best_hit(&search, artist, "Dynamite").as_deref(), Some("/Bts-dynamite-lyrics"));
+        assert_eq!(genius::best_hit(&search, artist, "Totally Different"), None);
+        assert_eq!(genius::best_hit(&search, "Someone Else", "Dynamite"), None);
+
+        let cache = util::cache_dir().join(format!("members-{:016x}.json", util::fnv1a(&format!("{artist}\0{title}"))));
+        let _ = std::fs::remove_file(&cache);
+        let (base, hits) = fake_site(vec![
+            ("search/multi", 200, search.to_string()),
+            ("Bts-dynamite-lyrics", 200, GENIUS_PAGE.into()),
+        ]);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let c = reqwest::Client::new();
+        // the fake title differs from the hit's ("Dynamite GENIUSTEST" vs "Dynamite"), so look up the plain title
+        let title2 = "Dynamite";
+        let cache2 = util::cache_dir().join(format!("members-{:016x}.json", util::fnv1a(&format!("{artist}\0{title2}"))));
+        let _ = std::fs::remove_file(&cache2);
+        let got = rt.block_on(genius::lookup(&c, &base, artist, title2)).unwrap().expect("parts");
+        assert_eq!(got.len(), 6);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2, "search + song page");
+        // second time: straight from the cache
+        let again = rt.block_on(genius::lookup(&c, &base, artist, title2)).unwrap().expect("cached");
+        assert_eq!(again, got);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let _ = std::fs::remove_file(&cache2);
+
+        // nothing found: remembered as a miss; a server error is an Err and not cached
+        let _ = std::fs::remove_file(&cache);
+        let (base2, hits2) = fake_site(vec![("search/multi", 200, r#"{"response":{"sections":[]}}"#.into())]);
+        assert_eq!(rt.block_on(genius::lookup(&c, &base2, artist, title)).unwrap(), None);
+        assert_eq!(rt.block_on(genius::lookup(&c, &base2, artist, title)).unwrap(), None);
+        assert_eq!(hits2.load(std::sync::atomic::Ordering::SeqCst), 1, "negative cache");
+        let _ = std::fs::remove_file(&cache);
+        let (base3, _) = fake_site(vec![("search/multi", 500, "no".into())]);
+        assert!(rt.block_on(genius::lookup(&c, &base3, artist, title)).is_err());
+        assert!(!cache.exists());
     }
 
     #[test]
