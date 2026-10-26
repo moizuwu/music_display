@@ -1,6 +1,6 @@
 # Chords in music_display
 
-Guitar chords shown above the synced lyrics, on the active line and the next one.
+Guitar chords shown above the synced lyrics, on every line (the active line in bold).
 
 ```sh
 music_display --chords                 # your own sheets only
@@ -15,6 +15,9 @@ Off by default. Press `g` at any time to toggle.
 | --- | --- |
 | `g` | chords on / off (also shows the lyrics panel) |
 | `t` / `T` | transpose up / down one semitone (resets on track change) |
+| `]` / `[` | capo up / down, 0–12 (a per-track override, remembered across restarts) |
+| `0` | back to the sheet's own capo |
+| `D` | chord diagram panel |
 | `b` | big-font lyrics; chords are listed in a row above the big line |
 
 ## Flags
@@ -23,7 +26,7 @@ Off by default. Press `g` at any time to toggle.
 | --- | --- |
 | `--chords` | start with chords on |
 | `--chords-dir DIR` | folder with your sheets (default `~/.local/share/music_display/chords`) |
-| `--chords-context N` | upcoming lines that also show chords (default 1 = active + next; 99 = all) |
+| `--chords-context N` | limit chords to the active line + N upcoming ones (default 99 = every line) |
 | `--chords-ug` | look songs up on Ultimate Guitar when there is no local sheet |
 | `--chords-probe ARTIST TITLE` | diagnose the Ultimate Guitar lookup for one song and exit |
 | `--probe-save DIR` | with `--chords-probe`: keep the raw pages |
@@ -92,11 +95,35 @@ place. Common causes: a live/acoustic/cover sheet, or lyrics from a different ve
 
 Without synced lyrics (plain or none) there is nothing to place chords on, and the footer says so.
 
-## Capo and transposing
+## Intro
 
-The sheet's capo is shown, never applied: the chords are the shapes to play with the capo on.
-`t` / `T` shift every chord (including the bass note in `C/E`); flats are used if the sheet
-uses flats, sharps otherwise.
+Chord-only lines at the top of the sheet (before the first sung line) are shown as an
+**intro** section before the first lyric; it is highlighted until the first lyric starts.
+
+## Capo, key and transposing
+
+Shapes vs sounding key: the sheet's chords are the shapes to finger with the sheet's capo.
+`[` / `]` choose a different capo (0–12): the shapes are re-spelled, so a higher capo gives
+lower shapes, and the sounding key stays the same. The metadata panel shows
+`Key: E Minor / 9A` (sounding key + Camelot), `Capo: 3  (shapes in C#m)`, and
+`[sheet: 2]` when you've overridden the sheet's capo. The override is saved per track
+(`~/.cache/music_display/capo-*.txt`); `0` clears it.
+
+The key comes from the sheet (`{key: Dm}` / `Key: Dm` / Ultimate Guitar's page data) and is
+taken to be the key of the shapes; no key on the sheet means no Key / Camelot display.
+`t` / `T` shift every chord (including the bass note in `C/E`) and the sounding key with it.
+Flat or sharp spelling follows the key being shown (F, Bb, Eb, Ab, Db major and relatives
+use flats), or the sheet's own spelling when there is no key.
+
+## Chord diagrams (`D`)
+
+A side panel with fretboard diagrams for the chords of the current stretch of the song
+(the active line and the next few lines, up to 6 chords), with the chord being played
+highlighted, plus a small tab underneath. The highlighted chord is an estimate from how far
+into the line you are (sheets carry no timing). Built in: major, minor, 7, m7, maj7, sus2,
+sus4 and power chords on all 12 roots; anything else (dim, aug, 9ths, slash chords) shows
+"diagram unavailable" instead of a wrong diagram. The panel needs a lyrics column at least
+56 columns wide and is hidden below that.
 
 ## Troubleshooting
 
