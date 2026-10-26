@@ -22,7 +22,7 @@
 //! requested for, so stale results from a skipped track are dropped. The UI is only redrawn
 //! when something changed, and ratatui's diffing buffer means only changed cells hit the tty.
 
-use std::io::stdout;
+use std::io::{Write, stdout};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -127,6 +127,11 @@ pub enum AppEvent {
     Lyrics {
         key: u64,
         lyrics: lyrics::Lyrics,
+    },
+    /// Every lyrics version lrclib has for the song (kind, text), best first.
+    LyricVersions {
+        key: u64,
+        list: Vec<(String, String)>,
     },
     Cover {
         url: String,
@@ -280,6 +285,9 @@ async fn main() -> Result<()> {
     res
 }
 
+/// Redraw interval while the active line fills up word by word.
+const KARAOKE_FRAME: Duration = Duration::from_millis(33);
+
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     mut app: app::App,
@@ -289,6 +297,8 @@ async fn run(
     let mut tick = tokio::time::interval(Duration::from_millis(16));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - Duration::from_secs(1);
+    // the window title this program set (None = never touched, so the old one stays)
+    let mut title: Option<String> = None;
 
     // SIGTERM / SIGHUP end the loop like `q` does, so the terminal and spotifyd are cleaned up.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -309,9 +319,11 @@ async fn run(
             }
             _ = tick.tick() => {
                 app.preload_tick();
+                sync_window_title(&app, &mut title);
                 // Redraw when something changed, while the lyric scroll is easing,
                 // or ~10×/s during playback (clock, progress bar, lyric line changes).
-                let periodic = app.playing() && last_draw.elapsed() >= Duration::from_millis(100);
+                let every = if app.karaoke_live() { KARAOKE_FRAME } else { Duration::from_millis(100) };
+                let periodic = app.playing() && last_draw.elapsed() >= every;
                 if app.dirty || app.animating() || periodic {
                     let layout = app.layout_key();
                     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -331,7 +343,36 @@ async fn run(
             }
         }
     }
+    if title.is_some() {
+        let mut out = stdout();
+        let _ = write!(out, "\x1b[23;0t");
+        let _ = out.flush();
+    }
     Ok(())
+}
+
+/// Keep the terminal window's title in step with `window_title`. The old title is saved
+/// (xterm's title stack) before the first change and restored when the setting goes off or
+/// the program ends; terminals without the stack just keep the last song.
+fn sync_window_title(app: &app::App, set: &mut Option<String>) {
+    let want = app.window_title();
+    if want == *set {
+        return;
+    }
+    let mut out = stdout();
+    if set.is_none() {
+        let _ = write!(out, "\x1b[22;0t");
+    }
+    match &want {
+        Some(t) => {
+            let _ = write!(out, "\x1b]2;{t}\x07");
+        }
+        None => {
+            let _ = write!(out, "\x1b[23;0t");
+        }
+    }
+    let _ = out.flush();
+    *set = want;
 }
 
 #[cfg(test)]

@@ -29,6 +29,8 @@ impl Action {
             Action::Mute => "mute",
             Action::ToggleLyrics => "toggle_lyrics",
             Action::ToggleBig => "toggle_big",
+            Action::Karaoke => "karaoke",
+            Action::NextLyrics => "next_lyrics",
             Action::BigScale => "big_scale",
             Action::LineSpacing => "line_spacing",
             Action::LyricPad => "lyric_pad",
@@ -201,6 +203,44 @@ impl Keymap {
     /// The first key of `action`, for the one-line hints in the footer.
     pub fn first(&self, action: Action) -> String {
         self.codes(action).first().map_or_else(|| "?".into(), |c| key_label(*c))
+    }
+
+    /// The actions in table order (the rows of the key editor in the help overlay).
+    pub fn actions(&self) -> Vec<Action> {
+        self.entries.iter().map(|e| e.action).collect()
+    }
+
+    /// Give `action` the key `code` (replacing its keys; `quit` and `help` keep their defaults
+    /// too). Fails, changing nothing, when another action already has that key.
+    pub fn rebind(&mut self, action: Action, code: KeyCode) -> Result<(), String> {
+        if let Some(other) = self.entries.iter().find(|e| e.action != action && e.codes.contains(&code)) {
+            let what = BINDS.iter().find(|b| b.action == other.action).map_or("another action", |b| b.desc);
+            return Err(format!("{} is already used for: {what}", key_label(code)));
+        }
+        let mut codes = vec![code];
+        if action.keeps_defaults() {
+            codes.extend(default_codes(action).iter().filter(|d| **d != code));
+        }
+        self.set_codes(action, codes);
+        Ok(())
+    }
+
+    /// Back to the built-in keys of `action`.
+    pub fn reset(&mut self, action: Action) {
+        self.set_codes(action, default_codes(action).to_vec());
+    }
+
+    fn set_codes(&mut self, action: Action, codes: Vec<KeyCode>) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.action == action) {
+            e.custom = codes != default_codes(action);
+            e.codes = codes;
+        }
+    }
+
+    /// What `[keys]` holds for `action`: its keys, or `None` when it has the built-in ones.
+    pub fn config_value(&self, action: Action) -> Option<toml::Value> {
+        let e = self.entries.iter().find(|e| e.action == action && e.custom)?;
+        Some(toml::Value::Array(e.codes.iter().map(|c| toml::Value::String(key_name(*c))).collect()))
     }
 
     /// The effective bindings as a TOML `[keys]` block (what `--print-config` shows); it parses

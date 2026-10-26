@@ -4,18 +4,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const BASE: &str = "https://www.ultimate-guitar.com";
 // UG answers non-browser agents with 403, so this looks like a normal browser.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
-const NEG_TTL: u64 = 7 * 24 * 3600;
+const NEG_TTL: u64 = 2 * 24 * 3600;
 const MAX_FAILS: u32 = 3;
+/// After `MAX_FAILS` hard failures in a row the provider rests this long, then tries again.
+const BREAKER_SECS: u64 = 10 * 60;
 const MIN_CHORDS: usize = 8;
 
 /// Consecutive hard failures (blocked / format changed / network). Three in a row
-/// switch the provider off for the rest of the session.
+/// switch the provider off for `BREAKER_SECS`, so a bad minute does not cost the whole session.
 static FAILS: AtomicU32 = AtomicU32::new(0);
+/// When the last of them happened (unix seconds).
+static LAST_FAIL: AtomicU64 = AtomicU64::new(0);
 /// `--chords-probe --probe-save DIR`: keep every page we fetch.
 pub static SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -197,7 +201,20 @@ pub fn sheet_from_store(store: &Value) -> Option<Sheet> {
 }
 
 // ── network ────────────────────────────────────────────────────────────
+/// One request, and one more after a short pause when the first failed in a way that can pass
+/// (no connection, 429, 5xx). A 403 or 404 is an answer and is not repeated.
 async fn get(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    match get_once(c, url, query).await {
+        Err((true, _)) => {
+            tokio::time::sleep(std::time::Duration::from_millis(if cfg!(test) { 20 } else { 800 })).await;
+            get_once(c, url, query).await.map_err(|e| e.1)
+        }
+        r => r.map_err(|e| e.1),
+    }
+}
+
+/// `Err((worth_a_retry, message))`.
+async fn get_once(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<String, (bool, String)> {
     let r = c
         .get(url)
         .query(query)
@@ -206,12 +223,13 @@ async fn get(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<S
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| format!("network error ({})", e.without_url()))?;
+        .map_err(|e| (true, format!("network error ({})", e.without_url())))?;
     let st = r.status();
     if !st.is_success() {
-        return Err(format!("HTTP {} from ultimate-guitar", st.as_u16()));
+        let transient = st.as_u16() == 429 || st.is_server_error();
+        return Err((transient, format!("HTTP {} from ultimate-guitar", st.as_u16())));
     }
-    let body = r.text().await.map_err(|e| format!("read error ({e})"))?;
+    let body = r.text().await.map_err(|e| (true, format!("read error ({e})")))?;
     if let Some(dir) = SAVE_DIR.get() {
         let name = format!("{:016x}.html", fnv1a(url) ^ fnv1a(&format!("{query:?}")));
         let _ = std::fs::write(dir.join(name), &body);
@@ -232,19 +250,34 @@ fn cache_path(artist: &str, title: &str) -> PathBuf {
 
 fn fail(msg: String) -> Outcome {
     FAILS.fetch_add(1, Ordering::Relaxed);
+    LAST_FAIL.store(now_secs(), Ordering::Relaxed);
     Outcome::Error(msg)
 }
 
+/// Switched off after repeated failures, until the rest period is over.
 pub fn disabled() -> bool {
-    FAILS.load(Ordering::Relaxed) >= MAX_FAILS
+    if FAILS.load(Ordering::Relaxed) < MAX_FAILS {
+        return false;
+    }
+    if now_secs().saturating_sub(LAST_FAIL.load(Ordering::Relaxed)) >= BREAKER_SECS {
+        FAILS.store(0, Ordering::Relaxed);
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
 pub fn reset_breaker() {
     FAILS.store(0, Ordering::Relaxed);
+    LAST_FAIL.store(0, Ordering::Relaxed);
 }
 
-/// Cache → search → fetch the best page(s). At most 1 search + 3 page requests, and
+#[cfg(test)]
+pub fn set_last_fail(secs: u64) {
+    LAST_FAIL.store(secs, Ordering::Relaxed);
+}
+
+/// Cache → search (twice at most) → fetch the best pages, 3 per search at most, and
 /// only for tracks that aren't cached. Errors are never cached.
 pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Outcome {
     let path = cache_path(artist, title);
@@ -265,32 +298,61 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
         return Outcome::Error("ultimate-guitar switched off after repeated failures".into());
     }
 
-    let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
-    let html = match get(c, &format!("{base}/search.php"), &[("search_type", "title"), ("value", &q)]).await {
-        Ok(h) => h,
-        Err(e) => return fail(e),
-    };
-    let Some(store) = extract_store(&html) else {
-        return fail("ultimate-guitar page format not recognised (blocked or changed)".into());
-    };
-    let cands = candidates(&store, artist, title);
+    // Search "artist title" first; when none of its chord pages is the song (or none has real
+    // chords) search the title alone, since UG's ranking often buries a song under the artist
+    // words. A page that fails to load does not end the lookup: the next one is tried.
+    let first_artist = artist.split(", ").next().unwrap_or(artist);
+    let cleaned = crate::year::clean(title);
+    let mut queries = vec![format!("{first_artist} {cleaned}")];
+    if !first_artist.trim().is_empty() && !cleaned.trim().is_empty() {
+        queries.push(cleaned.clone());
+    }
     let mut sheet = None;
-    for cand in &cands {
-        let url = if cand.url.starts_with('/') {
-            format!("{base}{}", cand.url)
-        } else {
-            cand.url.clone()
-        };
-        let html = match get(c, &url, &[]).await {
+    let mut tried: Vec<String> = Vec::new();
+    let mut page_error: Option<String> = None;
+    'search: for (n, q) in queries.iter().enumerate() {
+        let html = match get(c, &format!("{base}/search.php"), &[("search_type", "title"), ("value", q)]).await {
             Ok(h) => h,
-            Err(e) => return fail(e),
+            Err(e) if n == 0 => return fail(e),
+            Err(e) => {
+                page_error = Some(e);
+                break;
+            }
         };
-        let Some(page) = extract_store(&html) else {
-            return fail("ultimate-guitar tab page format not recognised".into());
-        };
-        if let Some(s) = sheet_from_store(&page) {
-            sheet = Some(s);
+        let Some(store) = extract_store(&html) else {
+            if n == 0 {
+                return fail("ultimate-guitar page format not recognised (blocked or changed)".into());
+            }
+            page_error = Some("ultimate-guitar page format not recognised (blocked or changed)".into());
             break;
+        };
+        for cand in candidates(&store, artist, title) {
+            let url = if cand.url.starts_with('/') { format!("{base}{}", cand.url) } else { cand.url.clone() };
+            if tried.contains(&url) {
+                continue;
+            }
+            tried.push(url.clone());
+            let html = match get(c, &url, &[]).await {
+                Ok(h) => h,
+                Err(e) => {
+                    page_error = Some(e);
+                    continue;
+                }
+            };
+            let Some(page) = extract_store(&html) else {
+                page_error = Some("ultimate-guitar tab page format not recognised".into());
+                continue;
+            };
+            if let Some(s) = sheet_from_store(&page) {
+                sheet = Some(s);
+                break 'search;
+            }
+        }
+    }
+    // pages that would not load: say so (and cache nothing) instead of calling the song unknown
+    if sheet.is_none() {
+        if let Some(e) = page_error {
+            return fail(e);
         }
     }
     FAILS.store(0, Ordering::Relaxed);

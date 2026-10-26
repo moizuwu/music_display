@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 const NEG_TTL: u64 = 3 * 24 * 3600;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Lyrics {
     /// (time in seconds, text), sorted by time.
     Synced(Vec<(f64, String)>),
@@ -48,7 +48,8 @@ pub fn parse_lrc(src: &str) -> Vec<(f64, String)> {
             }
             rest = &rest[end + 1..];
         }
-        let text = rest.trim();
+        let text = strip_word_tags(rest.trim());
+        let text = text.trim();
         for t in stamps {
             out.push((
                 t,
@@ -67,6 +68,27 @@ pub fn parse_lrc(src: &str) -> Vec<(f64, String)> {
     out
 }
 
+/// Drop inline word times of "enhanced" LRC (`<01:23.45>`): the text is shown as plain words.
+fn strip_word_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('<') {
+        let tag = rest[i + 1..].split('>').next().filter(|_| rest[i..].contains('>'));
+        match tag {
+            Some(t) if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || matches!(c, ':' | '.')) => {
+                out.push_str(&rest[..i]);
+                rest = &rest[i + t.len() + 2..];
+            }
+            _ => {
+                out.push_str(&rest[..=i]);
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn parse_stamp(tag: &str) -> Option<f64> {
     let (m, s) = tag.split_once(':')?;
     let m: f64 = m.trim().parse().ok()?;
@@ -74,7 +96,7 @@ fn parse_stamp(tag: &str) -> Option<f64> {
     Some(m * 60.0 + s)
 }
 
-fn to_lyrics(kind: &str, text: &str) -> Lyrics {
+pub fn to_lyrics(kind: &str, text: &str) -> Lyrics {
     match kind {
         "synced" => {
             let l = parse_lrc(text);
@@ -136,6 +158,13 @@ pub enum Lang {
 }
 
 fn pick(recs: Vec<Rec>, length: f64, lang: Lang) -> Option<(&'static str, String)> {
+    ranked(&recs, length, lang, true).into_iter().next()
+}
+
+/// Every usable candidate, best first (the order `pick` chooses by). `strict` leaves out
+/// Hangul lyrics for an explicitly non-Korean release; stepping through the versions by
+/// hand (`ranked(.., false)`) shows everything.
+fn ranked(recs: &[Rec], length: f64, lang: Lang, strict: bool) -> Vec<(&'static str, String)> {
     let korean = lang == Lang::Korean
         || (lang == Lang::Auto && recs.iter().any(|r| classify(r).is_some_and(|c| is_hangul_text(&c.1))));
     let close = |r: &Rec| length <= 0.0 || r.duration.is_none_or(|d| (d - length).abs() <= 4.0);
@@ -154,11 +183,13 @@ fn pick(recs: Vec<Rec>, length: f64, lang: Lang) -> Option<(&'static str, String
         _ => 0,
     };
     let kind = |r: &Rec| rank(r) / 2 * 2; // 0 synced, 2 plain, 8 none
-    recs.iter()
+    let mut list: Vec<&Rec> = recs
+        .iter()
         .filter(|r| rank(r) < 9)
-        .filter(|r| lang != Lang::Other || !classify(r).is_some_and(|c| is_hangul_text(&c.1)))
-        .min_by_key(|r| (kind(r), hangul(r), rank(r)))
-        .and_then(classify)
+        .filter(|r| !strict || lang != Lang::Other || !classify(r).is_some_and(|c| is_hangul_text(&c.1)))
+        .collect();
+    list.sort_by_key(|r| (kind(r), hangul(r), rank(r)));
+    list.into_iter().filter_map(|r| classify(r)).collect()
 }
 
 pub const BASE: &str = "https://lrclib.net";
@@ -280,6 +311,77 @@ async fn search(
     }
 }
 
+/// Where the lyrics found for a song are kept.
+fn cache_file(artist: &str, title: &str, album: &str, length: f64) -> std::path::PathBuf {
+    let key = fnv1a(&format!("{artist}\0{title}\0{album}\0{}", length.round() as i64));
+    cache_dir().join(format!("lyrics-{key:016x}.json"))
+}
+
+/// Which script the lyrics of this release are expected in.
+fn lang_of(artist: &str, title: &str, album: &str) -> Lang {
+    // a Korean title or artist: romanized lyrics are worth a search for Hangul ones
+    let hint = title.chars().chain(artist.chars()).any(is_hangul);
+    match crate::util::version_marker(title, album).as_deref() {
+        Some("korean") => Lang::Korean,
+        Some("instrumental") | None if hint => Lang::Korean,
+        Some(_) => Lang::Other,
+        None => Lang::Auto,
+    }
+}
+
+/// Every lyrics version lrclib has for a song, best first, as (kind, text) for [`to_lyrics`]:
+/// for stepping to the next one when the first pick is the wrong script or sync.
+pub async fn versions(
+    c: &reqwest::Client,
+    artist: &str,
+    title: &str,
+    album: &str,
+    length: f64,
+    policy: Policy,
+) -> Vec<(String, String)> {
+    let cleaned = crate::year::clean(title);
+    let first = artist.split(", ").next().unwrap_or(artist);
+    let mut recs: Vec<Rec> = Vec::new();
+    let dur = format!("{}", length.round() as i64);
+    let mut q = vec![("artist_name", artist), ("track_name", title)];
+    if !album.is_empty() {
+        q.push(("album_name", album));
+    }
+    if length > 0.0 {
+        q.push(("duration", &dur));
+    }
+    if let Step::Hit(r) = get(c, BASE, &q, policy.retries, &policy).await {
+        recs.push(r);
+    }
+    let mut tries = vec![(artist, cleaned.as_str())];
+    if cleaned != title {
+        tries.push((artist, title));
+    }
+    if first != artist {
+        tries.push((first, cleaned.as_str()));
+    }
+    for (a, t) in tries {
+        if let Step::Hit(v) = search(c, BASE, a, t, policy.retries, &policy).await {
+            recs.extend(v);
+        }
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (kind, text) in ranked(&recs, length, lang_of(artist, title, album), false) {
+        if !out.iter().any(|(_, t)| *t == text) {
+            out.push((kind.to_string(), text));
+        }
+    }
+    out
+}
+
+/// Keep `kind`/`text` as the lyrics of this song from now on (what `L` picked).
+pub fn remember(artist: &str, title: &str, album: &str, length: f64, kind: &str, text: &str) {
+    let e = CacheEntry { kind: kind.into(), text: text.into(), saved: now_secs() };
+    if let Ok(s) = serde_json::to_string(&e) {
+        let _ = std::fs::write(cache_file(artist, title, album, length), s);
+    }
+}
+
 pub async fn fetch(
     c: reqwest::Client,
     artist: String,
@@ -307,11 +409,7 @@ pub async fn fetch_with(
     policy: Policy,
     use_cache: bool,
 ) -> Lyrics {
-    let key = fnv1a(&format!(
-        "{artist}\0{title}\0{album}\0{}",
-        length.round() as i64
-    ));
-    let path = cache_dir().join(format!("lyrics-{key:016x}.json"));
+    let path = cache_file(artist, title, album, length);
     if use_cache {
         if let Ok(txt) = tokio::fs::read_to_string(&path).await {
             if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
@@ -324,14 +422,7 @@ pub async fn fetch_with(
 
     let cleaned = crate::year::clean(title);
     let first = artist.split(", ").next().unwrap_or(artist).to_string();
-    // a Korean title or artist: romanized lyrics are worth a search for Hangul ones
-    let hint = title.chars().chain(artist.chars()).any(is_hangul);
-    let lang = match crate::util::version_marker(title, album).as_deref() {
-        Some("korean") => Lang::Korean,
-        Some("instrumental") | None if hint => Lang::Korean,
-        Some(_) => Lang::Other,
-        None => Lang::Auto,
-    };
+    let lang = lang_of(artist, title, album);
     let korean = lang == Lang::Korean;
     // Hangul text is the wrong answer for an explicitly non-Korean release
     let classify = |r: &Rec| classify(r).filter(|c| lang != Lang::Other || !is_hangul_text(&c.1));

@@ -464,6 +464,10 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
             " settings ",
             Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
         ))
+        .title_top(
+            Line::from(Span::styled(format!(" v{} ", env!("MD_VERSION")), Style::new().fg(th.fade(0.55))))
+                .right_aligned(),
+        )
         .style(Style::new().bg(th.surface()).fg(th.text()));
     let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, r);
@@ -584,8 +588,70 @@ pub fn help_blocks_with(th: &Theme, keys: &crate::keymap::Keymap) -> Vec<Vec<Lin
         .collect()
 }
 
+/// The key editor of the help overlay: every action with its keys, one row each.
+fn draw_help_edit(f: &mut Frame, app: &mut App) {
+    use crate::app::BINDS;
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let th = app.theme.clone();
+    let ed = app.help_edit.clone().unwrap_or_default();
+    let acts = app.keys.actions();
+    let w = area.width.min(66);
+    let h = area.height.min(acts.len() as u16 + 4);
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(th.primary()))
+        .title(Span::styled(" keys ", Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)))
+        .style(Style::new().bg(th.surface()).fg(th.text()));
+    let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, r);
+    let view_h = inner.height.saturating_sub(1) as usize;
+    // keep the selected row in view
+    let first = ed.sel.saturating_sub(view_h.saturating_sub(1)).min(acts.len().saturating_sub(view_h));
+    let keys_w = 22usize;
+    let lines: Vec<Line> = acts
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(view_h)
+        .map(|(i, a)| {
+            let desc = BINDS.iter().find(|b| b.action == *a).map_or("", |b| b.desc);
+            let selected = i == ed.sel;
+            let keys = if selected && ed.capture {
+                "press a key…".to_string()
+            } else {
+                format!("{}{}", app.keys.label(*a), if app.keys.config_value(*a).is_some() { " *" } else { "" })
+            };
+            let room = (inner.width as usize).saturating_sub(keys_w + 1);
+            let desc: String = desc.chars().take(room).collect();
+            let text = format!("{desc:<room$} {keys:>keys_w$}");
+            let style = if selected {
+                Style::new().fg(th.surface()).bg(th.primary()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(th.text())
+            };
+            Line::styled(text, style)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), Rect { height: view_h as u16, ..inner });
+    let hint = match (&ed.note, ed.capture) {
+        (_, true) => "press the new key · Esc cancels".to_string(),
+        (Some(n), false) => n.clone(),
+        _ => "↑/↓ pick · Enter set a key · Backspace reset · Esc back  (* = changed)".to_string(),
+    };
+    f.render_widget(
+        Paragraph::new(Line::styled(hint, Style::new().fg(th.fade(0.55)))).alignment(Alignment::Center),
+        Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
+    );
+}
+
 fn draw_help(f: &mut Frame, app: &mut App) {
     use ratatui::widgets::Clear;
+    if app.help_edit.is_some() {
+        return draw_help_edit(f, app);
+    }
     let area = f.area();
     let th = app.theme.clone();
     let blocks = help_blocks_with(&th, &app.keys);
@@ -650,9 +716,9 @@ fn draw_help(f: &mut Frame, app: &mut App) {
         );
     }
     let hint = if max_scroll > 0 {
-        "↑/↓ scroll · any other key closes"
+        "↑/↓ scroll · e edit keys · any other key closes"
     } else {
-        "any key closes"
+        "e edit keys · any other key closes"
     };
     f.render_widget(
         Paragraph::new(Line::styled(hint, Style::new().fg(th.fade(0.45)))).alignment(Alignment::Center),
@@ -844,7 +910,7 @@ fn draw_lyrics_and_diagrams(f: &mut Frame, app: &mut App, area: Rect) {
 /// which one is being played. The active chord is estimated from how far through the
 /// line we are, since the sheet carries no timing of its own.
 fn section_chords(app: &App) -> (Vec<String>, Option<usize>) {
-    let Some(a) = app.aligned.as_ref().filter(|a| a.usable()) else {
+    let Some(a) = app.aligned.as_ref().filter(|a| a.usable_at(app.args.chords_match)) else {
         return (vec![], None);
     };
     let LyricsState::Ready(Lyrics::Synced(l)) = &app.lyrics else {
@@ -1698,6 +1764,89 @@ fn est_sung(text: &str) -> f64 {
     (text.chars().count() as f64 * 0.08).clamp(2.0, 6.0)
 }
 
+/// Share (0..=1) of the line starting at `start` that is sung at `t`. lrclib only has line
+/// times, so this is a guess: the line takes its own length (`est_sung`, up to 1.6x that when
+/// the next line is further away, so a break is not filled), and is lit a little before it ends.
+pub fn line_progress(t: f64, start: f64, next: Option<f64>, text: &str) -> f64 {
+    let est = est_sung(text);
+    let dur = next.map_or(est, |n| (n - start).min(est * 1.6)).max(0.5);
+    ((t - start) / dur * 1.1).clamp(0.0, 1.0)
+}
+
+fn non_space(s: &str) -> usize {
+    s.chars().filter(|c| !c.is_whitespace()).count()
+}
+
+/// How many non-space characters of each wrapped row are lit when `f` of the whole line is.
+fn spread_lit(counts: &[usize], f: f64) -> Vec<usize> {
+    let mut left = (f * counts.iter().sum::<usize>() as f64).round() as usize;
+    counts
+        .iter()
+        .map(|c| {
+            let k = left.min(*c);
+            left -= k;
+            k
+        })
+        .collect()
+}
+
+/// `row` cut right after its `lit`-th non-space character.
+fn split_lit(row: &str, lit: usize) -> (&str, &str) {
+    if lit == 0 {
+        return ("", row);
+    }
+    let mut seen = 0;
+    for (i, c) in row.char_indices() {
+        if !c.is_whitespace() {
+            seen += 1;
+            if seen == lit {
+                return row.split_at(i + c.len_utf8());
+            }
+        }
+    }
+    (row, "")
+}
+
+#[cfg(test)]
+pub fn split_lit_for_test(row: &str, lit: usize) -> (&str, &str) {
+    split_lit(row, lit)
+}
+
+/// `row` cut after `cols` display columns.
+fn split_cols(row: &str, cols: usize) -> (&str, &str) {
+    let mut w = 0;
+    for (i, c) in row.char_indices() {
+        if w >= cols {
+            return row.split_at(i);
+        }
+        w += crate::util::width(c.encode_utf8(&mut [0; 4]));
+    }
+    (row, "")
+}
+
+/// Index (into `text.chars()`) of the first character not lit yet when `lit` non-space
+/// characters are; `usize::MAX` when all are.
+fn lit_boundary(text: &str, lit: usize) -> usize {
+    if lit == 0 {
+        return 0;
+    }
+    let mut seen = 0;
+    for (i, c) in text.chars().enumerate() {
+        if !c.is_whitespace() {
+            seen += 1;
+            if seen == lit {
+                return i + 1;
+            }
+        }
+    }
+    usize::MAX
+}
+
+/// The lit and the not yet lit part of a row, side by side.
+fn lit_spans<'a>(lit: &'a str, rest: &'a str, lit_style: Style, rest_style: Style) -> Vec<Span<'a>> {
+    vec![Span::styled(lit, lit_style), Span::styled(rest, rest_style)]
+}
+
 /// Style for a non-active lyric line `dist` lines away from the active one:
 /// fades with distance, and past lines fade a little faster than upcoming ones.
 fn fade_style(th: &Theme, dist: usize, past: bool) -> Style {
@@ -1780,6 +1929,8 @@ pub struct Focus<'a> {
     /// This song has member data: keep one row free above the stage for the tag on every
     /// line, so the layout doesn't jump between tagged and untagged lines.
     pub reserve_tag: bool,
+    /// Karaoke: how much of the active line is sung (0..=1); `None` = plain bold line.
+    pub progress: Option<f64>,
 }
 
 /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
@@ -1848,8 +1999,43 @@ fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> (Vec<
         }
     };
 
+    // karaoke: split every stage row where the sung part ends
+    let lit_rows: Vec<usize> = match (fc.progress, c) {
+        (Some(fr), Some(c)) => match &map {
+            // big font: cut at the column of the first glyph that is not lit yet
+            Some(r) => {
+                let boundary = lit_boundary(&lines[c], (fr * non_space(&lines[c]) as f64).round() as usize);
+                (0..stage.len())
+                    .map(|i| {
+                        let k = r.chunks.iter().rposition(|ch| ch.row <= i).unwrap_or(0);
+                        let ch = &r.chunks[k];
+                        ch.cols.iter().find(|(s, _)| *s >= boundary).map_or(ch.width, |(_, col)| *col)
+                    })
+                    .collect()
+            }
+            None => spread_lit(&stage.iter().map(|s| non_space(s)).collect::<Vec<_>>(), fr),
+        },
+        _ => Vec::new(),
+    };
+    let kar_dim = Style::new().fg(th.fade(0.55)).add_modifier(Modifier::BOLD);
     for (i, row) in stage.iter().take(sh as usize).enumerate() {
-        put(f, top as i32 + i as i32, stage_li, row, stage_style);
+        match lit_rows.get(i) {
+            Some(k) if !row.is_empty() => {
+                let y = top as i32 + i as i32;
+                let (a, b) = if map.is_some() { split_cols(row, *k) } else { split_lit(row, *k) };
+                let w = (crate::util::width(row) as u16).min(inner.width);
+                let x0 = inner.x + (inner.width - w) / 2;
+                if y >= inner.y as i32 && y < inner.bottom() as i32 {
+                    hits.borrow_mut()[(y - inner.y as i32) as usize] = stage_li;
+                    spans.borrow_mut()[(y - inner.y as i32) as usize] = (x0, x0 + w);
+                    f.render_widget(
+                        Paragraph::new(Line::from(lit_spans(a, b, stage_style, kar_dim))).alignment(Alignment::Center),
+                        Rect { y: y as u16, height: 1, ..inner },
+                    );
+                }
+            }
+            _ => put(f, top as i32 + i as i32, stage_li, row, stage_style),
+        }
     }
     // the active line's chords: each above its own glyph when the big font draws it (one row
     // above every wrapped piece, in the blank row between pieces), else a summary above
@@ -2095,6 +2281,10 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         LyricsState::Ready(Lyrics::Synced(l)) => l.iter().map(|x| x.0).collect(),
         _ => Vec::new(),
     };
+    // karaoke: how much of the active line is sung (guessed from the line times)
+    let kar_progress = current
+        .filter(|c| app.karaoke_live() && lines[*c].trim() != "♪")
+        .map(|c| line_progress(pos + app.offset, stamps[c], stamps.get(c + 1).copied(), &lines[c]));
 
     // Blank rows between lines — dropped on short panels where they'd waste the space.
     let gap = if inner.height >= 10 {
@@ -2106,7 +2296,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     let aligned: Option<chords::Aligned> = (app.chords_on && !plain)
         .then(|| app.aligned.clone())
         .flatten()
-        .filter(|a| a.usable())
+        .filter(|a| a.usable_at(app.args.chords_match))
         .map(|mut a| {
             if translated {
                 for (i, cs) in a.per_line.iter_mut().enumerate() {
@@ -2148,6 +2338,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             in_break,
             members: current.and_then(|c| app.members.get(c)).map_or(&[][..], |m| m.as_slice()),
             reserve_tag: app.members.iter().any(|m| !m.is_empty()),
+            progress: kar_progress,
         };
         let (rows, spans) = draw_focus_spans(f, inner, &th, &focus);
         // top = 0: the row index is the offset from the panel's top edge
@@ -2370,6 +2561,16 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             },
         );
     }
+    // karaoke: per text row of the active line, how many of its characters are lit
+    let mut kar: std::collections::HashMap<usize, usize> = Default::default();
+    if let (Some(fr), Some(c)) = (kar_progress, current) {
+        let ids: Vec<usize> = (starts[c]..ends[c])
+            .filter(|r| rows[*r].chord_x.is_none() && !sub_rows.contains(r))
+            .collect();
+        let counts: Vec<usize> = ids.iter().map(|r| non_space(&rows[*r].text)).collect();
+        kar.extend(ids.into_iter().zip(spread_lit(&counts, fr)));
+    }
+    let kar_dim = Style::new().fg(th.fade(0.55)).add_modifier(Modifier::BOLD);
     for y in 0..inner.height {
         let idx = top + y as i64;
         if idx < 0 || idx as usize >= rows.len() {
@@ -2491,15 +2692,28 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             let x0 = inner.x + (inner.width - w) / 2;
             app.lyric_hits.spans[idx as usize] = (x0, x0 + w);
             let mut spans: Vec<Span> = tag;
-            spans.push(Span::styled(text.as_str(), style));
+            match kar.get(&(idx as usize)) {
+                Some(k) => {
+                    let (a, b) = split_lit(text.as_str(), *k);
+                    spans.extend(lit_spans(a, b, style, kar_dim));
+                }
+                None => spans.push(Span::styled(text.as_str(), style)),
+            }
             f.render_widget(
                 Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
                 Rect { y: inner.y + y, height: 1, ..inner },
             );
             continue;
         }
+        let line = match kar.get(&(idx as usize)) {
+            Some(k) => {
+                let (a, b) = split_lit(text.as_str(), *k);
+                Line::from(lit_spans(a, b, style, kar_dim))
+            }
+            None => Line::styled(text.as_str(), style),
+        };
         f.render_widget(
-            Paragraph::new(Line::styled(text.as_str(), style)).alignment(Alignment::Center),
+            Paragraph::new(line).alignment(Alignment::Center),
             Rect {
                 y: inner.y + y,
                 height: 1,
@@ -2586,7 +2800,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             (CS::Missing, _) => "chords: no sheet found for this track".to_string(),
             (CS::Failed(e), _) => format!("chords: {e}"),
             (CS::Ready, None) => "chords: found, but there are no synced lyrics to place them on".into(),
-            (CS::Ready, Some(a)) if !a.usable() => {
+            (CS::Ready, Some(a)) if !a.usable_at(app.args.chords_match) => {
                 format!("chords: weak match ({}%) — hidden", a.percent())
             }
             (CS::Ready, Some(a)) => {

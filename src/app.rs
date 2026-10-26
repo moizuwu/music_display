@@ -4,7 +4,7 @@ use crate::player::{Snapshot, Status};
 use crate::theme::Rgb;
 use crate::theme::Theme;
 use crossterm::event::{
-    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 use ratatui_image::picker::Picker;
@@ -31,6 +31,8 @@ pub enum Action {
     Mute,
     ToggleLyrics,
     ToggleBig,
+    Karaoke,
+    NextLyrics,
     BigScale,
     LineSpacing,
     LyricPad,
@@ -56,6 +58,16 @@ pub enum Action {
     BrowsePageDown,
     BrowseEnd,
     Help,
+}
+
+/// The key editor inside the help overlay (`e` there).
+#[derive(Clone, Debug, Default)]
+pub struct HelpEdit {
+    /// The selected row (an index into the key table).
+    pub sel: usize,
+    /// Waiting for the key to give the selected action.
+    pub capture: bool,
+    pub note: Option<String>,
 }
 
 pub struct Bind {
@@ -95,6 +107,8 @@ pub const BINDS: &[Bind] = &[
     bind!("Lyrics", ".", "lyrics 0.1 s earlier", [KeyCode::Char('.')], SyncLater),
     bind!("Lyrics", "l", "show / hide lyrics", [KeyCode::Char('l')], ToggleLyrics),
     bind!("Lyrics", "b", "big-font active line", [KeyCode::Char('b')], ToggleBig),
+    bind!("Lyrics", "a", "light up the line word by word", [KeyCode::Char('a')], Karaoke),
+    bind!("Lyrics", "L", "next lyrics version from lrclib (e.g. Hangul instead of romanized)", [KeyCode::Char('L')], NextLyrics),
     bind!("Lyrics", "x", "big-font size 1 / 2 / 3", [KeyCode::Char('x')], BigScale),
     bind!("Lyrics", "i", "line spacing 0-3", [KeyCode::Char('i')], LineSpacing),
     bind!("Lyrics", "u", "side padding 0-10", [KeyCode::Char('u')], LyricPad),
@@ -226,13 +240,17 @@ pub enum Setting {
     Player,
     Chords,
     ChordsUg,
+    ChordsMatch,
     MemberParts,
     Translate,
     TranslateLang,
     TranslateSkip,
     TranslateFallback,
+    CacheTranslations,
     Minimal,
     BigLyrics,
+    Karaoke,
+    WindowTitle,
     BigScale,
     LyricSpacing,
     LyricPad,
@@ -298,13 +316,17 @@ impl Setting {
         Setting::Player,
         Setting::Chords,
         Setting::ChordsUg,
+        Setting::ChordsMatch,
         Setting::MemberParts,
         Setting::Translate,
         Setting::TranslateLang,
         Setting::TranslateSkip,
         Setting::TranslateFallback,
+        Setting::CacheTranslations,
         Setting::Minimal,
         Setting::BigLyrics,
+        Setting::Karaoke,
+        Setting::WindowTitle,
         Setting::BigScale,
         Setting::LyricSpacing,
         Setting::LyricPad,
@@ -332,13 +354,17 @@ impl Setting {
             Setting::Player => "Player source",
             Setting::Chords => "Chords",
             Setting::ChordsUg => "Ultimate Guitar (next track)",
+            Setting::ChordsMatch => "Chord match threshold (%)",
             Setting::MemberParts => "Member parts (experimental)",
             Setting::Translate => "Translate lyrics",
             Setting::TranslateLang => "Translate into",
             Setting::TranslateSkip => "Never translate",
             Setting::TranslateFallback => "LibreTranslate fallback",
+            Setting::CacheTranslations => "Keep translations on disk",
             Setting::Minimal => "Minimal view",
             Setting::BigLyrics => "Big active line",
+            Setting::Karaoke => "Word-by-word highlight",
+            Setting::WindowTitle => "Terminal window title",
             Setting::BigScale => "Big line size",
             Setting::LyricSpacing => "Lyric spacing",
             Setting::LyricPad => "Lyric side padding",
@@ -368,13 +394,17 @@ impl Setting {
             Setting::Player => &["player"],
             Setting::Chords => &["chords"],
             Setting::ChordsUg => &["chords_ug"],
+            Setting::ChordsMatch => &["chords_match"],
             Setting::MemberParts => &["member_parts"],
             Setting::Translate => &["translate"],
             Setting::TranslateLang => &["translate_lang"],
             Setting::TranslateSkip => &["translate_skip"],
             Setting::TranslateFallback => &["translate_fallback"],
+            Setting::CacheTranslations => &["cache_translations"],
             Setting::Minimal => &["minimal_view"],
             Setting::BigLyrics => &["big_lyrics"],
+            Setting::Karaoke => &["karaoke"],
+            Setting::WindowTitle => &["window_title"],
             Setting::BigScale => &["big_scale"],
             Setting::LyricSpacing => &["lyric_spacing"],
             Setting::LyricPad => &["lyric_pad"],
@@ -416,6 +446,9 @@ const PRELOAD_GAP: Duration = Duration::from_secs(4);
 const PRELOAD_DELAY: Duration = Duration::ZERO;
 #[cfg(test)]
 const PRELOAD_GAP: Duration = Duration::from_millis(150);
+
+/// The values of `window_title`, in the order the settings menu steps through them.
+const WINDOW_TITLES: [&str; 3] = ["off", "title", "artist-title"];
 
 pub const LANGS: &[&str] = &["en", "sv", "de", "fr", "es", "it", "pt", "nl", "ja", "ko", "zh-CN", "ru", "ar"];
 
@@ -520,6 +553,7 @@ pub struct App {
     /// `?`: help overlay, and how far it is scrolled.
     pub show_help: bool,
     pub help_scroll: u16,
+    pub help_edit: Option<HelpEdit>,
     /// `s`: settings menu and the highlighted row.
     pub show_settings: bool,
     pub settings_sel: usize,
@@ -579,6 +613,9 @@ pub struct App {
     pub devices: Option<DevicePicker>,
     /// The background load of the main lists after Spotify came on.
     /// Library tabs still to be loaded in the background, and when the next one is due.
+    /// The lyrics versions lrclib has for this song (track key, kind + text) and the one shown.
+    lyric_versions: Option<(u64, Vec<(String, String)>)>,
+    lyric_ver: Option<usize>,
     preload_queue: std::collections::VecDeque<usize>,
     preload_at: Option<Instant>,
 }
@@ -653,6 +690,7 @@ impl App {
             show_diagrams: false,
             show_help: false,
             help_scroll: 0,
+            help_edit: None,
             show_settings: false,
             settings_sel: 0,
             settings_top: 0,
@@ -685,6 +723,8 @@ impl App {
             login_msg: None,
             settings_edit: None,
             devices: None,
+            lyric_versions: None,
+            lyric_ver: None,
             preload_queue: Default::default(),
             preload_at: None,
         };
@@ -759,6 +799,15 @@ impl App {
                 self.realign_members();
                 self.ensure_translation();
                 self.dirty = true;
+            }
+            AppEvent::LyricVersions { key, list } if key == self.track_key => {
+                // which of them is on screen now
+                self.lyric_ver = match &self.lyrics {
+                    LyricsState::Ready(l) => list.iter().position(|(k, t)| lyrics::to_lyrics(k, t) == *l),
+                    _ => None,
+                };
+                self.lyric_versions = Some((key, list));
+                self.step_lyrics();
             }
             AppEvent::Members { key, parts } if key == self.track_key => {
                 self.member_src = parts;
@@ -1171,7 +1220,9 @@ impl App {
     /// Match the sheet onto the synced lyrics (cheap; redone when either side changes).
     fn realign(&mut self) {
         self.aligned = match (&self.sheet, &self.lyrics) {
-            (Some(sh), LyricsState::Ready(Lyrics::Synced(l))) => Some(chords::align(sh, l)),
+            (Some(sh), LyricsState::Ready(Lyrics::Synced(l))) => {
+                Some(chords::align_with(sh, l, self.args.chords_match))
+            }
             _ => None,
         };
     }
@@ -1289,7 +1340,15 @@ impl App {
         if let Some(t) = self.translate_task.take() {
             t.abort();
         }
+        // (the tests must not read or fill the real cache folder)
+        let (keep, skip) = (!self.args.no_cache_translations && !cfg!(test), self.skip_langs());
         self.translate_task = Some(tokio::spawn(async move {
+            if keep {
+                if let Some(done) = translate::cached(&lang, &skip, &lines).await {
+                    let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok(done) });
+                    return;
+                }
+            }
             // language not detectable (rate-limited) while the never-translate list is in use:
             // say so once, then ask again every HOLD_RETRY_SECS
             let mut told = false;
@@ -1306,6 +1365,9 @@ impl App {
                         continue;
                     }
                     r = Err(translate::HELD_FINAL.to_string());
+                }
+                if let (true, Ok((done, backend))) = (keep, &r) {
+                    translate::store(&lang, &skip, &lines, done, backend).await;
                 }
                 let _ = tx.send(AppEvent::Translated { key, lang, lines: r });
                 return;
@@ -1387,6 +1449,10 @@ impl App {
             Setting::Player => format!("< {} >", self.args.player),
             Setting::Chords => onoff(self.chords_on),
             Setting::ChordsUg => onoff(self.args.chords_ug),
+            Setting::ChordsMatch => match &self.settings_edit {
+                Some((Setting::ChordsMatch, input)) => input.shown(),
+                _ => format!("{} %", self.args.chords_match),
+            },
             Setting::MemberParts => onoff(self.args.member_parts),
             Setting::Translate => onoff(self.translate_on),
             Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
@@ -1398,8 +1464,11 @@ impl App {
                 format!("< {code} {} >{}", if on { "[x]" } else { "[ ]" }, if list.is_empty() { String::new() } else { format!("  ({list})") })
             }
             Setting::TranslateFallback => onoff(self.args.translate_fallback),
+            Setting::CacheTranslations => onoff(!self.args.no_cache_translations),
             Setting::Minimal => onoff(self.minimal),
             Setting::BigLyrics => onoff(self.big_lyrics),
+            Setting::Karaoke => onoff(self.args.karaoke),
+            Setting::WindowTitle => format!("< {} >", self.args.window_title),
             Setting::BigScale => format!("< {}x >", self.args.big_scale),
             Setting::LyricSpacing => format!("< {} >", self.args.lyric_spacing),
             Setting::LyricPad => format!("< {} >", self.args.lyric_pad),
@@ -1475,6 +1544,10 @@ impl App {
             }
             Setting::Chords => self.toggle_chords(),
             Setting::ChordsUg => self.args.chords_ug = !self.args.chords_ug,
+            Setting::ChordsMatch => {
+                self.settings_edit = Some((s, TextInput::with(&self.args.chords_match.to_string())));
+                return;
+            }
             Setting::MemberParts => self.toggle_member_parts(),
             Setting::Translate => self.toggle_translate(),
             Setting::TranslateLang => {
@@ -1499,6 +1572,7 @@ impl App {
                 }
             }
             Setting::TranslateFallback => self.args.translate_fallback = !self.args.translate_fallback,
+            Setting::CacheTranslations => self.args.no_cache_translations = !self.args.no_cache_translations,
             Setting::Minimal => self.set_minimal(!self.minimal),
             Setting::BigScale => {
                 self.args.big_scale = (self.args.big_scale as i32 + dir).clamp(1, 3) as u16;
@@ -1512,6 +1586,11 @@ impl App {
             Setting::BigLyrics => {
                 self.big_lyrics = !self.big_lyrics;
                 self.snap_scroll = true;
+            }
+            Setting::Karaoke => self.args.karaoke = !self.args.karaoke,
+            Setting::WindowTitle => {
+                let cur = WINDOW_TITLES.iter().position(|m| *m == self.args.window_title).unwrap_or(0) as i32;
+                self.args.window_title = WINDOW_TITLES[(cur + dir).rem_euclid(WINDOW_TITLES.len() as i32) as usize].into();
             }
             Setting::LyricSpacing => {
                 self.args.lyric_spacing = (self.args.lyric_spacing as i32 + dir).clamp(0, 3) as u16;
@@ -1590,6 +1669,16 @@ impl App {
                 self.args.spotify_client_id = (!text.is_empty()).then(|| text.to_string());
             }
             Setting::SpotifyDevice => self.args.spotify_device = text.to_string(),
+            Setting::ChordsMatch => {
+                let Some(n) = text.trim_end_matches('%').trim().parse::<u32>().ok().filter(|n| *n <= 100) else {
+                    self.settings_note = Some("a number from 0 to 100".into());
+                    return;
+                };
+                self.args.chords_match = n;
+                self.realign();
+                self.save_settings(s);
+                return;
+            }
             _ => return,
         }
         // the running client keeps the old name / ID until it is rebuilt
@@ -1604,16 +1693,20 @@ impl App {
             ("player", S(self.args.player.clone())),
             ("chords", B(self.chords_on)),
             ("chords_ug", B(self.args.chords_ug)),
+            ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
             ("translate", B(self.translate_on)),
             ("translate_lang", S(self.args.translate_lang.clone())),
             ("translate_skip", S(self.args.translate_skip.clone())),
             ("translate_fallback", B(self.args.translate_fallback)),
+            ("cache_translations", B(!self.args.no_cache_translations)),
             ("big_scale", I(self.args.big_scale as i64)),
             ("lyric_pad", I(self.args.lyric_pad as i64)),
             ("hide_color_warning", B(self.args.hide_color_warning)),
             ("minimal_view", B(self.minimal)),
             ("big_lyrics", B(self.big_lyrics)),
+            ("karaoke", B(self.args.karaoke)),
+            ("window_title", S(self.args.window_title.clone())),
             ("lyric_spacing", I(self.args.lyric_spacing as i64)),
             ("cava", B(if self.minimal { self.cava_before_minimal } else { self.show_cava })),
             // saved off while cava is off: startup would otherwise turn cava back on
@@ -1743,8 +1836,13 @@ impl App {
                     }
                 }
                 if self.show_help {
-                    // Help is open: arrows / paging scroll it, any other key closes it.
+                    if self.help_edit.is_some() {
+                        self.handle_help_edit(k);
+                        return false;
+                    }
+                    // Help is open: arrows / paging scroll it, `e` edits the keys, any other key closes it.
                     match k.code {
+                        KeyCode::Char('e') => self.help_edit = Some(HelpEdit::default()),
                         KeyCode::Up | KeyCode::Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
                         KeyCode::Down | KeyCode::Char('j') => self.help_scroll += 1,
                         KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
@@ -1844,6 +1942,11 @@ impl App {
             Action::ToggleLyrics => {
                 self.show_lyrics = !self.show_lyrics;
                 self.snap_scroll = true;
+            }
+            Action::NextLyrics => self.next_lyrics(),
+            Action::Karaoke => {
+                self.args.karaoke = !self.args.karaoke;
+                self.set_note(format!("word-by-word highlight {}", if self.args.karaoke { "on" } else { "off" }));
             }
             Action::ToggleBig => {
                 self.big_lyrics = !self.big_lyrics;
@@ -2021,6 +2124,119 @@ impl App {
 
     fn nudge(&mut self, d: f64) {
         self.offset = ((self.offset + d) * 10.0).round() / 10.0;
+    }
+
+    /// A key in the help overlay's key editor: arrows pick an action, Enter then a key sets it,
+    /// Backspace goes back to the built-in key, Esc leaves.
+    fn handle_help_edit(&mut self, k: KeyEvent) {
+        let acts = self.keys.actions();
+        let Some(mut ed) = self.help_edit.take() else { return };
+        ed.sel = ed.sel.min(acts.len().saturating_sub(1));
+        let action = acts[ed.sel];
+        if ed.capture {
+            ed.capture = false;
+            ed.note = if k.code == KeyCode::Esc {
+                Some("cancelled".into())
+            } else if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                Some("Ctrl and Alt keys can't be used".into())
+            } else {
+                match self.keys.rebind(action, k.code) {
+                    Ok(()) => Some(self.save_key(action)),
+                    Err(e) => Some(e),
+                }
+            };
+            self.help_edit = Some(ed);
+            return;
+        }
+        let n = acts.len();
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => ed.sel = (ed.sel + n - 1) % n,
+            KeyCode::Down | KeyCode::Char('j') => ed.sel = (ed.sel + 1) % n,
+            KeyCode::PageUp => ed.sel = ed.sel.saturating_sub(10),
+            KeyCode::PageDown => ed.sel = (ed.sel + 10).min(n - 1),
+            KeyCode::Home => ed.sel = 0,
+            KeyCode::End => ed.sel = n - 1,
+            KeyCode::Enter => {
+                ed.capture = true;
+                ed.note = None;
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                self.keys.reset(action);
+                ed.note = Some(self.save_key(action));
+            }
+            KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('?') => {
+                return; // back to the help
+            }
+            _ => {}
+        }
+        self.help_edit = Some(ed);
+    }
+
+    /// Write what `action` is bound to into `[keys]` of the config file; the message for the editor.
+    fn save_key(&self, action: Action) -> String {
+        let path = self.args.config.clone().unwrap_or_else(config::default_path);
+        match config::save_key(&path, action.name(), self.keys.config_value(action)) {
+            Ok(()) => format!("saved to {}", path.display()),
+            Err(e) => format!("couldn't save {}: {e}", path.display()),
+        }
+    }
+
+    /// `L`: show the next lyrics version lrclib has for this song. The list is looked up the
+    /// first time, then the key just steps through it.
+    fn next_lyrics(&mut self) {
+        let Some(s) = self.snap.clone().filter(|s| !s.title.is_empty()) else { return };
+        if self.lyric_versions.as_ref().is_some_and(|(k, _)| *k == self.track_key) {
+            return self.step_lyrics();
+        }
+        self.set_note("looking for other lyrics…");
+        let (c, tx, key) = (self.client.clone(), self.tx.clone(), self.track_key);
+        let policy = lyrics::Policy { retries: self.args.lyrics_retries, ..Default::default() };
+        self.tasks.push(tokio::spawn(async move {
+            let list = lyrics::versions(&c, &s.artist, &s.title, &s.album, s.length, policy).await;
+            let _ = tx.send(AppEvent::LyricVersions { key, list });
+        }));
+    }
+
+    fn step_lyrics(&mut self) {
+        let Some(s) = self.snap.clone() else { return };
+        let Some((key, list)) = self.lyric_versions.as_ref() else { return };
+        let (key, n) = (*key, list.len());
+        if n < 2 {
+            let msg = if n == 0 { "lrclib has no lyrics for this song" } else { "lrclib has only these lyrics" };
+            return self.set_note(msg);
+        }
+        let next = self.lyric_ver.map_or(0, |i| (i + 1) % n);
+        let (kind, text) = list[next].clone();
+        self.lyric_ver = Some(next);
+        // the next time this song plays it opens with the version picked here
+        lyrics::remember(&s.artist, &s.title, &s.album, s.length, &kind, &text);
+        // a translation belongs to the lines it was made from
+        self.translations.retain(|(k, _), _| *k != key);
+        self.translate_inflight = None;
+        self.translate_state = TranslateState::Idle;
+        self.apply(AppEvent::Lyrics { key, lyrics: lyrics::to_lyrics(&kind, &text) });
+        self.set_note(format!("lyrics version {} of {n}", next + 1));
+    }
+
+    /// What the terminal window should be called, or `None` to leave its title alone
+    /// (`window_title`): the song, cleaned of control characters so a title can't send escapes.
+    pub fn window_title(&self) -> Option<String> {
+        let s = self.snap.as_ref().filter(|s| !s.title.is_empty())?;
+        let text = match self.args.window_title.as_str() {
+            "title" => s.title.clone(),
+            "artist-title" if !s.artist.is_empty() => format!("{} – {}", s.artist, s.title),
+            "artist-title" => s.title.clone(),
+            _ => return None,
+        };
+        Some(text.chars().filter(|c| !c.is_control()).collect())
+    }
+
+    /// The active line fills up word by word: needs a redraw far more often than the clock.
+    pub fn karaoke_live(&self) -> bool {
+        self.args.karaoke
+            && self.show_lyrics
+            && self.playing()
+            && matches!(self.lyrics, LyricsState::Ready(Lyrics::Synced(_)))
     }
 
     /// Whether the next frame would differ even without new events.

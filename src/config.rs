@@ -37,7 +37,11 @@ pub const KEYS: &[Key] = &[
     k!("cava", Kind::Bool, "cava"),
     k!("cava_bars", Kind::Int(4, 1000), "cava_bars"),
     k!("thirdpanel", Kind::Bool, "thirdpanel"),
+    k!("chords_match", Kind::Int(0, 100), "chords_match"),
     k!("big_lyrics", Kind::Bool, "big_lyrics"),
+    k!("karaoke", Kind::Bool, "karaoke"),
+    k!("cache_translations", Kind::Bool, "no_cache_translations"),
+    k!("window_title", Kind::Str, "window_title"),
     k!("lyric_spacing", Kind::Int(0, 3), "lyric_spacing"),
     k!("big_scale", Kind::Int(1, 3), "big_scale"),
     k!("lyric_pad", Kind::Int(0, 10), "lyric_pad"),
@@ -126,7 +130,11 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "cava" => args.cava = b(),
         "cava_bars" => args.cava_bars = i() as u16,
         "thirdpanel" => args.thirdpanel = b() && !args.underlyrics,
+        "chords_match" => args.chords_match = i() as u32,
         "big_lyrics" => args.big_lyrics = b(),
+        "karaoke" => args.karaoke = b(),
+        "cache_translations" => args.no_cache_translations = !b(),
+        "window_title" => args.window_title = st(),
         "lyric_spacing" => args.lyric_spacing = i() as u16,
         "big_scale" => args.big_scale = i() as u16,
         "lyric_pad" => args.lyric_pad = i() as u16,
@@ -219,6 +227,31 @@ pub fn apply(
 /// including the `[keys]` section (comments in the file are not preserved, and the keys come
 /// back in alphabetical order). Creates the folder if needed.
 pub fn save(path: &Path, values: &[(&str, toml::Value)]) -> std::io::Result<()> {
+    edit(path, |table| {
+        for (k, v) in values {
+            table.insert((*k).to_string(), v.clone());
+        }
+    })
+}
+
+/// Set (or, with `None`, remove) one line of the `[keys]` section, keeping everything else.
+pub fn save_key(path: &Path, action: &str, keys: Option<toml::Value>) -> std::io::Result<()> {
+    edit(path, |table| {
+        let section = table.entry("keys").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(t) = section.as_table_mut() {
+            match keys {
+                Some(v) => {
+                    t.insert(action.to_string(), v);
+                }
+                None => {
+                    t.remove(action);
+                }
+            }
+        }
+    })
+}
+
+fn edit(path: &Path, change: impl FnOnce(&mut toml::Table)) -> std::io::Result<()> {
     // A file with a syntax error is left alone rather than overwritten with just our keys.
     let mut table: toml::Table = match std::fs::read_to_string(path) {
         Ok(raw) => raw.parse().map_err(|e| {
@@ -227,9 +260,7 @@ pub fn save(path: &Path, values: &[(&str, toml::Value)]) -> std::io::Result<()> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
         Err(e) => return Err(e),
     };
-    for (k, v) in values {
-        table.insert((*k).to_string(), v.clone());
-    }
+    change(&mut table);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -257,7 +288,11 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("cava", args.cava.to_string());
     line("cava_bars", args.cava_bars.to_string());
     line("thirdpanel", args.thirdpanel.to_string());
+    line("chords_match", args.chords_match.to_string());
     line("big_lyrics", args.big_lyrics.to_string());
+    line("karaoke", args.karaoke.to_string());
+    line("cache_translations", (!args.no_cache_translations).to_string());
+    line("window_title", q(&args.window_title));
     line("lyric_spacing", args.lyric_spacing.to_string());
     line("big_scale", args.big_scale.to_string());
     line("lyric_pad", args.lyric_pad.to_string());

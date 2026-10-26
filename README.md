@@ -1,5 +1,7 @@
 # music_display
 
+![version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmoizuwu%2Fmusic_display%2Fmain%2FCargo.toml&query=%24.package.version&label=version)
+
 A terminal now-playing display: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
 
 - Works with any MPRIS player (Spotify, spotifyd, VLC, mpv, …) through `playerctl`.
@@ -64,6 +66,8 @@ cargo build --release
 install -Dm755 target/release/music_display ~/.local/bin/music_display
 ```
 
+**Which version do I have?** `music_display --version` prints it, and so does the top right corner of the settings menu (`s`): `v0.1.0 (a1b2c3d)`. The number is the version in `Cargo.toml` (the badge at the top of this page shows the one on GitHub), the part in brackets is the git commit the program was built from. Compare it with the latest commit on GitHub to see whether you are up to date. (A build without the `.git` folder, such as one from a source archive, shows the number only.)
+
 ## Run
 
 ```sh
@@ -96,11 +100,14 @@ cava = false
 cava_bars = 64
 thirdpanel = false
 big_lyrics = false
+window_title = "off"           # the terminal window's title: "off", "title" or "artist-title"
+karaoke = false                # light up the active line word by word (toggle with a); the speed inside a line is a guess
 lyric_spacing = 1              # 0..3
 lyric_pad = 0                  # 0..10 blank columns on each side of the lyrics
 big_scale = 1                  # 1..3, size of the big-font line
 chords = false
 chords_ug = false
+chords_match = 40              # percent of the lyric lines that must match a sheet for its chords to show (0 = always)
 member_parts = false           # experimental: show who sings each line (Genius, unofficial)
 # chords_dir = "~/.local/share/music_display/chords"
 chords_context = 99            # 99 = chords on every line; N = active line + N upcoming
@@ -111,6 +118,7 @@ translate = false              # start with translated lyrics (toggle with K; k 
 translate_lang = "en"          # language lyrics are translated into
 translate_skip = ""              # languages never translated, e.g. "sv,fi"
 translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
+cache_translations = true      # keep finished translations on disk, so a song is translated once
 translate_fallback_url = "https://libretranslate.com/translate"
 # translate_fallback_key = "…" # libretranslate.com needs a key; your own server may not
 minimal_view = false           # start in the minimal view
@@ -151,6 +159,10 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
+| `--chords-match PERCENT` | how many percent of the lyric lines must match a chord sheet before its chords are shown (default 40). Lower it to see chords from sheets that match poorly, 0 shows every sheet; the lyrics title says `chords: weak match (N%) — hidden` when a sheet is below the limit. Also a typed row in the settings menu. |
+| `--window-title MODE` | put the song in the terminal window's title: `off` (default, the title is left alone), `title`, or `artist-title`. The old title is saved first and restored on quit (terminals without the xterm title stack keep the last song). Also a row in the settings menu. |
+| `--no-cache-translations` | do not keep finished translations on disk. By default a song is translated once and then read from `~/.cache/music_display/` (lyrics, Ultimate Guitar chords and Genius member parts are cached there too). Config: `cache_translations = false`; also a row in the settings menu. |
+| `--karaoke` | light up the active lyric line word by word (also `a`). See the `a` key for how the timing is guessed. |
 | `--big-lyrics` | render the active line in a 5×7 half-block font (also `b`). Latin (5×7) and Hangul are drawn big; Hangul syllables are composed from jamo strokes on a finer 12×12 grid (12 columns × 6 rows each) and, when a line doesn't fit that way (too wide or too tall for the panel), on the older 8×8 grid; a compact 3×5 font (no Hangul) is used when the panel is too narrow for the normal one, and other scripts fall back to bold text. Chords of the active line sit right above the glyph of the character they belong to (a chord on a space goes over the next letter; each wrapped piece gets its own chord row in the blank row above it, and chords are pushed apart rather than overlap); the neighbouring lines and the intro / break chords are drawn as in the normal layout. See "Hangul in big mode" below. |
 | `--minimal` | start in the minimal teleprompter view (also `M`). |
 | `--interlude-secs N` | a silence between two lyric lines longer than N seconds shows `[ Instrumental / Solo ]` (with a countdown) while it lasts; also before the first and after the last line. |
@@ -193,9 +205,11 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `m` | mute / restore |
 | `,` / `.` | lyric offset −0.1 s / +0.1 s |
 | `l` | show / hide the lyrics |
+| `L` | next lyrics version from lrclib: lrclib often has several entries for a song (for example romanized Korean instead of Hangul); each press shows the next one (best first) and the song opens with that version from then on |
 | `K` | translate lyrics on / off: the translation replaces the original line (cached per song while the app runs) |
 | `k` | translation on / off with the original kept: each line is followed by its translation (italic). With big lyrics the translation replaces the line as with `K`. `K` and `k` switch between the two modes |
 | `b` | big-font active line |
+| `a` | word-by-word highlight: the active line lights up from left to right while it is sung (also big-font lines). lrclib only has one time per line, so the speed inside a line is estimated from its length and the time to the next line: it fits evenly sung lines and drifts on long held notes. Redraws about 30 times a second while it is on and a synced song plays (`--karaoke`, `karaoke = true`, or the settings menu) |
 | `x` | big-font size 1 → 2 → 3 → 1 (`big_scale`; the line steps down by itself when it doesn't fit) |
 | `i` | line spacing 0 → 1 → 2 → 3 → 0 (`lyric_spacing`) |
 | `u` | side padding 0 → 2 → 4 … → 10 → 0 (`lyric_pad`) |
@@ -208,7 +222,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `M` | minimal teleprompter view |
 | `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more, and a **Spotify** group (on / off, Client ID, log in / out, spotifyd name, status). Rows that take text (`Enter` starts typing, `Enter` saves, `Esc` cancels) swallow every key, so `q` and `s` are letters while you type. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
-| `?` | help overlay (↑/↓ scroll, any other key closes) |
+| `?` | help overlay (↑/↓ scroll, `e` edits the keys, any other key closes). In the key editor ↑/↓ pick an action, `Enter` then the new key sets it, `Backspace` goes back to the built-in key and `Esc` leaves; a key another action already has is refused. Changes are written to `[keys]` in the config file at once (`*` marks a changed action) |
 | `o` | Spotify library browser (`--spotify`, see below) |
 | `f` | like / unlike the song playing (`♥` / `♡` beside the title) |
 | `H` | play here: move Spotify playback from the phone / another device to this PC |
@@ -225,7 +239,7 @@ The volume control follows the player: changes made elsewhere (media keys, the S
 
 ## Remapping keys
 
-The `[keys]` section of `config.toml` changes the keys of the main view, one line per action: `action = "key"`, or a list of keys. It has to come after every other setting in the file (a TOML section runs to the end of the file).
+The quickest way is the key editor in the help overlay (`?`, then `e`), which writes this section for you. By hand, the `[keys]` section of `config.toml` changes the keys of the main view, one line per action: `action = "key"`, or a list of keys. It has to come after every other setting in the file (a TOML section runs to the end of the file).
 
 ```toml
 [keys]
@@ -237,7 +251,7 @@ big_scale = "2"                # unshifted keys work on any layout
 
 **Key syntax.** One character (`"n"`, `"T"`, `"["`, `"+"`; case matters, `"T"` is a capital T), or a name: `space`, `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`, `home`, `end`, `f1` … `f12`. Modifiers (`ctrl+x`, `alt+x`, `shift+x`) are not supported: the key handler ignores Ctrl and Alt, so use the plain key, a capital for Shift.
 
-**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `translate_both` (`k`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
+**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `karaoke` (`a`), `next_lyrics` (`L`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `translate_both` (`k`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
 
 **Rules.**
 - An entry **replaces** that action's default keys. An action you don't mention keeps its keys.

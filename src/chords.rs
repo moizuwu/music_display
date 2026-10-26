@@ -692,12 +692,25 @@ impl Aligned {
         (self.matched * 100).checked_div(self.total).unwrap_or(0) as u32
     }
     /// Below this the chords would more often be wrong than right, so none are shown.
+    #[cfg(test)]
     pub fn usable(&self) -> bool {
-        self.total > 0 && self.matched * 100 >= self.total * 40
+        self.usable_at(DEFAULT_MATCH)
+    }
+    /// [`usable`](Self::usable) with your own limit (`chords_match`, percent of the lines).
+    pub fn usable_at(&self, min_pct: u32) -> bool {
+        self.total > 0 && self.matched * 100 >= self.total * min_pct as usize
     }
 }
 
+/// The share of lyric lines (percent) that must match the sheet for its chords to be shown.
+pub const DEFAULT_MATCH: u32 = 40;
+
+#[cfg(test)]
 pub fn align(sheet: &Sheet, lyrics: &[(f64, String)]) -> Aligned {
+    align_with(sheet, lyrics, DEFAULT_MATCH)
+}
+
+pub fn align_with(sheet: &Sheet, lyrics: &[(f64, String)], min_pct: u32) -> Aligned {
     let sung: Vec<(usize, String)> = sheet
         .lines
         .iter()
@@ -778,7 +791,7 @@ pub fn align(sheet: &Sheet, lyrics: &[(f64, String)]) -> Aligned {
             .map(|l| l.chords.iter().map(|c| c.1.clone()).collect())
             .collect();
     }
-    if !out.usable() {
+    if !out.usable_at(min_pct) {
         for l in &mut out.per_line {
             l.clear();
         }

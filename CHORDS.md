@@ -65,13 +65,17 @@ A file needs at least 4 recognisable chords to be used.
 Unofficial: UG has no public API, so this reads the JSON embedded in its pages and can break
 when the site changes. It is built to fail softly.
 
-- At most 1 search + 3 page requests per song, and only for songs not already cached.
+- At most 2 searches ("artist title", then the title alone when nothing matched) and 3 page
+  requests per search, and only for songs not already cached. A request that fails in a way that
+  can pass (no connection, 429, 5xx) is repeated once after a short pause; a page that still
+  won't load does not end the lookup, the next candidate is tried.
 - Only "Chords" pages whose artist and title match are considered, ranked by rating × ln(votes).
   Pages with fewer than 8 recognisable chords are rejected.
 - Found sheets are cached for good in `~/.cache/music_display/chords-ug-*.json` (readable
-  ChordPro). "No sheet" is cached 7 days. Errors are never cached.
-- Three failures in a row (blocked, captcha, changed page) switch UG off until restart. The
-  footer says why; local sheets and cached songs keep working.
+  ChordPro). "No sheet" is cached 2 days. Errors are never cached, and neither is a song whose
+  pages would not load.
+- Three failures in a row (blocked, captcha, changed page) switch UG off for 10 minutes, then it
+  tries again. The footer says why; local sheets and cached songs keep working.
 - It sends a browser-like User-Agent because UG rejects unknown ones. Using it is at your own
   risk with respect to their terms of service, which is why it is opt-in.
 
@@ -134,7 +138,7 @@ sus4 and power chords on all 12 roots; anything else (dim, aug, 9ths, slash chor
 | `found, but there are no synced lyrics…` | lrclib has no synced lyrics for the track |
 | `HTTP 403 from ultimate-guitar` | UG blocked the request; wait, or use local sheets |
 | `page format not recognised` | UG changed its page or served a captcha; run `--chords-probe` |
-| `switched off after repeated failures` | three failures in a row; restart to retry |
+| `switched off after repeated failures` | three failures in a row; it tries again after 10 minutes |
 
 Diagnose a song:
 

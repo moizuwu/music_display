@@ -235,6 +235,35 @@ fn keep_skipped(cfg: &Cfg, detected: Option<String>, translated: String, origina
 /// list is in use ([`is_held`]): those make no per-line requests at all.
 ///
 /// With a skip list the song's language is asked once, from a sample, before any line is sent.
+/// Where a finished translation is kept: one file per (language, never-translate list,
+/// lines), so another lyrics version or a changed list never reads an old answer.
+fn cache_file(lang: &str, skip: &[String], src: &[String]) -> std::path::PathBuf {
+    let key = crate::util::fnv1a(&format!("{lang}\0{}\0{}", skip.join(","), src.join("\n")));
+    crate::util::cache_dir().join(format!("translation-{key:016x}.json"))
+}
+
+/// A translation saved by [`store`], with the service that made it.
+pub async fn cached(lang: &str, skip: &[String], src: &[String]) -> Option<(Vec<String>, &'static str)> {
+    read_cache(&cache_file(lang, skip, src), src.len()).await
+}
+
+/// Keep a translation (`cache_translations`): the next time the song plays it costs no request.
+pub async fn store(lang: &str, skip: &[String], src: &[String], lines: &[String], backend: &str) {
+    write_cache(&cache_file(lang, skip, src), lines, backend).await;
+}
+
+pub async fn read_cache(path: &std::path::Path, n: usize) -> Option<(Vec<String>, &'static str)> {
+    let txt = tokio::fs::read_to_string(path).await.ok()?;
+    let v: Value = serde_json::from_str(&txt).ok()?;
+    let lines: Vec<String> = v["lines"].as_array()?.iter().map(|l| l.as_str().unwrap_or("").to_string()).collect();
+    let backend = if v["backend"].as_str() == Some("libretranslate") { "libretranslate" } else { "google" };
+    (lines.len() == n).then_some((lines, backend))
+}
+
+pub async fn write_cache(path: &std::path::Path, lines: &[String], backend: &str) {
+    let _ = tokio::fs::write(path, json!({ "backend": backend, "lines": lines }).to_string()).await;
+}
+
 pub async fn lines(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -> Result<(Vec<String>, &'static str), String> {
     // legacy codes (`iw`, `zh-CN`) in the list meet the codes the services answer with
     let skip: Vec<String> = cfg.skip.iter().map(|s| base_code(s)).filter(|s| !s.is_empty()).collect();

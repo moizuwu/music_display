@@ -504,11 +504,53 @@ fn ultimate_guitar_provider_with_fake_site() {
 
     // no matching chord page → NotFound (and cached as such)
     let empty = ug_page(&serde_json::json!({"store":{"page":{"data":{"results":[]}}}}));
-    let (base4, _) = fake_site(vec![("search.php", 200, empty)]);
+    let (base4, _) = fake_site(vec![("search.php", 200, empty.clone())]);
     ug::reset_breaker();
     let o = rt.block_on(ug::lookup(&client, &base4, "Nobody", "Truly Unknown Song"));
     assert!(matches!(o, ug::Outcome::NotFound));
     let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a("Nobody\0Truly Unknown Song"))));
+    ug::reset_breaker();
+
+    // not found under "artist title": the title alone is searched too
+    let cache = |a: &str, t: &str| util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{a}\0{t}"))));
+    let (artist, title) = ("Simon & Garfunkel", "The Sound of Silence");
+    let (b5, hits5) = fake_site(vec![
+        ("value=Simon", 200, empty.clone()),
+        ("chords-4", 200, page(tab)),
+        ("search.php", 200, ug_page(&search)),
+    ]);
+    let _ = std::fs::remove_file(cache(artist, title));
+    let o = rt.block_on(ug::lookup(&client, &b5, artist, title));
+    assert!(matches!(o, ug::Outcome::Found(_)), "found by the second search");
+    assert_eq!(hits5.load(std::sync::atomic::Ordering::SeqCst), 3, "empty search, title search, one tab page");
+    let _ = std::fs::remove_file(cache(artist, title));
+
+    // a tab page that will not load does not end the lookup: the next candidate is tried
+    let (b6, _) = fake_site(vec![
+        ("chords-4", 500, String::new()),
+        ("chords-3", 200, page(tab)),
+        ("search.php", 200, ug_page(&search)),
+    ]);
+    ug::reset_breaker();
+    let o = rt.block_on(ug::lookup(&client, &b6, artist, title));
+    assert!(matches!(o, ug::Outcome::Found(_)), "second page used after the first failed");
+    let _ = std::fs::remove_file(cache(artist, title));
+
+    // every page failing is an error and is not remembered as "not found"
+    let (b7, _) = fake_site(vec![("chords-", 500, String::new()), ("search.php", 200, ug_page(&search))]);
+    ug::reset_breaker();
+    let o = rt.block_on(ug::lookup(&client, &b7, artist, title));
+    assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("500")));
+    assert!(!cache(artist, title).exists(), "nothing cached after errors");
+
+    // the provider rests after three blocks in a row, then tries again
+    ug::reset_breaker();
+    for i in 0..3 {
+        let _ = rt.block_on(ug::lookup(&client, &base2, "Nobody", &format!("Blocked Again {i}")));
+    }
+    assert!(ug::disabled());
+    ug::set_last_fail(util::now_secs() - 601);
+    assert!(!ug::disabled(), "ten minutes later it is on again");
     ug::reset_breaker();
 }
 
@@ -854,6 +896,7 @@ fn member_tag_shows_above_the_big_line_and_never_overlaps() {
             in_break: false,
             members,
             reserve_tag: reserve,
+            progress: None,
         };
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         let mut hits = Vec::new();
@@ -930,6 +973,7 @@ fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
         in_break,
         members: &[],
         reserve_tag: false,
+        progress: None,
     };
     let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
     let area = Rect::new(0, 0, 40, 24);
@@ -2045,6 +2089,7 @@ fn chords_sit_above_their_glyphs_in_the_big_layout() {
         in_break: false,
         members: &[],
         reserve_tag: false,
+        progress: None,
     };
     let (w, h) = (40u16, 12u16);
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -3326,3 +3371,159 @@ async fn lyric_click_needs_the_text_not_the_blank_space_beside_it() {
 
 // `[keys]` in config.toml: src/tests/keys_tests.rs
 mod keys_tests;
+
+// ── karaoke: word-by-word highlight ────────────────────────────────────
+
+#[test]
+fn karaoke_progress_is_a_guess_from_the_line_times() {
+    // a 20-character line is sung in ~2 s (est_sung); the next line is 3 s away
+    let text = "twenty characters!!!";
+    assert_eq!(ui::line_progress(10.0, 10.0, Some(13.0), text), 0.0);
+    assert_eq!(ui::line_progress(9.0, 10.0, Some(13.0), text), 0.0, "before it starts");
+    let half = ui::line_progress(11.0, 10.0, Some(13.0), text);
+    assert!(half > 0.3 && half < 0.45, "{half}");
+    assert_eq!(ui::line_progress(12.8, 10.0, Some(13.0), text), 1.0, "lit before the next line");
+    // a long silence after the line is not filled slowly
+    assert_eq!(ui::line_progress(13.0, 10.0, Some(60.0), text), 1.0);
+    // the last line has no next one
+    assert_eq!(ui::line_progress(30.0, 10.0, None, text), 1.0);
+}
+
+#[test]
+fn lyrics_with_word_times_lose_the_tags() {
+    let l = lyrics::parse_lrc("[00:01.00]<00:01.00>Hello <00:01.50>world\n[00:03.00]a < b > c\n");
+    assert_eq!(l[0].1, "Hello world");
+    assert_eq!(l[1].1, "a < b > c", "not a time: kept");
+}
+
+#[test]
+fn karaoke_colours_the_sung_part_of_the_big_line() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let args = <cli::Args as clap::Parser>::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    let lines: Vec<String> = vec!["HI TO".to_string()];
+    let fc = |progress| ui::Focus {
+        lines: &lines,
+        current: Some(0),
+        gap: 0,
+        scale: 1,
+        chords: None,
+        tr: 0,
+        flats: false,
+        context: 99,
+        in_break: false,
+        members: &[],
+        reserve_tag: false,
+        progress,
+    };
+    let (w, h) = (40u16, 12u16);
+    // the foreground colours of the glyph cells on the stage, left to right
+    let colours = |progress| {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| { ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc(progress)); }).unwrap();
+        let b = term.backend().buffer();
+        let y = (0..h).find(|y| (0..w).any(|x| "█▀▄".contains(b[(x, *y)].symbol()))).unwrap();
+        (0..w)
+            .filter(|x| "█▀▄".contains(b[(*x, y)].symbol()))
+            .map(|x| b[(x, y)].fg)
+            .collect::<Vec<_>>()
+    };
+    let plain = colours(None);
+    assert!(plain.iter().all(|c| *c == plain[0]), "one colour without karaoke");
+    let half = colours(Some(0.5));
+    assert_ne!(half.first(), half.last(), "sung part and the rest differ");
+    assert_eq!(half.first(), plain.first(), "the sung part keeps the line colour");
+    let none = colours(Some(0.0));
+    assert!(none.iter().all(|c| *c == none[0]) && none[0] != plain[0], "nothing sung yet: all dim");
+    let all = colours(Some(1.0));
+    assert!(all.iter().all(|c| *c == plain[0]), "all sung: all lit");
+}
+
+#[test]
+fn karaoke_splits_rows_by_characters_not_bytes() {
+    // 안녕 하세요: 4 non-space characters, 2 lit -> cut after 녕 (multibyte)
+    assert_eq!(ui::split_lit_for_test("안녕 하세요", 2), ("안녕", " 하세요"));
+    assert_eq!(ui::split_lit_for_test("ab cd", 0), ("", "ab cd"));
+    assert_eq!(ui::split_lit_for_test("ab cd", 4), ("ab cd", ""));
+}
+
+#[tokio::test]
+async fn translations_round_trip_through_the_cache_file() {
+    let path = std::env::temp_dir().join(format!("md-translation-{}.json", std::process::id()));
+    let lines = vec!["hello".to_string(), "".to_string(), "tack".to_string()];
+    translate::write_cache(&path, &lines, "libretranslate").await;
+    assert_eq!(translate::read_cache(&path, 3).await, Some((lines.clone(), "libretranslate")));
+    // a cache made for another number of lines (other lyrics version) is not used
+    assert_eq!(translate::read_cache(&path, 4).await, None);
+    assert_eq!(translate::read_cache(&path.with_extension("missing"), 3).await, None);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn window_title_follows_the_setting_and_drops_control_characters() {
+    let mut app = test_app();
+    app.snap = Some(snap("Band", "Song\x1b]0;evil\x07", ""));
+    assert_eq!(app.window_title(), None, "off by default");
+    app.args.window_title = "title".into();
+    assert_eq!(app.window_title().as_deref(), Some("Song]0;evil"));
+    app.args.window_title = "artist-title".into();
+    assert_eq!(app.window_title().as_deref(), Some("Band – Song]0;evil"));
+    app.snap = None;
+    assert_eq!(app.window_title(), None, "nothing playing");
+}
+
+#[test]
+fn chord_match_threshold_decides_which_sheets_show() {
+    let sheet = chords::parse_chordpro("{title: T}\n[Am]Hello darkness my old friend\n[G]I've come to talk with you again\n[C]Because a vision softly creeping\n[F]Left its seeds while I was sleeping\n");
+    // only two of the four sheet lines are in these lyrics: 50 %
+    let l = vec![(1.0, "Hello darkness my old friend".to_string()), (5.0, "I've come to talk with you again".to_string()), (9.0, "something else entirely".to_string()), (12.0, "and something more".to_string())];
+    let a = chords::align_with(&sheet, &l, 40);
+    assert!(a.usable_at(40) && !a.usable_at(60));
+    let strict = chords::align_with(&sheet, &l, 60);
+    assert!(strict.per_line.iter().all(Vec::is_empty), "below the limit no chords are kept");
+    assert!(!chords::align_with(&sheet, &l, 0).per_line.iter().all(Vec::is_empty));
+}
+
+#[test]
+fn the_help_overlay_edits_keys_and_saves_them() {
+    use crossterm::event::KeyCode as K;
+    let dir = std::env::temp_dir().join(format!("md-help-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, "player = \"any\"\n").unwrap();
+    let mut app = test_app();
+    app.args.config = Some(cfg.clone());
+    app.handle(key(K::Char('?')));
+    assert!(app.show_help);
+    app.handle(key(K::Char('e')));
+    assert!(app.help_edit.is_some(), "e opens the key editor");
+    let row = app.keys.actions().iter().position(|a| *a == app::Action::Karaoke).unwrap();
+    for _ in 0..row {
+        app.handle(key(K::Down));
+    }
+    // Enter, then the new key
+    app.handle(key(K::Enter));
+    assert!(app.help_edit.as_ref().unwrap().capture);
+    app.handle(key(K::Char('y')));
+    assert_eq!(app.keys.action_for(K::Char('y')), Some(app::Action::Karaoke));
+    assert_eq!(app.keys.action_for(K::Char('a')), None, "the old key is gone");
+    let saved: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(saved["keys"]["karaoke"].as_array().unwrap()[0].as_str(), Some("y"));
+    assert_eq!(saved["player"].as_str(), Some("any"), "the other settings stay");
+    // a key that another action has is refused and nothing changes
+    app.handle(key(K::Enter));
+    app.handle(key(K::Char('n')));
+    assert!(app.help_edit.as_ref().unwrap().note.as_deref().unwrap().contains("already used"));
+    assert_eq!(app.keys.action_for(K::Char('n')), Some(app::Action::Next));
+    // Backspace goes back to the built-in key and drops the line
+    app.handle(key(K::Backspace));
+    assert_eq!(app.keys.action_for(K::Char('a')), Some(app::Action::Karaoke));
+    let saved: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert!(saved["keys"].as_table().unwrap().get("karaoke").is_none());
+    // Esc leaves the editor, the help is still open; another key closes it
+    app.handle(key(K::Esc));
+    assert!(app.help_edit.is_none() && app.show_help);
+    app.handle(key(K::Char('x')));
+    assert!(!app.show_help);
+    let _ = std::fs::remove_dir_all(&dir);
+}

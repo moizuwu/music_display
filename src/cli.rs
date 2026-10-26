@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "music_display",
-    version,
+    version = env!("MD_VERSION"),
     about = "Terminal now-playing display with synced lyrics, cover art and cava"
 )]
 pub struct Args {
@@ -74,11 +74,31 @@ pub struct Args {
     #[arg(long)]
     pub big_lyrics: bool,
 
+    /// Put the song in the terminal window's title: off, title, or artist-title
+    /// [config: window_title]
+    #[arg(long, default_value = "off", value_parser = ["off", "title", "artist-title"], value_name = "MODE")]
+    pub window_title: String,
+
+    /// Do not keep finished translations on disk (by default a song is translated once and
+    /// then read from the cache folder) [config: cache_translations = false]
+    #[arg(long)]
+    pub no_cache_translations: bool,
+
+    /// Light up the active lyric line word by word while it is sung (toggle with `a`). lrclib
+    /// only has line times, so the progress inside a line is a guess [config: karaoke]
+    #[arg(long)]
+    pub karaoke: bool,
+
     /// Show guitar chords above the lyrics (toggle with `g`). Sheets are read from
     /// --chords-dir as `Artist - Title.cho` (ChordPro) or `.txt` (chords over lyrics)
     /// [config: chords]
     #[arg(long)]
     pub chords: bool,
+
+    /// How many percent of the lyric lines must match a chord sheet before its chords are
+    /// shown (lower shows weaker matches, 0 always) [config: chords_match]
+    #[arg(long, default_value_t = crate::chords::DEFAULT_MATCH, value_parser = clap::value_parser!(u32).range(0..=100), value_name = "PERCENT")]
+    pub chords_match: u32,
 
     /// Folder with your chord sheets [default: ~/.local/share/music_display/chords] [config: chords_dir]
     #[arg(long, value_name = "DIR")]
