@@ -180,14 +180,24 @@ pub struct Args {
     #[arg(long, value_name = "ID")]
     pub spotify_client_id: Option<String>,
 
-    /// Spotify Connect name of spotifyd on this PC (its `device_name`) [config: spotify_device]
-    #[arg(long, default_value = "Desktop (spotifyd)", value_name = "NAME")]
+    /// Spotify Connect name of spotifyd on this PC (its `device_name`); empty = only the Spotify
+    /// app on this computer counts as "this PC" [config: spotify_device]
+    #[arg(long, default_value = "", value_name = "NAME")]
     pub spotify_device: String,
 
     /// spotifyd is the player on this PC (set it up once with --setup); off = whatever
     /// MPRIS player or device is playing [config: use_spotifyd]
     #[arg(long)]
     pub use_spotifyd: bool,
+
+    /// Hide the library button at the top left (it is only shown while Spotify is on; open the
+    /// library with `o` instead) [config: spotify_button = false]
+    #[arg(long)]
+    pub no_spotify_button: bool,
+
+    /// Hide the Queue tab of the library browser [config: spotify_queue_tab = false]
+    #[arg(long)]
+    pub no_spotify_queue_tab: bool,
 
     /// Log in to Spotify in the browser, save the token and exit [no config key]
     #[arg(long)]

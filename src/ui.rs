@@ -32,20 +32,130 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(f, app);
     }
-    if app.lib.open {
+    // (as a side panel it was already drawn as part of the layout)
+    if app.lib.open && !app.lib.hits.panel {
         draw_library(f, app);
+    }
+    if app.devices.is_some() {
+        draw_devices(f, app);
     }
     if app.show_settings {
         draw_settings(f, app);
     }
 }
 
-/// `o`: tabs, the list (scrolled to the selection), and a hint / note line.
-fn draw_library(f: &mut Frame, app: &mut App) {
-    use crate::app::TABS;
+/// `d`: where Spotify can play (this PC marked), the active one with a ▶.
+fn draw_devices(f: &mut Frame, app: &mut App) {
     use ratatui::widgets::Clear;
     let area = f.area();
     let th = app.theme.clone();
+    let Some(d) = &mut app.devices else { return };
+    let w = area.width.min(60);
+    let h = area.height.min((d.items.len().max(1) as u16 + 5).clamp(8, 20));
+    let r = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    d.area = r;
+    d.rows.clear();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(th.primary()))
+        .title(Span::styled(
+            " devices ",
+            Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::new().bg(th.surface()).fg(th.text()));
+    let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, r);
+    if inner.height < 3 {
+        return;
+    }
+    let dim = Style::new().fg(th.fade(0.45));
+    let width = inner.width as usize;
+    let list = Rect { height: inner.height - 1, ..inner };
+    let view_h = list.height as usize;
+    if d.sel < d.top {
+        d.top = d.sel;
+    } else if d.sel >= d.top + view_h.max(1) {
+        d.top = d.sel + 1 - view_h.max(1);
+    }
+    let lines: Vec<Line> = if d.loading {
+        vec![Line::styled("Loading…", dim)]
+    } else if let Some(e) = &d.error {
+        vec![Line::styled(e.clone(), dim)]
+    } else if d.items.is_empty() {
+        vec![
+            Line::styled("No Spotify devices found.", dim),
+            Line::styled("Open Spotify on a device, or start spotifyd.", dim),
+        ]
+    } else {
+        d.items
+            .iter()
+            .enumerate()
+            .skip(d.top)
+            .take(view_h)
+            .map(|(i, dev)| {
+                let sel = i == d.sel;
+                let style = if sel {
+                    Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+                } else if dev.restricted {
+                    dim
+                } else {
+                    Style::new().fg(th.text())
+                };
+                let mut tags = vec![dev.kind.to_lowercase()];
+                if dev.local {
+                    tags.push("this PC".into());
+                }
+                if dev.restricted {
+                    tags.push("restricted".into());
+                }
+                let tags = tags.join(" · ");
+                let name_room = width.saturating_sub(crate::util::width(&tags).min(width / 2) + 6);
+                let mut name = dev.name.clone();
+                while crate::util::width(&name) > name_room && name.pop().is_some() {}
+                let tags: String = tags.chars().take(width.saturating_sub(crate::util::width(&name) + 6)).collect();
+                let pad = width.saturating_sub(crate::util::width(&name) + crate::util::width(&tags) + 4);
+                Line::from(vec![
+                    Span::styled(if sel { "▸ " } else { "  " }, style),
+                    Span::styled(if dev.active { "▶ " } else { "  " }, Style::new().fg(th.primary())),
+                    Span::styled(name, style),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(tags, if sel { style } else { dim }),
+                ])
+            })
+            .collect()
+    };
+    f.render_widget(Paragraph::new(lines), list);
+    if !d.loading && d.error.is_none() {
+        for (n, i) in (d.top..d.items.len()).take(view_h).enumerate() {
+            d.rows.push((Rect { x: list.x, y: list.y + n as u16, width: list.width, height: 1 }, i));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            crate::browser::fit_items(&["↑/↓ select", "enter play here", "r reload", "esc"], width),
+            dim,
+        ))
+        .alignment(Alignment::Center),
+        Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
+    );
+}
+
+/// Terminals at least this wide show the library as a panel beside the player; narrower
+/// ones get the overlay.
+pub const PANEL_MIN_WIDTH: u16 = 110;
+/// Width of the side panel, borders included.
+pub const PANEL_WIDTH: u16 = 44;
+
+/// `o` on a terminal too narrow for the panel: a box over the middle of the screen.
+fn draw_library(f: &mut Frame, app: &mut App) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
     let w = area.width.min(72);
     let h = area.height.min(28);
     let r = Rect {
@@ -55,6 +165,39 @@ fn draw_library(f: &mut Frame, app: &mut App) {
         height: h,
     };
     f.render_widget(Clear, r);
+    draw_library_box(f, app, r);
+    // the overlay covers (part of) the button: what is hidden can't be clicked
+    if r.intersects(app.lib.hits.button) {
+        app.lib.hits.button = Rect::default();
+    }
+}
+
+/// The toggle button at the top left: shortened, never cut, and gone when nothing fits.
+fn draw_library_button(f: &mut Frame, app: &mut App, strip: Rect) {
+    let th = app.theme.clone();
+    let label = [("[ library ]", 11u16), ("[ lib ]", 7), ("[≡]", 3)]
+        .into_iter()
+        .find(|(_, w)| *w <= strip.width);
+    let Some((text, w)) = label else { return };
+    let style = if app.lib.open {
+        Style::new().fg(th.surface()).bg(th.primary()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(th.primary())
+    };
+    let r = Rect { width: w, height: 1, ..strip };
+    f.render_widget(Paragraph::new(Span::styled(text, style)), r);
+    app.lib.hits.button = r;
+}
+
+/// The browser itself in `r` (overlay or side panel): tabs, the list scrolled to the selection,
+/// and a hint / note line. Records what can be clicked in `app.lib.hits`.
+fn draw_library_box(f: &mut Frame, app: &mut App, r: Rect) {
+    use crate::app::TABS;
+    let th = app.theme.clone();
+    app.lib.hits.area = r;
+    app.lib.hits.tabs.clear();
+    app.lib.hits.rows.clear();
+    app.lib.hits.field = Rect::default();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(th.primary()))
@@ -72,18 +215,37 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     let sel_style = Style::new().fg(th.primary()).add_modifier(Modifier::BOLD);
     let width = inner.width as usize;
 
-    // tabs
+    // tabs: full names, or short ones when they don't fit (never a name cut in the middle)
+    let shown = app.lib.visible_tabs();
+    let total = |names: &[&str; 7], sep: usize| {
+        shown.iter().map(|i| crate::util::width(names[*i])).sum::<usize>() + sep * (shown.len() - 1)
+    };
+    let names: [&str; 7] = if total(&TABS, 3) <= width {
+        TABS
+    } else {
+        crate::browser::TABS_SHORT
+    };
+    let sep = if total(&names, 3) <= width { 3 } else { 1 };
     let mut tabs: Vec<Span> = Vec::new();
-    for (i, t) in TABS.iter().enumerate() {
-        if i > 0 {
-            tabs.push(Span::styled(" · ", dim));
+    let mut x = 0usize;
+    for (n, i) in shown.iter().enumerate() {
+        if n > 0 {
+            tabs.push(Span::styled(if sep == 3 { " · " } else { " " }, dim));
+            x += sep;
         }
-        let style = if i == app.lib.tab { sel_style.add_modifier(Modifier::UNDERLINED) } else { Style::new().fg(th.text()) };
-        tabs.push(Span::styled(*t, style));
+        let style = if *i == app.lib.tab { sel_style.add_modifier(Modifier::UNDERLINED) } else { Style::new().fg(th.text()) };
+        let tw = crate::util::width(names[*i]);
+        // a name that doesn't fit whole is neither drawn nor clickable
+        if x + tw <= width {
+            app.lib.hits.tabs.push((Rect { x: inner.x + x as u16, y: inner.y, width: tw as u16, height: 1 }, *i));
+            tabs.push(Span::styled(names[*i], style));
+        }
+        x += tw;
     }
     f.render_widget(Paragraph::new(Line::from(tabs)), Rect { height: 1, ..inner });
 
-    // where we are: tab › album…, or the playlist picker
+    // where we are: tab › album…, the playlist picker, or the search field
+    let searching = app.lib.tab == crate::browser::TAB_SEARCH && app.lib.stack.is_empty() && app.lib.picker.is_none();
     let crumbs = match &app.lib.picker {
         Some((_, _, l)) => l.title.clone(),
         None => std::iter::once(TABS[app.lib.tab].to_string())
@@ -91,13 +253,35 @@ fn draw_library(f: &mut Frame, app: &mut App) {
             .collect::<Vec<_>>()
             .join(" › "),
     };
-    let summary = app.lib.level().summary.clone();
+    // cached rows stay on screen while the list is fetched again in the background
+    let summary = match app.lib.level() {
+        l if l.loading && !l.items.is_empty() => "refreshing…".to_string(),
+        l => l.summary.clone(),
+    };
+    if searching {
+        app.lib.hits.field = Rect { y: inner.y + 1, height: 1, ..inner };
+    }
+    // in a narrow box the field matters more than the result count
+    let summary = if searching && width < 36 { String::new() } else { summary };
     let room = width.saturating_sub(crate::util::width(&summary) + 2);
+    let (crumbs, crumb_style) = if searching {
+        let shown = if app.lib.editing {
+            format!("Search: {}", app.lib.input.shown())
+        } else if app.lib.query.is_empty() {
+            "Search: (press / to type)".to_string()
+        } else {
+            format!("Search: {}", app.lib.query)
+        };
+        let style = if app.lib.editing { Style::new().fg(th.text()).add_modifier(Modifier::BOLD) } else { dim };
+        (shown, style)
+    } else {
+        (crumbs, Style::new().fg(th.accent_fade(0.2)))
+    };
     let crumbs: String = crumbs.chars().take(room).collect();
     let pad = width.saturating_sub(crate::util::width(&crumbs) + crate::util::width(&summary));
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(crumbs, Style::new().fg(th.accent_fade(0.2))),
+            Span::styled(crumbs, crumb_style),
             Span::raw(" ".repeat(pad)),
             Span::styled(summary, dim),
         ])),
@@ -109,31 +293,52 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     let view_h = list.height as usize;
     let liked_uri = app.liked_uri.clone();
     let l = app.lib.level_mut();
-    if l.sel < l.top {
-        l.top = l.sel;
-    } else if l.sel >= l.top + view_h.max(1) {
-        l.top = l.sel + 1 - view_h.max(1);
-    }
-    let empty = if l.loading {
+    let rows = l.scroll(view_h);
+    // a new search keeps the old results (dimmed) until the new ones arrive
+    let stale = l.search && l.loading && !l.items.is_empty();
+    let empty = if l.loading && l.items.is_empty() {
         Some("Loading…".to_string())
-    } else if let Some(e) = &l.error {
+    } else if let (Some(e), true) = (&l.error, l.items.is_empty()) {
         Some(e.clone())
     } else if l.items.is_empty() {
-        Some("Nothing here".to_string())
+        Some(if l.search { "Type a search and press Enter" } else { "Nothing here" }.to_string())
     } else {
         None
     };
+    // what can be clicked is exactly the item rows drawn now
+    let mut row_hits: Vec<(Rect, usize)> = Vec::new();
+    if empty.is_none() {
+        for (n, row) in rows.iter().skip(l.top).take(view_h).enumerate() {
+            if let crate::browser::ListRow::Item(i) = row {
+                row_hits.push((Rect { x: list.x, y: list.y + n as u16, width: list.width, height: 1 }, *i));
+            }
+        }
+    }
     let lines: Vec<Line> = match empty {
         Some(msg) => vec![Line::styled(msg, dim)],
-        None => l
-            .items
+        None => rows
             .iter()
-            .enumerate()
             .skip(l.top)
             .take(view_h)
-            .map(|(i, it)| {
+            .map(|row| {
+                let i = match row {
+                    crate::browser::ListRow::Head(h) => {
+                        return Line::styled(
+                            format!("── {h} "),
+                            Style::new().fg(th.accent_fade(0.2)).add_modifier(Modifier::BOLD),
+                        );
+                    }
+                    crate::browser::ListRow::Item(i) => *i,
+                };
+                let it = &l.items[i];
                 let sel = i == l.sel;
-                let style = if sel { sel_style } else { Style::new().fg(th.text()) };
+                let style = if stale {
+                    dim
+                } else if sel {
+                    sel_style
+                } else {
+                    Style::new().fg(th.text())
+                };
                 let mut sub = it.sub.clone();
                 if it.kind == "track" && it.duration > 0.0 {
                     let d = it.duration.round() as u64;
@@ -157,24 +362,31 @@ fn draw_library(f: &mut Frame, app: &mut App) {
             .collect(),
     };
     f.render_widget(Paragraph::new(lines), list);
+    app.lib.hits.rows = row_hits;
 
-    let hint = match (&app.lib.note, &app.lib.picker) {
-        (Some(n), _) => ellipsize(n, width),
-        (None, Some(_)) => fit_hints(&[(1, "enter add"), (1, "esc back")], width),
+    let hint = match (&app.lib.note, &app.lib.picker, app.lib.editing) {
+        (_, _, true) => fit_hints(&[(1, "type"), (1, "enter search"), (1, "esc back")], width),
+        (Some(n), _, _) => ellipsize(n, width),
+        (None, Some(_), _) => fit_hints(&[(1, "enter add"), (1, "esc back")], width),
         // lowest number = kept longest
-        (None, None) => fit_hints(
-            &[
-                (3, "tab/1-5"),
+        (None, None, _) => {
+            let tabs = if app.lib.queue_tab { "tab/1-7" } else { "tab/1-6" };
+            let mut items: Vec<(u8, &str)> = vec![
                 (1, "enter play"),
+                (3, tabs),
                 (2, "→/← open/back"),
+                (3, "/ search"),
                 (4, "a queue"),
                 (4, "A add"),
                 (5, "f like"),
-                (5, "r reload"),
-                (1, "esc"),
-            ],
-            width,
-        ),
+                (4, "d devices"),
+            ];
+            if app.lib.queue_tab {
+                items.push((5, "Q queue tab"));
+            }
+            items.extend([(5, "r reload"), (1, "esc")]);
+            fit_hints(&items, width)
+        }
     };
     f.render_widget(
         Paragraph::new(Line::styled(hint, dim)).alignment(Alignment::Center),
@@ -231,13 +443,13 @@ pub fn ellipsize(text: &str, width: usize) -> String {
 }
 
 fn draw_settings(f: &mut Frame, app: &mut App) {
-    use crate::app::Setting;
+    use crate::app::{Setting, SettingsRow};
     use ratatui::widgets::Clear;
     let area = f.area();
     let th = app.theme.clone();
-    let rows = Setting::ALL.len() as u16;
+    let layout = Setting::rows();
     let w = area.width.min(54);
-    let h = area.height.min(rows + 5);
+    let h = area.height.min(layout.len() as u16 + 5);
     let r = Rect {
         x: area.x + (area.width - w) / 2,
         y: area.y + (area.height - h) / 2,
@@ -256,51 +468,73 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
     let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, r);
     let view_h = inner.height.saturating_sub(1) as usize;
-    // keep the selected row in view on short terminals
-    let sel = app.settings_sel;
+    // keep the selected row in view on short terminals (scrolling counts drawn rows,
+    // headers and the status line included)
+    let sel = layout
+        .iter()
+        .position(|r| *r == SettingsRow::Item(app.settings_sel))
+        .unwrap_or(0);
     if sel < app.settings_top {
         app.settings_top = sel;
+        // show the group header above the first row of a group
+        if sel > 0 && matches!(layout[sel - 1], SettingsRow::Header(_)) {
+            app.settings_top = sel - 1;
+        }
     } else if sel >= app.settings_top + view_h.max(1) {
         app.settings_top = sel + 1 - view_h.max(1);
     }
     let first = app.settings_top;
-    let lines: Vec<Line> = Setting::ALL
+    let width = inner.width as usize;
+    let lines: Vec<Line> = layout
         .iter()
-        .enumerate()
         .skip(first)
         .take(view_h)
-        .map(|(i, s)| {
-            let sel = i == app.settings_sel;
-            let style = if sel {
-                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(th.text())
-            };
-            let mut label = s.label().to_string();
-            if s.needs_restart() {
-                label.push_str(" *");
+        .map(|row| match row {
+            SettingsRow::Header(h) => Line::styled(
+                format!("── {h} "),
+                Style::new().fg(th.accent_fade(0.2)).add_modifier(Modifier::BOLD),
+            ),
+            SettingsRow::Status => {
+                let text: String = format!("  status: {}", app.spotify_status()).chars().take(width).collect();
+                Line::styled(text, Style::new().fg(th.fade(0.45)))
             }
-            let value = app.setting_value(*s);
-            // on a narrow terminal shorten the label so the value stays visible
-            let room = (inner.width as usize).saturating_sub(crate::util::width(&value) + 4);
-            while crate::util::width(&label) > room && label.pop().is_some() {}
-            let pad = (inner.width as usize)
-                .saturating_sub(crate::util::width(&label) + crate::util::width(&value) + 2);
-            Line::from(vec![
-                Span::styled(if sel { "▸ " } else { "  " }, style),
-                Span::styled(label, style),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(value, style),
-            ])
+            SettingsRow::Item(i) => {
+                let s = Setting::ALL[*i];
+                let sel = *i == app.settings_sel;
+                let style = if sel {
+                    Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(th.text())
+                };
+                let mut label = s.label().to_string();
+                if s.needs_restart() {
+                    label.push_str(" *");
+                }
+                let value = app.setting_value(s);
+                // on a narrow terminal shorten the label so the value stays visible
+                let room = width.saturating_sub(crate::util::width(&value) + 4);
+                while crate::util::width(&label) > room && label.pop().is_some() {}
+                let pad = width.saturating_sub(crate::util::width(&label) + crate::util::width(&value) + 2);
+                Line::from(vec![
+                    Span::styled(if sel { "▸ " } else { "  " }, style),
+                    Span::styled(label, style),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(value, style),
+                ])
+            }
         })
         .collect();
     f.render_widget(Paragraph::new(lines), Rect { height: view_h as u16, ..inner });
     if inner.height == 0 {
         return;
     }
-    let hint = match &app.settings_note {
-        Some(n) => n.chars().take(inner.width as usize).collect(),
-        None => "↑/↓ select · space/←/→ change · * restart · esc".to_string(),
+    let hint = match (&app.settings_note, &app.settings_edit) {
+        (Some(n), _) => n.chars().take(inner.width as usize).collect(),
+        (None, Some(_)) => crate::browser::fit_items(&["type", "enter save", "esc cancel"], width),
+        (None, None) => crate::browser::fit_items(
+            &["↑/↓ select", "space/←/→ change", "enter edit / run", "* restart", "esc"],
+            width,
+        ),
     };
     f.render_widget(
         Paragraph::new(Line::styled(hint, Style::new().fg(th.fade(0.45)))).alignment(Alignment::Center),
@@ -431,14 +665,31 @@ fn draw_main(f: &mut Frame, app: &mut App) {
         );
     }
 
-    let [main, footer] =
+    let [mut main, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     app.lyric_hits = Default::default();
+    app.lib.hits = Default::default();
 
+    // the minimal view has no room for a button or a panel: the browser is an overlay there
     if app.minimal {
         draw_minimal(f, app, main);
         draw_footer(f, app, footer);
         return;
+    }
+
+    // Spotify: a one-row strip with the library button, and the browser as a panel on the
+    // left when the terminal is wide enough (the player keeps the rest of the width)
+    if app.spot.is_some() && !app.args.no_spotify_button && main.height >= 10 {
+        let [strip, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(main);
+        draw_library_button(f, app, strip);
+        main = rest;
+    }
+    if app.lib.open && area.width >= PANEL_MIN_WIDTH {
+        let [panel, rest] =
+            Layout::horizontal([Constraint::Length(PANEL_WIDTH), Constraint::Min(0)]).areas(main);
+        app.lib.hits.panel = true;
+        draw_library_box(f, app, panel);
+        main = rest;
     }
 
     // ── column layout ──

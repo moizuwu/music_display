@@ -48,6 +48,7 @@ pub enum Action {
     Library,
     Like,
     PlayHere,
+    Devices,
     BrowseUp,
     BrowseDown,
     BrowsePageUp,
@@ -117,79 +118,23 @@ pub const BINDS: &[Bind] = &[
     bind!("Spotify", "o", "library: playlists, liked, albums…", [KeyCode::Char('o')], Library),
     bind!("Spotify", "f", "like / unlike this song", [KeyCode::Char('f')], Like),
     bind!("Spotify", "H", "play here (move to this PC)", [KeyCode::Char('H')], PlayHere),
+    bind!("Spotify", "d", "choose a Spotify device", [KeyCode::Char('d')], Devices),
 ];
 
 /// Keys inside the library browser (documented in the help and the README).
 pub const LIBRARY_KEYS: &[(&str, &str)] = &[
-    ("Tab / 1-5", "switch tab"),
+    ("Tab / 1-7", "switch tab (6 search, 7 queue)"),
+    ("Q", "the queue: now playing, next up"),
+    ("/", "search (Enter runs it)"),
     ("Enter", "play"),
     ("→ / ←", "open / back"),
     ("a / A", "queue / add to playlist"),
     ("f / r", "like / reload"),
+    ("d", "choose a device"),
 ];
 
-/// The library browser's tabs, in order.
-pub const TABS: [&str; 5] = ["Recent", "Playlists", "Liked", "Albums", "Artists"];
-const TAB_LIKED: usize = 2;
-const TAB_PLAYLISTS: usize = 1;
-
-/// One list in the library browser: a tab, or an album / playlist / artist opened from one.
-#[derive(Default)]
-pub struct Level {
-    pub title: String,
-    /// The context its tracks play in (`liked` for Liked Songs).
-    pub uri: String,
-    pub summary: String,
-    pub items: Vec<spotify::Item>,
-    pub loaded: bool,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub sel: usize,
-    pub top: usize,
-}
-
-/// `o`: the Spotify library browser.
-#[derive(Default)]
-pub struct Library {
-    pub open: bool,
-    pub tab: usize,
-    pub tabs: Vec<Level>,
-    /// Albums / playlists / artists opened from the tab, innermost last.
-    pub stack: Vec<Level>,
-    /// "Add to playlist": the track (uri, name) and the list of your own playlists.
-    pub picker: Option<(String, String, Level)>,
-    pub note: Option<String>,
-}
-
-impl Library {
-    fn new() -> Self {
-        let tabs = TABS
-            .iter()
-            .enumerate()
-            .map(|(i, t)| Level {
-                title: t.to_string(),
-                uri: if i == TAB_LIKED { "liked".into() } else { String::new() },
-                ..Default::default()
-            })
-            .collect();
-        Library { tabs, ..Default::default() }
-    }
-
-    /// The list on screen.
-    pub fn level(&self) -> &Level {
-        match &self.picker {
-            Some((_, _, l)) => l,
-            None => self.stack.last().unwrap_or(&self.tabs[self.tab]),
-        }
-    }
-
-    pub fn level_mut(&mut self) -> &mut Level {
-        match &mut self.picker {
-            Some((_, _, l)) => l,
-            None => self.stack.last_mut().unwrap_or(&mut self.tabs[self.tab]),
-        }
-    }
-}
+pub use crate::browser::{Level, Library, TABS};
+use crate::browser::{DevicePicker, Edit, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TextInput};
 
 /// Mouse gestures (they are hit-tested where they are drawn, so this is documentation
 /// kept next to the table): (group, gesture, what it does).
@@ -295,9 +240,54 @@ pub enum Setting {
     HideColorWarning,
     Mouse,
     VolumeStep,
+    SpotifyOn,
+    SpotifyClientId,
+    SpotifyLogin,
+    SpotifyLogout,
+    SpotifyDevice,
+    SpotifyButton,
+    SpotifyQueueTab,
+}
+
+/// What the settings menu draws, top to bottom: group headers, the Spotify status line, and
+/// the rows themselves (`Item` is an index into [`Setting::ALL`]; only those are selectable).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingsRow {
+    Header(&'static str),
+    Status,
+    Item(usize),
 }
 
 impl Setting {
+    /// The group this row starts, if it is the first of one.
+    pub fn header(self) -> Option<&'static str> {
+        match self {
+            Setting::Player => Some("General"),
+            Setting::SpotifyOn => Some("Spotify"),
+            _ => None,
+        }
+    }
+
+    /// The menu laid out for drawing (headers and the status line between the rows).
+    pub fn rows() -> Vec<SettingsRow> {
+        let mut out = Vec::new();
+        for (i, s) in Setting::ALL.iter().enumerate() {
+            if let Some(h) = s.header() {
+                out.push(SettingsRow::Header(h));
+                if *s == Setting::SpotifyOn {
+                    out.push(SettingsRow::Status);
+                }
+            }
+            out.push(SettingsRow::Item(i));
+        }
+        out
+    }
+
+    /// Edited as text (Enter starts typing).
+    pub fn is_text(self) -> bool {
+        matches!(self, Setting::SpotifyClientId | Setting::SpotifyDevice)
+    }
+
     pub const ALL: &'static [Setting] = &[
         Setting::Player,
         Setting::Chords,
@@ -320,6 +310,13 @@ impl Setting {
         Setting::HideColorWarning,
         Setting::Mouse,
         Setting::VolumeStep,
+        Setting::SpotifyOn,
+        Setting::SpotifyClientId,
+        Setting::SpotifyLogin,
+        Setting::SpotifyLogout,
+        Setting::SpotifyDevice,
+        Setting::SpotifyButton,
+        Setting::SpotifyQueueTab,
     ];
 
     pub fn label(self) -> &'static str {
@@ -345,6 +342,13 @@ impl Setting {
             Setting::HideColorWarning => "Hide colour-file note",
             Setting::Mouse => "Mouse support",
             Setting::VolumeStep => "Volume step %",
+            Setting::SpotifyOn => "Spotify features",
+            Setting::SpotifyClientId => "Client ID",
+            Setting::SpotifyLogin => "Log in",
+            Setting::SpotifyLogout => "Log out",
+            Setting::SpotifyDevice => "spotifyd device name",
+            Setting::SpotifyButton => "Library button (top left)",
+            Setting::SpotifyQueueTab => "Queue tab in the library",
         }
     }
 
@@ -372,6 +376,12 @@ impl Setting {
             Setting::HideColorWarning => &["hide_color_warning"],
             Setting::Mouse => &["mouse"],
             Setting::VolumeStep => &["volume_step"],
+            Setting::SpotifyOn => &["spotify"],
+            Setting::SpotifyClientId => &["spotify_client_id"],
+            Setting::SpotifyLogin | Setting::SpotifyLogout => &[],
+            Setting::SpotifyDevice => &["spotify_device"],
+            Setting::SpotifyButton => &["spotify_button"],
+            Setting::SpotifyQueueTab => &["spotify_queue_tab"],
         }
     }
 
@@ -527,6 +537,17 @@ pub struct App {
     /// A short message in the footer (a Spotify command finished or failed).
     pub note: Option<(String, Instant)>,
     pub lib: Library,
+    /// The task polling `/me/player` while Spotify is on.
+    spot_task: Option<JoinHandle<()>>,
+    /// The browser login started from the settings menu, and what it says.
+    login_task: Option<JoinHandle<()>>,
+    login_msg: Option<String>,
+    /// A settings row being typed into.
+    pub settings_edit: Option<(Setting, TextInput)>,
+    /// `d`: the device picker, while it is open.
+    pub devices: Option<DevicePicker>,
+    /// The background load of the main lists after Spotify came on.
+    preload_task: Option<JoinHandle<()>>,
 }
 
 impl App {
@@ -623,14 +644,14 @@ impl App {
             spot_status: None,
             note: None,
             lib: Library::new(),
+            spot_task: None,
+            login_task: None,
+            login_msg: None,
+            settings_edit: None,
+            devices: None,
+            preload_task: None,
         };
-        if app.args.spotify {
-            let id = app.args.spotify_client_id.clone().unwrap_or_default();
-            app.spot = Some(spotify::Api::new(app.client.clone(), &id, &app.args.spotify_device));
-            if !spotify::logged_in() {
-                app.spot_status = Some("not logged in: run music_display --spotify-login".into());
-            }
-        }
+        app.sync_queue_tab();
         app.translate_on = app.args.translate;
         app.vol_step = app.args.volume_step;
         if app.args.cava || app.args.thirdpanel || app.args.underlyrics {
@@ -1339,12 +1360,55 @@ impl App {
             Setting::HideColorWarning => onoff(self.args.hide_color_warning),
             Setting::Mouse => onoff(!self.args.no_mouse),
             Setting::VolumeStep => format!("< {} >", self.vol_step),
+            Setting::SpotifyOn => onoff(self.spot.is_some()),
+            Setting::SpotifyClientId => match &self.settings_edit {
+                Some((Setting::SpotifyClientId, input)) => input.shown(),
+                // not a secret, but only the start of it is shown
+                _ => match self.args.spotify_client_id.as_deref().filter(|c| !c.is_empty()) {
+                    Some(id) => format!("{}…", id.chars().take(6).collect::<String>()),
+                    None => "not set".into(),
+                },
+            },
+            Setting::SpotifyLogin => match self.login_task {
+                Some(_) => "waiting… (enter cancels)".into(),
+                None => String::new(),
+            },
+            Setting::SpotifyLogout => String::new(),
+            Setting::SpotifyDevice => match &self.settings_edit {
+                Some((Setting::SpotifyDevice, input)) => input.shown(),
+                _ if self.args.spotify_device.is_empty() => "none".into(),
+                _ => self.args.spotify_device.clone(),
+            },
+            Setting::SpotifyButton => onoff(!self.args.no_spotify_button),
+            Setting::SpotifyQueueTab => onoff(!self.args.no_spotify_queue_tab),
+        }
+    }
+
+    /// The status line under the "Spotify" header.
+    pub fn spotify_status(&self) -> String {
+        if let Some(m) = &self.login_msg {
+            return m.clone();
+        }
+        let token = spotify::logged_in();
+        if self.spot.is_none() {
+            return if token { "off · logged in".into() } else { "off · not logged in".into() };
+        }
+        match &self.spot_status {
+            Some(e) if e.starts_with("not logged in") => "not logged in".into(),
+            Some(e) if e.starts_with("login failed") => "token expired: log in again".into(),
+            Some(e) => e.clone(),
+            None if token => "logged in".into(),
+            None => "not logged in".into(),
         }
     }
 
     /// Change a setting (`dir` = -1 / +1 for the stepped ones; toggles ignore it) and
     /// write the new values to the config file.
     pub fn change_setting(&mut self, s: Setting, dir: i32) {
+        // actions and text rows answer Enter / space / → only, never ←
+        if dir < 0 && (s.is_text() || matches!(s, Setting::SpotifyLogin | Setting::SpotifyLogout)) {
+            return;
+        }
         match s {
             Setting::Player => {
                 let mut all: Vec<String> = player::PRESETS.iter().map(|p| p.to_string()).collect();
@@ -1422,7 +1486,50 @@ impl App {
                 self.vol_step = (self.vol_step as i32 + dir).clamp(1, 50) as u32;
                 self.args.volume_step = self.vol_step;
             }
+            Setting::SpotifyOn => {
+                if self.spot.is_some() {
+                    self.stop_spotify();
+                } else {
+                    self.args.spotify = true;
+                    self.start_spotify();
+                }
+            }
+            Setting::SpotifyClientId => {
+                let cur = self.args.spotify_client_id.clone().unwrap_or_default();
+                self.settings_edit = Some((s, TextInput::with(&cur)));
+                return; // saved when Enter commits the text
+            }
+            Setting::SpotifyDevice => {
+                self.settings_edit = Some((s, TextInput::with(&self.args.spotify_device.clone())));
+                return;
+            }
+            Setting::SpotifyLogin => self.toggle_login(),
+            Setting::SpotifyLogout => self.logout_spotify(),
+            Setting::SpotifyButton => self.args.no_spotify_button = !self.args.no_spotify_button,
+            Setting::SpotifyQueueTab => {
+                self.args.no_spotify_queue_tab = !self.args.no_spotify_queue_tab;
+                self.sync_queue_tab();
+            }
         }
+        self.save_settings(s);
+    }
+
+    /// Enter on a text row: store what was typed.
+    fn commit_setting_text(&mut self, s: Setting, text: &str) {
+        let text = text.trim();
+        match s {
+            Setting::SpotifyClientId => {
+                if !text.is_empty() && !text.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    self.settings_note = Some("that doesn't look like a Client ID".into());
+                    return;
+                }
+                self.args.spotify_client_id = (!text.is_empty()).then(|| text.to_string());
+            }
+            Setting::SpotifyDevice => self.args.spotify_device = text.to_string(),
+            _ => return,
+        }
+        // the running client keeps the old name / ID until it is rebuilt
+        self.restart_spotify();
         self.save_settings(s);
     }
 
@@ -1456,7 +1563,14 @@ impl App {
             ("transparent", B(self.args.transparent)),
             ("mouse", B(!self.args.no_mouse)),
             ("volume_step", I(self.vol_step as i64)),
+            ("spotify", B(self.args.spotify)),
+            ("spotify_device", S(self.args.spotify_device.clone())),
+            ("spotify_button", B(!self.args.no_spotify_button)),
+            ("spotify_queue_tab", B(!self.args.no_spotify_queue_tab)),
         ]
+        .into_iter()
+        .chain(self.args.spotify_client_id.clone().map(|id| ("spotify_client_id", S(id))))
+        .collect()
     }
 
     /// Write only the setting that changed, so flags given for this run (`--minimal`…)
@@ -1464,6 +1578,9 @@ impl App {
     fn save_settings(&mut self, s: Setting) {
         let path = self.args.config.clone().unwrap_or_else(config::default_path);
         let keys = s.config_keys();
+        if keys.is_empty() {
+            return; // an action row (log in / out): nothing to write
+        }
         let values: Vec<_> = self.settings_values().into_iter().filter(|(k, _)| keys.contains(k)).collect();
         self.settings_note = config::save(&path, &values)
             .err()
@@ -1471,6 +1588,15 @@ impl App {
     }
 
     fn handle_settings_key(&mut self, code: KeyCode) {
+        // typing into a row: every key is text until Enter or Esc
+        if let Some((s, mut input)) = self.settings_edit.take() {
+            match input.key(code) {
+                Some(Edit::Submit) => self.commit_setting_text(s, &input.text),
+                Some(Edit::Cancel) => {}
+                None => self.settings_edit = Some((s, input)),
+            }
+            return;
+        }
         let n = Setting::ALL.len();
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.settings_sel = (self.settings_sel + n - 1) % n,
@@ -1539,9 +1665,16 @@ impl App {
                     self.handle_settings_key(k.code);
                     return false;
                 }
-                if self.lib.open {
-                    self.handle_library_key(k.code);
+                if self.devices.is_some() {
+                    self.handle_devices_key(k.code);
                     return false;
+                }
+                if self.lib.open {
+                    let used = self.handle_library_key(k.code);
+                    // beside the side panel the player's own keys keep working
+                    if used || !self.lib.hits.panel {
+                        return false;
+                    }
                 }
                 if self.show_help {
                     // Help is open: arrows / paging scroll it, any other key closes it.
@@ -1563,11 +1696,15 @@ impl App {
                 }
             }
             Event::Mouse(_) if self.show_settings => {}
-            Event::Mouse(m) if self.lib.open => match m.kind {
-                MouseEventKind::ScrollUp => self.handle_library_key(KeyCode::Up),
-                MouseEventKind::ScrollDown => self.handle_library_key(KeyCode::Down),
-                _ => {}
-            },
+            Event::Mouse(m) if self.devices.is_some() => self.devices_mouse(m),
+            // the toggle button works whether the browser is open or not
+            Event::Mouse(m)
+                if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+                    && self.lib.hits.button.contains(Position::new(m.column, m.row)) =>
+            {
+                self.toggle_library();
+            }
+            Event::Mouse(m) if self.lib.open && self.library_mouse(m) => {}
             Event::Mouse(m) if self.show_help => match m.kind {
                 MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(2),
                 MouseEventKind::ScrollDown => self.help_scroll += 2,
@@ -1688,10 +1825,16 @@ impl App {
             Action::BrowsePageDown => self.browse_by(8.0),
             Action::BrowseEnd => self.browse = 0.0,
             Action::Translate => self.toggle_translate(),
-            Action::Settings => self.show_settings = true,
+            Action::Settings => {
+                self.show_settings = true;
+                if self.login_task.is_none() {
+                    self.login_msg = None; // an old result isn't news any more
+                }
+            }
             Action::Library => self.open_library(),
             Action::Like => self.toggle_like(),
             Action::PlayHere => self.spot_cmd(spotify::Cmd::Transfer),
+            Action::Devices => self.open_devices(),
             Action::Help => {
                 self.show_help = true;
                 self.help_scroll = 0;
@@ -1858,11 +2001,107 @@ impl App {
     fn api(&mut self) -> Option<spotify::Api> {
         match &self.spot {
             None => {
-                self.set_note("Spotify is off: start with --spotify (or spotify = true)");
+                self.set_note("Spotify is off: turn it on in Settings (s), or start with --spotify");
                 None
             }
             Some(api) => Some(api.clone()),
         }
+    }
+
+    /// Build the client and start polling `/me/player`, when `spotify` is on and it isn't
+    /// running yet. Nothing at all happens (no request, no task) while it is off.
+    pub fn start_spotify(&mut self) {
+        if !self.args.spotify || self.spot.is_some() {
+            return;
+        }
+        let id = self.args.spotify_client_id.clone().unwrap_or_default();
+        let api = spotify::Api::new(self.client.clone(), &id, &self.args.spotify_device);
+        api.mpris.store(self.mpris_present, std::sync::atomic::Ordering::Relaxed);
+        self.spot_status = (!spotify::logged_in())
+            .then(|| "not logged in: Settings (s) › Log in, or run music_display --spotify-login".to_string());
+        // the poller only runs in the real program: tests drive the client by hand
+        #[cfg(not(test))]
+        {
+            self.spot_task = Some(tokio::spawn(api.clone().remote_loop(self.tx.clone())));
+        }
+        self.spot = Some(api);
+        // logged in: the lists start loading now, so they are there when the browser opens
+        #[cfg(not(test))]
+        if self.preload_wanted() {
+            self.start_preload();
+        }
+        self.dirty = true;
+    }
+
+    /// The background load only makes sense once Spotify is on and there is a token.
+    pub fn preload_wanted(&self) -> bool {
+        self.spot.is_some() && spotify::logged_in()
+    }
+
+    /// Turn Spotify off: stop the poller, forget what it showed, close the browser.
+    pub fn stop_spotify(&mut self) {
+        if let Some(t) = self.spot_task.take() {
+            t.abort();
+        }
+        if let Some(t) = self.preload_task.take() {
+            t.abort();
+        }
+        self.spot = None;
+        self.args.spotify = false;
+        self.spot_status = None;
+        self.remote = None;
+        if self.remote_active() {
+            self.snap = None;
+            self.track_key = 0;
+        }
+        self.liked = None;
+        self.liked_uri.clear();
+        self.lib = Library::new();
+        self.sync_queue_tab();
+        self.dirty = true;
+    }
+
+    /// Rebuild the client (new Client ID, device name, token).
+    fn restart_spotify(&mut self) {
+        if self.spot.is_some() {
+            self.stop_spotify();
+            self.args.spotify = true;
+            self.start_spotify();
+        }
+    }
+
+    /// "Log in": open the browser login without blocking the UI; pressing it again cancels.
+    fn toggle_login(&mut self) {
+        if let Some(t) = self.login_task.take() {
+            t.abort();
+            self.login_msg = Some("login cancelled".into());
+            return;
+        }
+        let id = self.args.spotify_client_id.clone().unwrap_or_default();
+        if id.is_empty() {
+            self.settings_note = Some("set the Client ID first (README › Spotify)".into());
+            return;
+        }
+        self.login_msg = Some("waiting for the browser…".into());
+        let tx = self.tx.clone();
+        self.login_task = Some(tokio::spawn(async move {
+            use spotify::{LoginMsg, Reply};
+            let said = tx.clone();
+            let say = move |step| {
+                let _ = said.send(AppEvent::Spotify(Reply::Login(LoginMsg::Step(step))));
+            };
+            let r = spotify::login(&id, &say).await.map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::Spotify(Reply::Login(LoginMsg::Done(r))));
+        }));
+    }
+
+    fn logout_spotify(&mut self) {
+        if let Some(t) = self.login_task.take() {
+            t.abort();
+        }
+        let was = spotify::logout();
+        self.login_msg = Some(if was { "logged out" } else { "not logged in" }.into());
+        self.restart_spotify();
     }
 
     /// Run a command in the background; the result comes back as a note.
@@ -1941,10 +2180,33 @@ impl App {
     }
 
     fn on_spotify(&mut self, r: spotify::Reply) {
-        use spotify::Reply;
+        use spotify::{LoginMsg, LoginStep, Reply};
         self.dirty = true;
+        // answers of a client that was switched off in the meantime
+        if self.spot.is_none() && !matches!(r, Reply::Login(_)) {
+            return;
+        }
         match r {
-            Reply::Remote(Err(e)) => self.spot_status = Some(e),
+            Reply::Login(LoginMsg::Step(LoginStep::Opened(false))) => {
+                self.login_msg = Some("browser didn't open: run music_display --spotify-login".into());
+            }
+            Reply::Login(LoginMsg::Step(_)) => {}
+            Reply::Login(LoginMsg::Done(res)) => {
+                self.login_task = None;
+                self.login_msg = res.err();
+                self.settings_note = None;
+                if self.login_msg.is_none() {
+                    // a fresh client reads the new token
+                    self.restart_spotify();
+                }
+            }
+            Reply::Remote(Err(e)) => {
+                // the poller runs every second or two: only what needs a word goes to the footer
+                if e.starts_with("Spotify ") {
+                    self.set_note(e.clone());
+                }
+                self.spot_status = Some(e);
+            }
             Reply::Remote(Ok(r)) => {
                 self.spot_status = None;
                 self.remote = r.map(|r| (*r, Instant::now()));
@@ -1976,22 +2238,49 @@ impl App {
                 self.set_note(e);
             }
             Reply::Tab(i, res) => {
+                let failed = res.as_ref().err().cloned();
                 let l = &mut self.lib.tabs[i];
                 l.loading = false;
                 match res {
                     Ok(items) => {
                         l.items = items;
                         l.loaded = true;
+                        l.fetched = Some(Instant::now());
                         l.error = None;
                         l.sel = l.sel.min(l.items.len().saturating_sub(1));
                     }
+                    // what was cached stays on screen; the footer says why it didn't refresh
                     Err(e) => l.error = Some(e),
                 }
                 if i == TAB_PLAYLISTS {
                     self.fill_picker();
                 }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Queue(res) => {
+                let failed = res.as_ref().err().map(|e| format!("Queue unavailable: {e}"));
+                let l = &mut self.lib.tabs[TAB_QUEUE];
+                l.loading = false;
+                match res {
+                    Ok((items, has_now)) => {
+                        l.heads = if has_now { vec![(0, "Now playing"), (1, "Next up")] } else { vec![(0, "Next up")] };
+                        l.summary = format!("{} next", items.len().saturating_sub(has_now as usize));
+                        l.items = items;
+                        l.loaded = true;
+                        l.fetched = Some(Instant::now());
+                        l.error = None;
+                        l.sel = l.sel.min(l.items.len().saturating_sub(1));
+                    }
+                    Err(_) => l.error = failed.clone(),
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
             }
             Reply::Opened { uri, result } => {
+                let failed = result.as_ref().err().cloned();
                 let Some(l) = self.lib.stack.iter_mut().rev().find(|l| l.uri == uri && l.loading) else {
                     return;
                 };
@@ -2004,8 +2293,88 @@ impl App {
                     }
                     Err(e) => l.error = Some(e),
                 }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Search { q, result } => {
+                if q != self.lib.query {
+                    return; // an older search that finished late
+                }
+                let failed = result.as_ref().err().cloned();
+                let l = &mut self.lib.tabs[TAB_SEARCH];
+                l.loading = false;
+                match result {
+                    Ok(items) => {
+                        l.summary = format!("{} results", items.len());
+                        l.items = items;
+                        l.loaded = true;
+                        l.error = None;
+                        l.sel = 0;
+                        l.top = 0;
+                    }
+                    Err(e) => l.error = Some(e),
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Devices(res) => {
+                let Some(d) = &mut self.devices else { return };
+                d.loading = false;
+                let failed = res.as_ref().err().cloned();
+                match res {
+                    Ok(items) => {
+                        // start on the device playing now
+                        d.sel = items.iter().position(|x| x.active).unwrap_or(0);
+                        d.items = items;
+                        d.error = None;
+                    }
+                    Err(e) => d.error = Some(e),
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
             }
         }
+    }
+
+    // ── device picker (d) ──────────────────────────────────────────────
+
+    fn open_devices(&mut self) {
+        let Some(api) = self.api() else { return };
+        self.devices = Some(DevicePicker { loading: true, ..Default::default() });
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let r = api.devices_list().await.map_err(|e| e.msg);
+            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Devices(r)));
+        });
+    }
+
+    fn handle_devices_key(&mut self, code: KeyCode) {
+        let Some(d) = &mut self.devices else { return };
+        let last = d.items.len().saturating_sub(1);
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => d.sel = d.sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => d.sel = (d.sel + 1).min(last),
+            KeyCode::Home => d.sel = 0,
+            KeyCode::End => d.sel = last,
+            KeyCode::Char('r') => self.open_devices(),
+            KeyCode::Esc | KeyCode::Char('q' | 'd') => self.devices = None,
+            KeyCode::Enter | KeyCode::Char(' ') => self.choose_device(),
+            _ => {}
+        }
+    }
+
+    /// Enter in the picker: move playback there (a device Spotify won't let apps control says so).
+    fn choose_device(&mut self) {
+        let Some(dev) = self.devices.as_ref().and_then(|d| d.items.get(d.sel)).cloned() else { return };
+        if dev.restricted {
+            self.set_note(format!("{} is restricted by Spotify: it can't be controlled from here", dev.name));
+            return;
+        }
+        self.devices = None;
+        self.spot_cmd(spotify::Cmd::TransferTo { id: dev.id, name: dev.name });
     }
 
     // ── library browser ────────────────────────────────────────────────
@@ -2014,14 +2383,108 @@ impl App {
         if self.api().is_none() {
             return;
         }
+        self.sync_queue_tab();
         self.lib.open = true;
         self.lib.note = self.spot_status.clone();
+        // what is cached shows at once; a stale list is refreshed in the background
         self.load_tab(self.lib.tab, false);
+        self.start_search_typing();
     }
 
+    fn close_library(&mut self) {
+        self.lib.open = false;
+        self.lib.editing = false;
+    }
+
+    /// The button and the mouse toggle the browser like `o` does.
+    fn toggle_library(&mut self) {
+        if self.lib.open {
+            self.close_library();
+        } else {
+            self.open_library();
+        }
+    }
+
+    /// The Queue tab follows the `spotify_queue_tab` setting.
+    fn sync_queue_tab(&mut self) {
+        self.lib.queue_tab = !self.args.no_spotify_queue_tab;
+        if !self.lib.queue_tab && self.lib.tab == TAB_QUEUE {
+            self.lib.tab = 0;
+            self.lib.stack.clear();
+        }
+    }
+
+    /// Load the lists you are most likely to open (one after the other, never in a burst, and
+    /// never before Spotify's Retry-After has run out) so they are in memory when the browser
+    /// opens. Only runs once Spotify is on and logged in; nothing is written to disk.
+    pub fn start_preload(&mut self) {
+        let Some(api) = self.spot.clone() else { return };
+        if let Some(t) = self.preload_task.take() {
+            t.abort();
+        }
+        let tabs: Vec<usize> = [0usize, 1, 3, 4]
+            .into_iter()
+            .filter(|i| !self.lib.tabs[*i].loading && !self.lib.tabs[*i].fresh(browser::FRESH))
+            .collect();
+        for i in &tabs {
+            self.lib.tabs[*i].loading = true;
+        }
+        let tx = self.tx.clone();
+        self.preload_task = Some(tokio::spawn(async move {
+            for i in tabs {
+                if let Some(left) = api.paused_for() {
+                    tokio::time::sleep(left).await;
+                }
+                let r = match i {
+                    0 => api.recent().await,
+                    1 => api.playlists().await,
+                    3 => api.albums().await,
+                    _ => api.artists().await,
+                };
+                if tx.send(AppEvent::Spotify(spotify::Reply::Tab(i, r.map_err(|e| e.msg)))).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }));
+    }
+
+    /// On the Search tab with nothing searched yet, the field is ready for typing.
+    fn start_search_typing(&mut self) {
+        if self.lib.tab == TAB_SEARCH && self.lib.stack.is_empty() && self.lib.query.is_empty() {
+            self.lib.editing = true;
+        }
+    }
+
+    /// Run the search typed in the field (results replace the old ones when they arrive).
+    fn run_search(&mut self) {
+        self.lib.editing = false;
+        let q = self.lib.input.text.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        let Some(api) = self.spot.clone() else { return };
+        self.lib.query = q.clone();
+        self.lib.stack.clear();
+        let l = &mut self.lib.tabs[TAB_SEARCH];
+        l.loading = true;
+        l.error = None;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = api.search(&q).await.map_err(|e| e.msg);
+            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Search { q, result }));
+        });
+    }
+
+    /// Make sure tab `i` is loaded and fresh. A fresh list costs no request; a stale one keeps
+    /// showing while it is fetched again in the background.
     fn load_tab(&mut self, i: usize, force: bool) {
+        if i == TAB_SEARCH {
+            return; // searches run when asked for
+        }
+        let ttl = if i == TAB_QUEUE { browser::QUEUE_FRESH } else { browser::FRESH };
         let l = &mut self.lib.tabs[i];
-        if l.loading || (l.loaded && !force) {
+        if l.loading || (!force && l.fresh(ttl)) {
             return;
         }
         let Some(api) = self.spot.clone() else { return };
@@ -2029,6 +2492,12 @@ impl App {
         l.error = None;
         let tx = self.tx.clone();
         tokio::spawn(async move {
+            use spotify::Reply;
+            if i == TAB_QUEUE {
+                let r = api.queue_list().await.map_err(|e| e.msg);
+                let _ = tx.send(AppEvent::Spotify(Reply::Queue(r)));
+                return;
+            }
             let r = match i {
                 0 => api.recent().await,
                 1 => api.playlists().await,
@@ -2036,15 +2505,28 @@ impl App {
                 3 => api.albums().await,
                 _ => api.artists().await,
             };
-            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Tab(i, r.map_err(|e| e.msg))));
+            let _ = tx.send(AppEvent::Spotify(Reply::Tab(i, r.map_err(|e| e.msg))));
         });
     }
 
+    /// Tab / Shift-Tab: the next shown tab (the Queue tab may be switched off).
+    fn step_tab(&mut self, dir: i32) {
+        let shown = self.lib.visible_tabs();
+        let at = shown.iter().position(|t| *t == self.lib.tab).unwrap_or(0) as i32;
+        let to = shown[(at + dir).rem_euclid(shown.len() as i32) as usize];
+        self.switch_tab(to);
+    }
+
     fn switch_tab(&mut self, i: usize) {
-        self.lib.tab = i % TABS.len();
+        if !self.lib.visible_tabs().contains(&i) {
+            return;
+        }
+        self.lib.tab = i;
         self.lib.stack.clear();
         self.lib.picker = None;
+        self.lib.editing = false;
         self.load_tab(self.lib.tab, false);
+        self.start_search_typing();
     }
 
     /// Open an album / own playlist / artist / Liked Songs as a new level.
@@ -2076,6 +2558,10 @@ impl App {
                 let kind = l.uri.split(':').nth(1).unwrap_or("liked").to_string();
                 self.open_item(spotify::Item { kind, uri: l.uri, name: l.title, openable: true, ..Default::default() });
             }
+            None if self.lib.tab == TAB_SEARCH => {
+                self.lib.input = TextInput::with(&self.lib.query.clone());
+                self.run_search();
+            }
             None => self.load_tab(self.lib.tab, true),
         }
     }
@@ -2092,7 +2578,10 @@ impl App {
             _ => spotify::Cmd::Play { ctx: it.uri, track: String::new() },
         };
         self.spot_cmd(cmd);
-        self.lib.open = false;
+        // the overlay gets out of the way; the side panel stays beside the player
+        if !self.lib.hits.panel {
+            self.close_library();
+        }
     }
 
     fn selected_track(&mut self) -> Option<spotify::Item> {
@@ -2128,7 +2617,24 @@ impl App {
         self.fill_picker();
     }
 
-    pub fn handle_library_key(&mut self, code: KeyCode) {
+    /// A key for the browser. Returns whether it was used: the side panel leaves the player's
+    /// own keys (volume, next…) working, so those come back as `false`.
+    pub fn handle_library_key(&mut self, code: KeyCode) -> bool {
+        // typing a search: every key is text until Enter (run it) or Esc (leave the field)
+        if self.lib.editing {
+            match code {
+                // Tab isn't text: it moves on (so Tab can walk past an empty Search tab)
+                KeyCode::Tab => self.step_tab(1),
+                KeyCode::BackTab => self.step_tab(-1),
+                _ => match self.lib.input.key(code) {
+                    Some(Edit::Submit) => self.run_search(),
+                    Some(Edit::Cancel) => self.lib.editing = false,
+                    None => {}
+                },
+            }
+            return true;
+        }
+        let mut used = true;
         let n = self.lib.level().items.len();
         let page = 10;
         let move_sel = |l: &mut Level, to: usize| l.sel = to.min(n.saturating_sub(1));
@@ -2154,10 +2660,10 @@ impl App {
             KeyCode::Home => self.lib.level_mut().sel = 0,
             KeyCode::End => move_sel(self.lib.level_mut(), n),
             KeyCode::Esc | KeyCode::Char('q') if self.lib.picker.is_some() => self.lib.picker = None,
-            KeyCode::Esc | KeyCode::Char('q' | 'o') => self.lib.open = false,
+            KeyCode::Esc | KeyCode::Char('q' | 'o') => self.close_library(),
             KeyCode::Enter if self.lib.picker.is_some() => {
-                let Some((track, _, l)) = &self.lib.picker else { return };
-                let Some(pl) = l.items.get(l.sel).cloned() else { return };
+                let Some((track, _, l)) = &self.lib.picker else { return true };
+                let Some(pl) = l.items.get(l.sel).cloned() else { return true };
                 let track = track.clone();
                 self.lib.picker = None;
                 self.spot_cmd(spotify::Cmd::Add { playlist: pl.uri, name: pl.name, track });
@@ -2165,11 +2671,19 @@ impl App {
             _ if self.lib.picker.is_some() => {
                 if code == KeyCode::Char('r') {
                     self.reload_level();
+                } else {
+                    used = false;
                 }
             }
-            KeyCode::Tab => self.switch_tab(self.lib.tab + 1),
-            KeyCode::BackTab => self.switch_tab(self.lib.tab + TABS.len() - 1),
-            KeyCode::Char(c @ '1'..='5') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Tab => self.step_tab(1),
+            KeyCode::BackTab => self.step_tab(-1),
+            KeyCode::Char(c @ '1'..='7') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Char('Q') => self.switch_tab(TAB_QUEUE),
+            KeyCode::Char('/') => {
+                self.switch_tab(TAB_SEARCH);
+                self.lib.editing = true;
+            }
+            KeyCode::Char('d') => self.open_devices(),
             KeyCode::Enter | KeyCode::Char(' ') => self.play_selected(),
             KeyCode::Right | KeyCode::Char('l') => {
                 let l = self.lib.level();
@@ -2200,7 +2714,89 @@ impl App {
                 }
             }
             KeyCode::Char('r') => self.reload_level(),
+            _ => used = false,
+        }
+        used
+    }
+
+    // ── mouse in the browser, the device list and on the button ───────────
+
+    /// A mouse event while the browser is open; returns whether it was used. The overlay takes
+    /// every event (a click outside closes it); the side panel only takes those inside it, so
+    /// the player beside it stays clickable. Click targets are the ones recorded while drawing.
+    fn library_mouse(&mut self, m: crossterm::event::MouseEvent) -> bool {
+        let pos = Position::new(m.column, m.row);
+        let h = self.lib.hits.clone();
+        let inside = h.area.contains(pos);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    if h.panel {
+                        return false;
+                    }
+                    self.close_library();
+                    return true;
+                }
+                if let Some((_, tab)) = h.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                    self.switch_tab(*tab);
+                } else if h.field.contains(pos) {
+                    self.lib.editing = true;
+                } else if let Some((_, item)) = h.rows.iter().find(|(r, _)| r.contains(pos)) {
+                    self.lib.editing = false;
+                    if *item == self.lib.level().sel {
+                        // a click on the selected row is Enter
+                        self.handle_library_key(KeyCode::Enter);
+                    } else {
+                        self.lib.level_mut().sel = *item;
+                    }
+                }
+                true
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
+                let n = self.lib.level().items.len();
+                let l = self.lib.level_mut();
+                l.sel = if m.kind == MouseEventKind::ScrollUp {
+                    l.sel.saturating_sub(3)
+                } else {
+                    (l.sel + 3).min(n.saturating_sub(1))
+                };
+                true
+            }
+            _ => !h.panel || inside,
+        }
+    }
+
+    /// The device list takes every mouse event: click a row to select it, again to choose it,
+    /// click outside to close, wheel to move.
+    fn devices_mouse(&mut self, m: crossterm::event::MouseEvent) {
+        let Some(d) = &mut self.devices else { return };
+        let pos = Position::new(m.column, m.row);
+        let (mut close, mut choose) = (false, false);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !d.area.contains(pos) {
+                    close = true;
+                } else if let Some((_, i)) = d.rows.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    if i == d.sel {
+                        choose = true;
+                    } else {
+                        d.sel = i;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => d.sel = d.sel.saturating_sub(1),
+            MouseEventKind::ScrollDown => d.sel = (d.sel + 1).min(d.items.len().saturating_sub(1)),
             _ => {}
         }
+        if close {
+            self.devices = None;
+        } else if choose {
+            self.choose_device();
+        }
+    }
+
+    /// Part of the layout (panel, button) changed since `before`: the screen needs a clean redraw.
+    pub fn layout_key(&self) -> (bool, bool) {
+        (self.lib.hits.panel, self.lib.hits.button.width > 0)
     }
 }

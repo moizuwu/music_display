@@ -332,7 +332,23 @@ impl Steps for Live {
     }
 
     async fn login(&self, client_id: &str) -> Result<()> {
-        crate::spotify::login(client_id).await
+        // The authorize link carries the Client ID, so it is only shown when the browser
+        // could not be opened (the link is then the way to finish the login).
+        let url = std::sync::Mutex::new(String::new());
+        let say = |step: crate::spotify::LoginStep| match step {
+            crate::spotify::LoginStep::Url(u) => {
+                if let Ok(mut g) = url.lock() {
+                    *g = u;
+                }
+                println!("Finish the Spotify login in your browser (the redirect URI must be exactly {}).", crate::spotify::redirect_uri());
+            }
+            crate::spotify::LoginStep::Opened(true) => {}
+            crate::spotify::LoginStep::Opened(false) => {
+                let u = url.lock().map(|g| g.clone()).unwrap_or_default();
+                println!("The browser could not be opened. Visit:\n\n{u}\n");
+            }
+        };
+        crate::spotify::login(client_id, &say).await
     }
 
     async fn devices(&self, client_id: &str) -> std::result::Result<Vec<(String, bool)>, String> {

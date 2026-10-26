@@ -60,8 +60,10 @@ pub const KEYS: &[Key] = &[
     k!("mouse", Kind::Bool, "no_mouse"),
     k!("spotify", Kind::Bool, "spotify"),
     k!("spotify_client_id", Kind::Str, "spotify_client_id"),
-    k!("spotify_device", Kind::Str, "spotify_device"),
     k!("use_spotifyd", Kind::Bool, "use_spotifyd"),
+    k!("spotify_device", Kind::Text, "spotify_device"),
+    k!("spotify_button", Kind::Bool, "no_spotify_button"),
+    k!("spotify_queue_tab", Kind::Bool, "no_spotify_queue_tab"),
 ];
 
 pub fn default_path() -> PathBuf {
@@ -148,6 +150,8 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "spotify_client_id" => args.spotify_client_id = Some(st()),
         "spotify_device" => args.spotify_device = st(),
         "use_spotifyd" => args.use_spotifyd = b(),
+        "spotify_button" => args.no_spotify_button = !b(),
+        "spotify_queue_tab" => args.no_spotify_queue_tab = !b(),
         _ => {}
     }
 }
@@ -280,5 +284,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     }
     line("spotify_device", q(&args.spotify_device));
     line("use_spotifyd", args.use_spotifyd.to_string());
+    line("spotify_button", (!args.no_spotify_button).to_string());
+    line("spotify_queue_tab", (!args.no_spotify_queue_tab).to_string());
     o
 }

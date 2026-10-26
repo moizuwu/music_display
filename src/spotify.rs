@@ -34,12 +34,19 @@ pub fn redirect_uri() -> String {
 // ── storage ────────────────────────────────────────────────────────────
 
 /// `~/.local/state/music_display/spotify` (the token lives here, mode 600).
+#[cfg(not(test))]
 pub fn dir() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("music_display")
         .join("spotify")
+}
+
+/// Tests never see (or delete) the real token.
+#[cfg(test)]
+pub fn dir() -> PathBuf {
+    std::env::temp_dir().join(format!("music_display-test-{}", std::process::id())).join("spotify")
 }
 
 fn read_json(name: &str) -> Option<Value> {
@@ -181,6 +188,21 @@ pub fn api_error(status: u16, body: &str) -> ApiError {
     ApiError::new(msg, status)
 }
 
+/// What the footer says about a failed request: the cases a person can do something about
+/// get a sentence, anything else is Spotify's own text.
+pub fn explain(status: u16, msg: &str, retry_after: Option<u64>) -> String {
+    match status {
+        429 => match retry_after {
+            Some(n) => format!("Spotify is rate limiting: try again in {n} s"),
+            None => "Spotify is rate limiting: try again in a moment".into(),
+        },
+        403 if msg.to_ascii_uppercase().contains("PREMIUM") => "Spotify Premium is needed for this".into(),
+        403 => format!("Spotify refused it (403): {msg}"),
+        404 if msg == "NO_ACTIVE_DEVICE" => "no active Spotify device: press d to pick one".into(),
+        _ => msg.to_string(),
+    }
+}
+
 async fn post_form(http: &reqwest::Client, fields: &[(&str, &str)]) -> Res<Value> {
     let r = http
         .post(TOKEN_URL)
@@ -212,9 +234,24 @@ fn save_token(tok: &Value, old_refresh: &str, client_id: &str) -> Res<Value> {
 
 // ── login (--spotify-login) ────────────────────────────────────────────
 
+/// What the login tells whoever started it (the command line prints it, the settings menu
+/// shows it), so nothing is ever printed from inside the TUI.
+pub enum LoginStep {
+    /// The authorize link, always sent first.
+    Url(String),
+    /// Whether `xdg-open` could be started.
+    Opened(bool),
+}
+
+/// Login progress for the app: a step, or the end.
+pub enum LoginMsg {
+    Step(LoginStep),
+    Done(Result<(), String>),
+}
+
 /// Browser login with PKCE (no client secret): open the authorize page, catch the redirect
 /// on [`PORT`], swap the code for tokens and save them.
-pub async fn login(client_id: &str) -> anyhow::Result<()> {
+pub async fn login(client_id: &str, say: &(dyn Fn(LoginStep) + Send + Sync)) -> anyhow::Result<()> {
     if client_id.trim().is_empty() {
         anyhow::bail!(
             "no client ID: create an app at https://developer.spotify.com/dashboard, add the redirect URI {} \
@@ -240,13 +277,15 @@ pub async fn login(client_id: &str) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT))
         .await
         .map_err(|e| anyhow::anyhow!("can't listen on 127.0.0.1:{PORT}: {e}"))?;
-    println!("Log in to Spotify in your browser. If it didn't open, visit:\n\n{url}\n");
-    println!("(The app's redirect URI must be exactly {})", redirect_uri());
-    let _ = std::process::Command::new("xdg-open")
+    say(LoginStep::Url(url.to_string()));
+    let opened = std::process::Command::new("xdg-open")
         .arg(url.as_str())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .is_ok();
+    say(LoginStep::Opened(opened));
     let code = match tokio::time::timeout(Duration::from_secs(LOGIN_TIMEOUT), wait_for_code(&listener, &state)).await {
         Ok(r) => r?,
         Err(_) => anyhow::bail!("login timed out"),
@@ -265,12 +304,11 @@ pub async fn login(client_id: &str) -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!(e.msg))?;
     save_token(&tok, "", client_id).map_err(|e| anyhow::anyhow!(e.msg))?;
-    println!("Logged in. The token is in {}", dir().join("token.json").display());
     Ok(())
 }
 
 /// Answer requests on the login port until the one carrying our `state` arrives.
-async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> anyhow::Result<String> {
+pub async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> anyhow::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
@@ -467,6 +505,85 @@ pub fn artist_rows(mut albums: Vec<Value>, mut singles: Vec<Value>) -> (String, 
     (summary, items)
 }
 
+/// One Spotify Connect device from `/me/player/devices`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// Computer, Smartphone, Speaker…
+    pub kind: String,
+    pub active: bool,
+    /// Spotify won't let apps control it.
+    pub restricted: bool,
+    /// The Spotify app on this computer, or spotifyd by the name given in the settings.
+    pub local: bool,
+}
+
+pub fn parse_devices(v: &Value, is_local: impl Fn(&str) -> bool) -> Vec<Device> {
+    v["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d.is_object())
+        .map(|d| Device {
+            id: s(&d["id"]),
+            name: s(&d["name"]),
+            kind: s(&d["type"]),
+            active: d["is_active"].as_bool() == Some(true),
+            restricted: d["is_restricted"].as_bool() == Some(true),
+            local: is_local(&s(&d["name"])),
+        })
+        .collect()
+}
+
+/// `/search` → songs, albums, artists, playlists (in that order, each as Spotify ranks them).
+/// `uid` decides which playlists are yours (only those can be opened).
+pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
+    let list = |key: &str| v[key]["items"].as_array().cloned().unwrap_or_default();
+    let mut out: Vec<Item> = list("tracks").iter().filter_map(track_item).collect();
+    out.extend(list("albums").iter().filter(|a| a.is_object()).map(|a| Item {
+        kind: "album".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: names(&a["artists"]),
+        openable: true,
+        duration: 0.0,
+    }));
+    out.extend(list("artists").iter().filter(|a| a.is_object()).map(|a| Item {
+        kind: "artist".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: "Artist".into(),
+        openable: true,
+        duration: 0.0,
+    }));
+    // playlists may contain nulls (removed or private ones)
+    out.extend(list("playlists").iter().filter(|p| p.is_object()).map(|p| {
+        let own = !uid.is_empty() && s(&p["owner"]["id"]) == uid;
+        let by = Some(s(&p["owner"]["display_name"])).filter(|n| !n.is_empty()).unwrap_or_else(|| "someone else".into());
+        Item {
+            kind: "playlist".into(),
+            uri: s(&p["uri"]),
+            name: s(&p["name"]),
+            sub: if own { "Playlist".into() } else { format!("by {by}") },
+            openable: own,
+            duration: 0.0,
+        }
+    }));
+    out.retain(|i| !i.uri.is_empty() && !i.name.is_empty());
+    out
+}
+
+/// `/me/player/queue` → the song playing now (if any) followed by what is queued next.
+/// The flag says whether the first row is the song playing now.
+pub fn parse_queue(v: &Value) -> (Vec<Item>, bool) {
+    let now = track_item(&v["currently_playing"]);
+    let has_now = now.is_some();
+    let mut out: Vec<Item> = now.into_iter().collect();
+    out.extend(v["queue"].as_array().into_iter().flatten().filter_map(track_item));
+    (out, has_now)
+}
+
 fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()
@@ -493,6 +610,8 @@ pub enum Cmd {
     /// or a single `spotify:track:` URI.
     Play { ctx: String, track: String },
     Transfer,
+    /// Move playback to this device (id, name for the note).
+    TransferTo { id: String, name: String },
     Queue(String),
     Like(String, bool),
     Add { playlist: String, name: String, track: String },
@@ -508,6 +627,14 @@ pub enum Reply {
     Liked { uri: String, liked: bool },
     /// A [`Cmd`] finished: a note to show, or what went wrong.
     Done(Result<String, String>),
+    /// The login started from the settings menu made progress or ended.
+    Login(LoginMsg),
+    /// The queue: rows, and whether the first one is the song playing now.
+    Queue(Result<(Vec<Item>, bool), String>),
+    /// A search finished (`q` is what was asked, so a slow old answer can be dropped).
+    Search { q: String, result: Result<Vec<Item>, String> },
+    /// The device list for the picker.
+    Devices(Result<Vec<Device>, String>),
 }
 
 #[derive(Clone)]
@@ -517,12 +644,16 @@ pub struct Api {
     /// spotifyd's Spotify Connect name.
     daemon: String,
     host: String,
+    /// The API root (a fake server in tests).
+    base: String,
     token: Arc<Mutex<Option<Value>>>,
     me: Arc<Mutex<String>>,
     /// Poll `/me/player` again now (after a command).
     pub wake: Arc<Notify>,
     /// An MPRIS player is showing: poll the API more slowly.
     pub mpris: Arc<AtomicBool>,
+    /// After a 429: no request leaves before this moment (Spotify's `Retry-After`).
+    pause_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Api {
@@ -532,16 +663,56 @@ impl Api {
             client_id: client_id.to_string(),
             daemon: daemon.to_string(),
             host: hostname(),
+            base: API.to_string(),
             token: Arc::new(Mutex::new(None)),
             me: Arc::new(Mutex::new(String::new())),
             wake: Arc::new(Notify::new()),
             mpris: Arc::new(AtomicBool::new(false)),
+            pause_until: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// How much longer Spotify asked us to wait (after a 429), if it still does.
+    pub fn paused_for(&self) -> Option<Duration> {
+        let until = (*self.pause_until.lock().ok()?)?;
+        until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+    }
+
+    /// Spotify said "slow down": nothing is sent for `secs` seconds (5 when it didn't say).
+    fn pause_for(&self, secs: Option<u64>) {
+        if let Ok(mut p) = self.pause_until.lock() {
+            let until = std::time::Instant::now() + Duration::from_secs(secs.unwrap_or(5).clamp(1, 3600));
+            *p = Some(p.map_or(until, |old| old.max(until)));
+        }
+    }
+
+    /// Test hook: talk to a fake server at `base` with a token that never expires, so nothing
+    /// reads the token file or reaches the real service.
+    #[cfg(test)]
+    pub fn with_fake_server(mut self, base: &str) -> Self {
+        self.base = base.trim_end_matches('/').to_string();
+        self.token = Arc::new(Mutex::new(Some(
+            json!({"access_token": "test", "refresh_token": "test", "expires_at": u64::MAX}),
+        )));
+        self
+    }
+
+    /// Test hook: pretend this computer has another host name.
+    #[cfg(test)]
+    pub fn with_host(mut self, host: &str) -> Self {
+        self.host = host.to_string();
+        self
+    }
+
+    /// The device is spotifyd, by the name it was given in the settings. Without one set, no
+    /// device counts as spotifyd (an empty name must never match anything).
+    fn is_daemon(&self, name: &str) -> bool {
+        !self.daemon.is_empty() && name == self.daemon
     }
 
     /// The Spotify app on this computer (Spotify names it after the host) or spotifyd.
     pub fn is_local(&self, name: &str) -> bool {
-        name == self.daemon || (!self.host.is_empty() && name.eq_ignore_ascii_case(&self.host))
+        self.is_daemon(name) || (!self.host.is_empty() && name.eq_ignore_ascii_case(&self.host))
     }
 
     /// A valid access token; refreshed (one at a time) when it ran out.
@@ -571,7 +742,11 @@ impl Api {
 
     /// One request; `None` for an empty answer. `path` may be a full `next` URL.
     async fn call(&self, method: Method, path: &str, query: &[(&str, String)], body: Option<Value>) -> Res<Option<Value>> {
-        let url = if path.starts_with("http") { path.to_string() } else { format!("{API}{path}") };
+        let url = if path.starts_with("http") { path.to_string() } else { format!("{}{path}", self.base) };
+        // inside a Retry-After window nothing is sent at all
+        if let Some(left) = self.paused_for() {
+            return Err(ApiError::new(explain(429, "", Some(left.as_secs() + 1)), 429));
+        }
         let token = self.access_token().await?;
         let mut req = self.http.request(method.clone(), &url).bearer_auth(token).query(query);
         req = match body {
@@ -581,9 +756,18 @@ impl Api {
         };
         let r = req.send().await.map_err(|e| ApiError::new(format!("no connection: {e}"), 0))?;
         let status = r.status().as_u16();
+        let retry_after = r
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let text = r.text().await.unwrap_or_default();
         if status >= 400 {
-            return Err(api_error(status, &text));
+            if status == 429 {
+                self.pause_for(retry_after);
+            }
+            let e = api_error(status, &text);
+            return Err(ApiError::new(explain(status, &e.msg, retry_after), status));
         }
         Ok(serde_json::from_str(&text).ok())
     }
@@ -772,13 +956,45 @@ impl Api {
         Ok(self.get("/me/player/devices", &[]).await?["devices"].as_array().cloned().unwrap_or_default())
     }
 
-    /// Where "this PC" plays: the Spotify app when it is open, else spotifyd.
-    fn local_device<'a>(&self, devs: &'a [Value]) -> Option<&'a Value> {
+    /// The devices for the picker.
+    pub async fn devices_list(&self) -> Res<Vec<Device>> {
+        let v = self.get("/me/player/devices", &[]).await?;
+        Ok(parse_devices(&v, |n| self.is_local(n)))
+    }
+
+    /// Songs, albums, artists and playlists matching `q` (10 of each: the most a development-mode
+    /// app gets).
+    pub async fn search(&self, q: &str) -> Res<Vec<Item>> {
+        let query = [
+            ("q", q.to_string()),
+            ("type", "track,album,artist,playlist".into()),
+            ("limit", "10".into()),
+        ];
+        let v = self.get("/search", &query).await?;
+        // only needed to tell your playlists from the rest; a failure just makes none of them yours
+        let uid = self.me_id().await.unwrap_or_default();
+        Ok(parse_search(&v, &uid))
+    }
+
+    /// Now playing and next up (the first row is the song playing when the flag is set).
+    pub async fn queue_list(&self) -> Res<(Vec<Item>, bool)> {
+        Ok(parse_queue(&self.get("/me/player/queue", &[]).await?))
+    }
+
+    /// Move playback to one device and keep playing.
+    async fn transfer_to(&self, id: &str) -> Res<()> {
+        self.call(Method::PUT, "/me/player", &[], Some(json!({"device_ids": [id], "play": true}))).await?;
+        Ok(())
+    }
+
+    /// Where "this PC" plays: the Spotify app when it is open (named after the host, or any
+    /// device of type "Computer"), else spotifyd when its name is set.
+    pub fn local_device<'a>(&self, devs: &'a [Value]) -> Option<&'a Value> {
         let name = |d: &Value| s(&d["name"]);
         devs.iter()
-            .find(|d| name(d) != self.daemon && self.is_local(&name(d)))
-            .or_else(|| devs.iter().find(|d| s(&d["type"]) == "Computer" && name(d) != self.daemon))
-            .or_else(|| devs.iter().find(|d| name(d) == self.daemon))
+            .find(|d| !self.is_daemon(&name(d)) && self.is_local(&name(d)))
+            .or_else(|| devs.iter().find(|d| s(&d["type"]) == "Computer" && !self.is_daemon(&name(d))))
+            .or_else(|| devs.iter().find(|d| self.is_daemon(&name(d))))
     }
 
     /// Nothing active: pick where to play (this PC, else any device).
@@ -812,7 +1028,7 @@ impl Api {
         let Some(dev) = self.local_device(&devs).map(|d| s(&d["id"])) else {
             return Err(ApiError::new("this PC isn't a Spotify device: start spotifyd or open Spotify", 404));
         };
-        self.call(Method::PUT, "/me/player", &[], Some(json!({"device_ids": [dev], "play": true}))).await?;
+        self.transfer_to(&dev).await?;
         Ok(dev)
     }
 
@@ -885,6 +1101,10 @@ impl Api {
                 self.transfer_here().await?;
                 return Ok("Playing on this PC".into());
             }
+            Cmd::TransferTo { id, name } => {
+                self.transfer_to(&id).await?;
+                return Ok(format!("Playing on {name}"));
+            }
             Cmd::Queue(uri) => {
                 self.player(Method::POST, &format!("{p}/queue"), &[("uri", uri)], None).await?;
                 return Ok("Added to the queue".into());
@@ -920,6 +1140,8 @@ impl Api {
                 Ok(Some(x)) if x.snap.status == Status::Playing => 1500,
                 _ => 3000,
             };
+            // never ask again before Spotify's Retry-After has run out
+            let wait = wait.max(self.paused_for().map_or(0, |d| d.as_millis() as u64 + 100));
             if tx.send(AppEvent::Spotify(Reply::Remote(r.map(|o| o.map(Box::new)).map_err(|e| e.msg)))).is_err() {
                 return;
             }

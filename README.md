@@ -118,8 +118,11 @@ hide_color_warning = false     # hide "(no usable colour file)" in the footer
 mouse = true                   # false = don't capture the mouse
 spotify = false                # Spotify Web API features (see "Spotify" below)
 # spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
-spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as "this PC"
+spotify_device = ""            # only if you run spotifyd: its `device_name` (e.g. "Living Room PC"), so it
+                               # counts as "this PC". Empty = just the Spotify app on this computer
 use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup)
+spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
+spotify_queue_tab = true       # the Queue tab in the library browser
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -163,9 +166,11 @@ use_spotifyd = false           # spotifyd is the player on this PC (set up with 
 | --- | --- |
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
-| `--spotify-device NAME` | Spotify Connect name of spotifyd on this PC (its `device_name`, default `Desktop (spotifyd)`). |
+| `--spotify-device NAME` | only if you run spotifyd: its Spotify Connect name (the `device_name` in its config, say `Living Room PC`), so it counts as "this PC". Default: empty, which matches only the Spotify app on this computer (named after the host name) and devices of type "Computer". |
 | `--use-spotifyd` | spotifyd is the player on this PC; `--setup` turns it on for you (see "Setup (spotifyd)" below). |
 | `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
+| `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
+| `--no-spotify-queue-tab` | hide the Queue tab of the library browser (config `spotify_queue_tab = false`; also in the settings menu). |
 | `--spotify-login` / `--spotify-logout` | log in in the browser and save the token / forget it, then exit. |
 
 ## Keys
@@ -193,12 +198,13 @@ use_spotifyd = false           # spotifyd is the player on this PC (set up with 
 | `0` | back to the sheet's own capo |
 | `D` | chord diagram panel |
 | `M` | minimal teleprompter view |
-| `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
+| `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more, and a **Spotify** group (on / off, Client ID, log in / out, spotifyd name, status). Rows that take text (`Enter` starts typing, `Enter` saves, `Esc` cancels) swallow every key, so `q` and `s` are letters while you type. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `o` | Spotify library browser (`--spotify`, see below) |
 | `f` | like / unlike the song playing (`♥` / `♡` beside the title) |
 | `H` | play here: move Spotify playback from the phone / another device to this PC |
+| `d` | choose a Spotify device (the list of where Spotify can play; `Enter` moves playback there) |
 | `q` / `Esc` | quit |
 
 Mouse: click the progress bar to seek; click `[ shuf ]   [ rep ]   [ prev ]   [ pause ]   [ next ]   [ - ] [ 65% ] [ + ]` (three blank columns between buttons; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
@@ -228,20 +234,27 @@ The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot sh
 
 ## Spotify
 
-With `--spotify` (or `spotify = true`) the app talks to the Spotify Web API itself, no other program or helper needed.
+With `--spotify` (or `spotify = true`, or the switch in the settings menu) the app talks to the Spotify Web API itself, no other program or helper needed. While it is off nothing happens: no request, no extra process, no prompt, and `o` / `f` / `H` only say how to turn it on.
 
 **Setup, once:**
 
 1. Create an app at <https://developer.spotify.com/dashboard> and add the redirect URI `http://127.0.0.1:8897/callback` exactly.
 2. `music_display --spotify-client-id <Client ID> --spotify-login` opens the browser (if it doesn't, the link is printed). After you allow access the token is saved in `~/.local/state/music_display/spotify/token.json` (mode 600), together with the Client ID, so later runs only need `--spotify`. The token refreshes itself; `--spotify-logout` deletes it.
 
-The login uses PKCE: no client secret is needed or stored. In development mode Spotify only lets the users you add under the app's *User Management* log in, so add your own account there if the login is refused. The login waits 3 minutes for the browser; if port 8897 is taken it says so. Until you are logged in, `o` / `f` / `H` show "not logged in: run music_display --spotify-login".
+The login uses PKCE: no API key, no client secret, only the Client ID, which is not secret. In development mode Spotify only lets the users you add under the app's *User Management* log in, so add your own account there if the login is refused. The login waits 3 minutes for the browser; if port 8897 is taken it says so.
 
-**Library browser (`o`).** Tabs: Recent · Playlists · Liked · Albums · Artists.
+**From the settings menu (`s`)** the same thing works without leaving the app: in the **Spotify** group switch *Spotify features* on, open *Client ID* (`Enter`, paste or type it, `Enter`), then *Log in*. The login runs in the background ("waiting for the browser…", pressing it again cancels; if the browser can't be opened it says so and the command line login above prints the link). *Log out* deletes the token. The status line under the group header reads `logged in`, `not logged in`, `token expired: log in again`, `off`, or Spotify's own error. Everything is saved to the config file; the switch takes effect at once, no restart. Until you are logged in, `o` / `f` / `H` say so.
+
+**Is spotifyd your player?** Then put its `device_name` into *spotifyd device name* (`spotify_device`) so that it counts as "this PC" for `H` and the device checks. This is only an example of what to enter; nothing is assumed by default, and with the field empty just the Spotify app on this computer is matched.
+
+**Library browser (`o`, or the `[ library ]` button at the top left).** Tabs: Recent · Playlists · Liked · Albums · Artists · Search · Queue. On a terminal at least 110 columns wide it is a **panel on the left** and the player keeps the rest of the width: the player stays usable beside it: keys the browser doesn't use (`n` / `p`, `+` / `-`, `m`, `z`, `M`…) still reach it, and so do clicks on its buttons and progress bar (the browser keeps `space`, `Enter`, `r`, `f` and `l`, so those mean what the table below says while it is open). On a narrower terminal it is an overlay over the middle of the screen, and in the minimal view it is always an overlay. `Esc` (or `q`, or `o` again, or the button) closes it.
 
 | key | action |
 | --- | --- |
-| `Tab` / `Shift-Tab`, `1`–`5` | switch tab |
+| `Tab` / `Shift-Tab`, `1`–`7` | switch tab (`6` search, `7` queue) |
+| `Q` | the Queue tab (`q` is quit, so the queue has a capital) |
+| `/` | search: jumps to the Search tab with the field ready (typing swallows every key, `q` and `o` included; `Enter` runs the search, `Esc` leaves the field) |
+| `d` | choose a device (see below) |
 | `↑` / `↓`, `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, wheel | move |
 | `Enter` / `space` | play: a song plays in its list (album, playlist, Liked Songs) from that song on; an album / playlist / artist plays itself |
 | `→` / `l` | open an album, your own playlist, an artist (albums and singles, newest first) or Liked Songs (`›` marks what opens) |
@@ -252,9 +265,21 @@ The login uses PKCE: no client secret is needed or stored. In development mode S
 | `r` | reload the list |
 | `Esc` / `q` / `o` | close |
 
-Lists are loaded when first shown and kept while the app runs. Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
+Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
 
-**Other devices.** When no MPRIS player is running (the phone plays, or Spotify runs elsewhere), the app shows what Spotify says plays, with lyrics, cover and chords as usual, and every control (play / pause, next / previous, seek, volume, shuffle, repeat) goes to that device through the API; the footer says `on <device>`. It polls every 1.5 s while that plays (3 s paused, 5 s while an MPRIS player is on screen). `H` moves playback to this PC (the Spotify app when open, else spotifyd, matched by `spotify_device`), and the MPRIS player takes over from there. Play with nothing active anywhere carries on here from where Spotify last stopped, or starts the last played song.
+**Mouse.** It works the same in the panel and in the overlay, in exactly the places that are drawn: click a tab to switch to it, click a row to select it, click the selected row again to play it (that is `Enter`), the wheel moves the selection three rows at a time, and `Esc` closes. A click outside closes the overlay; beside the side panel a click outside is for the player (its buttons and the progress bar work as usual) and leaves the panel open. The device list (`d`) takes clicks the same way.
+
+**Loading and the cache.** Nothing is requested until Spotify is on and you are logged in. Then the main lists (Recent, Playlists, Albums, Artists) load in the background, one after the other, so they are there when you open the browser; Liked Songs (up to 1000 songs) loads when you first open it. What was loaded is kept in memory for the session and shown at once when you open the browser or switch tabs; a list older than a minute is fetched again in the background while the old rows stay on screen (`refreshing…`), a fresh one costs no request at all. The queue is asked for again almost every time you look at it. Nothing is written to disk. When Spotify answers `429` it says how long to wait (`Retry-After`), and until that time has passed no request is sent at all, not by the browser, the background load or the player polling.
+
+**Queue (`Q`, tab 7).** What is playing now and what comes next (`GET /me/player/queue`). `Enter` plays the one under the cursor (Spotify lets an app start a song, not jump inside the queue, so it plays that song on its own). If Spotify refuses it you see `Queue unavailable: <reason>`. The tab can be switched off in the settings menu (*Queue tab in the library*) or with `spotify_queue_tab = false`.
+
+**Search.** One request finds songs, albums, artists and playlists (at most 10 of each, the most a development-mode app gets), listed under headings. The keys are the same as in the other tabs: `Enter` plays (a song plays alone), `a` queues, `A` adds to a playlist, `f` likes, `→` opens an album, an artist or one of your own playlists, `←` goes back to the results where you left them. While a new search runs the old results stay on screen, dimmed, and an answer to an older search that arrives late is dropped.
+
+**Devices (`d`, also inside the browser).** Lists where Spotify can play right now (phone, computer, speakers): `▶` marks the one playing, `this PC` the Spotify app on this computer (or spotifyd when `spotify_device` names it). `Enter` moves playback there and keeps playing; `r` reloads the list. A device Spotify restricts can't be controlled by apps and says so; with no device at all the list tells you to open Spotify somewhere or start spotifyd.
+
+**Errors.** What Spotify refuses is shown in the footer instead of failing silently: `429` as "rate limiting: try again in N s" (from its `Retry-After`), `403` as "Premium is needed" or Spotify's own reason, and a command with nothing playing anywhere as "no active device: press d".
+
+**Other devices.** When no MPRIS player is running (the phone plays, or Spotify runs elsewhere), the app shows what Spotify says plays, with lyrics, cover and chords as usual, and every control (play / pause, next / previous, seek, volume, shuffle, repeat) goes to that device through the API; the footer says `on <device>`. It polls every 1.5 s while that plays (3 s paused, 5 s while an MPRIS player is on screen). `H` moves playback to this PC (the Spotify app when it is open, else spotifyd when `spotify_device` names it), and the MPRIS player takes over from there. Play with nothing active anywhere carries on here from where Spotify last stopped, or starts the last played song.
 
 ## Setup (spotifyd)
 
