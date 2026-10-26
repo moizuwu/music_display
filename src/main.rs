@@ -512,6 +512,21 @@ mod util {
         if out.is_empty() { fold(orig) } else { out }
     }
 
+    /// The language or content a release is explicitly marked with in its title or album
+    /// ("(English Version)", "Japanese Ver.", "Instrumental"): such a release has different
+    /// lyrics from the original, so it is a different track however alike the names are.
+    pub fn version_marker(title: &str, album: &str) -> Option<String> {
+        use regex::Regex;
+        use std::sync::LazyLock;
+        static LANG: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\b(english|korean|japanese|chinese|mandarin|cantonese|spanish|french|german|italian|portuguese|russian|thai|vietnamese|indonesian|turkish|arabic|hindi)\s*(ver\.?|version)\b|\b(instrumental)\b").unwrap()
+        });
+        [title, album].iter().find_map(|s| {
+            LANG.captures(s)
+                .map(|c| c.get(1).or_else(|| c.get(3)).map_or("", |m| m.as_str()).to_lowercase())
+        })
+    }
+
     /// Terminal cell width of a char (0 for combining marks, 2 for CJK/Hangul/emoji).
     pub fn cw(c: char) -> usize {
         unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
@@ -987,13 +1002,16 @@ mod player {
     impl Snapshot {
         /// Identity of the track; changes ⇒ refetch year/lyrics. First artist and the bare
         /// song title only: case, spacing, edition / remaster / live suffixes, guest credits
-        /// and the album are ignored, so every release of a song is the same track.
+        /// and the album are ignored, so every release of a song is the same track, except one
+        /// marked as another language or instrumental (see `version_marker`).
         pub fn key(&self) -> u64 {
             let first_artist = self.artist.split(", ").next().unwrap_or(&self.artist);
             crate::util::fnv1a(&format!(
-                "{}\0{}",
+                "{}\0{}\0{}",
                 crate::util::normalize_track(first_artist),
                 crate::util::normalize_track(&crate::year::base_title(&self.title)),
+                // an English / Japanese / instrumental release is not the original song
+                crate::util::version_marker(&self.title, &self.album).unwrap_or_default(),
             ))
         }
     }
@@ -1684,9 +1702,20 @@ mod lyrics {
     /// Best search hit: synced with matching duration > synced > plain/instrumental. In a
     /// Korean context (`korean`, or any candidate being mostly Hangul) the more-Hangul text
     /// wins among equals, so the Hangul lyrics beat the romanized ones.
-    fn pick(recs: Vec<Rec>, length: f64, korean: bool) -> Option<(&'static str, String)> {
+    /// Which script the wanted lyrics are in.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Lang {
+        /// Nothing known: Hangul is preferred only if the candidates themselves are Hangul.
+        Auto,
+        Korean,
+        /// An explicitly non-Korean release (e.g. "English Version"): Hangul text is wrong.
+        Other,
+    }
+
+    fn pick(recs: Vec<Rec>, length: f64, lang: Lang) -> Option<(&'static str, String)> {
+        let korean = lang == Lang::Korean
+            || (lang == Lang::Auto && recs.iter().any(|r| classify(r).is_some_and(|c| is_hangul_text(&c.1))));
         let close = |r: &Rec| length <= 0.0 || r.duration.is_none_or(|d| (d - length).abs() <= 4.0);
-        let korean = korean || recs.iter().any(|r| classify(r).is_some_and(|c| is_hangul_text(&c.1)));
         let rank = |r: &Rec| match (classify(r).map(|c| c.0), close(r)) {
             (Some("synced"), true) => 0,
             (Some("synced"), false) => 1,
@@ -1697,11 +1726,14 @@ mod lyrics {
         // Hangul first within the synced > plain order, then the duration match
         let hangul = |r: &Rec| match classify(r) {
             Some((_, t)) if korean => 1000 - (hangul_ratio(&t) * 1000.0) as u32,
+            // a non-Korean release: the least Hangul wins
+            Some((_, t)) if lang == Lang::Other => (hangul_ratio(&t) * 1000.0) as u32,
             _ => 0,
         };
         let kind = |r: &Rec| rank(r) / 2 * 2; // 0 synced, 2 plain, 8 none
         recs.iter()
             .filter(|r| rank(r) < 9)
+            .filter(|r| lang != Lang::Other || !classify(r).is_some_and(|c| is_hangul_text(&c.1)))
             .min_by_key(|r| (kind(r), hangul(r), rank(r)))
             .and_then(classify)
     }
@@ -1870,7 +1902,16 @@ mod lyrics {
         let cleaned = crate::year::clean(title);
         let first = artist.split(", ").next().unwrap_or(artist).to_string();
         // a Korean title or artist: romanized lyrics are worth a search for Hangul ones
-        let korean = title.chars().chain(artist.chars()).any(is_hangul);
+        let hint = title.chars().chain(artist.chars()).any(is_hangul);
+        let lang = match crate::util::version_marker(title, album).as_deref() {
+            Some("korean") => Lang::Korean,
+            Some("instrumental") | None if hint => Lang::Korean,
+            Some(_) => Lang::Other,
+            None => Lang::Auto,
+        };
+        let korean = lang == Lang::Korean;
+        // Hangul text is the wrong answer for an explicitly non-Korean release
+        let classify = |r: &Rec| classify(r).filter(|c| lang != Lang::Other || !is_hangul_text(&c.1));
         let mut failure: Option<&'static str> = None;
         let mut result: Option<(&'static str, String)> = None;
         let mut retries = policy.retries;
@@ -1934,7 +1975,7 @@ mod lyrics {
             for (a, t) in tries {
                 match search(c, base, &a, &t, retries, &policy).await {
                     Step::Hit(recs) => {
-                        if let Some(hit) = pick(recs, length, korean) {
+                        if let Some(hit) = pick(recs, length, lang) {
                             let better = match &result {
                                 None => true,
                                 Some(x) => {
@@ -2017,15 +2058,17 @@ mod lyrics {
             let hangul = "[00:01.00]사랑해 너무\n[00:05.00]가지 마";
             let recs = || vec![rec(roman, "", 200.0), rec(hangul, "", 200.0)];
             // Korean title/artist: the Hangul synced lyrics win over the romanized ones
-            assert_eq!(pick(recs(), 200.0, true).unwrap().1, hangul);
+            assert_eq!(pick(recs(), 200.0, Lang::Korean).unwrap().1, hangul);
+            // an "English Version" never takes the Hangul lyrics
+            assert_eq!(pick(recs(), 200.0, Lang::Other).unwrap().1, roman);
             // a Hangul candidate also makes the context Korean by itself
-            assert_eq!(pick(recs(), 200.0, false).unwrap().1, hangul);
+            assert_eq!(pick(recs(), 200.0, Lang::Auto).unwrap().1, hangul);
             // no Hangul candidate and no hint: plain first-come ranking
             let eng = vec![rec("[00:01.00]one", "", 200.0), rec("[00:01.00]two", "", 200.0)];
-            assert_eq!(pick(eng, 200.0, false).unwrap().1, "[00:01.00]one");
+            assert_eq!(pick(eng, 200.0, Lang::Auto).unwrap().1, "[00:01.00]one");
             // synced still beats plain Hangul
             let mixed = vec![rec("", "사랑해", 200.0), rec(roman, "", 200.0)];
-            assert_eq!(pick(mixed, 200.0, true).unwrap().0, "synced");
+            assert_eq!(pick(mixed, 200.0, Lang::Korean).unwrap().0, "synced");
         }
     }
 }
@@ -9125,6 +9168,21 @@ mod tests {
         assert_eq!(b("Song [Live] (Remix)"), "Song");
         assert_eq!(b("(Intro)"), "(Intro)");
         assert_eq!(b("Plain"), "Plain");
+    }
+
+    #[test]
+    fn language_versions_are_their_own_track() {
+        let k = |t, al| snap("TXT", t, al).key();
+        let original = k("Cat & Dog", "Cat & Dog");
+        let english = k("Cat & Dog", "Cat & Dog (English Version)");
+        assert_ne!(original, english);
+        assert_eq!(english, k("Cat & Dog (English Ver.)", "Anything"));
+        assert_ne!(english, k("Cat & Dog", "Cat & Dog (Japanese Version)"));
+        assert_ne!(original, k("Cat & Dog - Instrumental", "Cat & Dog"));
+        // editions of the same recording still share one
+        assert_eq!(original, k("Cat & Dog", "Cat & Dog (Deluxe Edition)"));
+        assert_eq!(original, k("Cat & Dog - Remastered 2021", "Cat & Dog"));
+        assert_eq!(util::version_marker("Song", "Album"), None);
     }
 
     #[test]
