@@ -1,12 +1,15 @@
 //! music_display — a zero-flicker terminal "now playing" display for MPRIS players.
 //!
 //! Rust port of `music_display_2.fish`:
-//!   * theme auto-detection from Noctalia / Matugen colour files (+ CLI overrides)
+//!   * theme auto-detection from Noctalia / Matugen colour files (+ CLI overrides); with
+//!     `--terminal-colors`, or when no file is usable, it inherits the terminal's own colours
 //!   * playerctl polling + `--follow` stream for instant track switches
 //!   * release-year fallback (xesam:contentCreated → MusicBrainz → iTunes), cached
-//!   * synced lyrics from lrclib.net (exact → search fallback), cached, live offset nudging
-//!   * cover art via Kitty / Sixel / iTerm2 graphics (halfblock fallback), duotone-tinted
-//!   * optional cava visualiser as a third column or under the lyrics
+//!   * synced lyrics from lrclib.net (exact → search fallback), cached, live offset nudging;
+//!     spaced lines, faded context, optional big block-font for the active line
+//!   * cover art via Kitty / Sixel / iTerm2 graphics (halfblock fallback) or coloured ASCII,
+//!     duotone-tinted; optional UI accent taken from the cover (`--cover-theme`)
+//!   * optional mono cava visualiser as a third column or under the lyrics
 //!   * clickable progress bar + transport buttons, runtime panel toggles
 //!
 //! Architecture: one `tokio` select loop owns all UI state (`App`). Every slow thing
@@ -86,6 +89,27 @@ mod cli {
         /// Don't paint the surface colour as background (keep terminal transparency)
         #[arg(long)]
         pub transparent: bool,
+
+        /// Inherit the terminal's own colours: default background/foreground and the ANSI
+        /// accent. Skips every colour file. --surface/--primary still override their slot.
+        #[arg(long)]
+        pub terminal_colors: bool,
+
+        /// Draw the cover as coloured ASCII characters instead of a terminal graphics image
+        #[arg(long)]
+        pub ascii_cover: bool,
+
+        /// Take the UI accent colour from the current album cover (updates every track)
+        #[arg(long)]
+        pub cover_theme: bool,
+
+        /// Render the active lyric line in a big block font (toggle with `b`)
+        #[arg(long)]
+        pub big_lyrics: bool,
+
+        /// Blank rows between lyric lines (0-3)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=3))]
+        pub lyric_spacing: u16,
     }
 }
 
@@ -180,11 +204,17 @@ mod theme {
 
     pub type Rgb = (u8, u8, u8);
 
+    /// Palette used by the whole UI.
+    ///
+    /// Every slot is optional. `None` means "inherit from the terminal": the default
+    /// background/foreground, and the ANSI palette for the accent. The app never invents a
+    /// hex colour, so with `--terminal-colors` (or a missing/empty/invalid colour file) it
+    /// matches whatever theme the terminal emulator is running.
     #[derive(Clone, Debug)]
     pub struct Theme {
-        pub surface: Rgb,
-        pub primary: Rgb,
-        pub on_surface: Rgb,
+        pub surface: Option<Rgb>,
+        pub primary: Option<Rgb>,
+        pub on_surface: Option<Rgb>,
         /// Footer text describing where the colours came from.
         pub source: String,
     }
@@ -193,22 +223,38 @@ mod theme {
         pub fn c(rgb: Rgb) -> Color {
             Color::Rgb(rgb.0, rgb.1, rgb.2)
         }
+        /// Background. `Color::Reset` = the terminal's own (possibly transparent) background.
         pub fn surface(&self) -> Color {
-            Self::c(self.surface)
+            self.surface.map_or(Color::Reset, Self::c)
         }
+        /// Accent. Falls back to the terminal palette's cyan.
         pub fn primary(&self) -> Color {
-            Self::c(self.primary)
+            self.primary.map_or(Color::Cyan, Self::c)
         }
+        /// Foreground. `Color::Reset` = the terminal's default foreground.
         pub fn text(&self) -> Color {
-            Self::c(self.on_surface)
+            self.on_surface.map_or(Color::Reset, Self::c)
         }
         /// Text blended `t` of the way toward the background (0 = full text, 1 = invisible).
+        /// Without known RGB values this steps through the terminal's own grays.
         pub fn fade(&self, t: f32) -> Color {
-            Self::c(mix(self.on_surface, self.surface, t))
+            match (self.on_surface, self.surface) {
+                (Some(o), Some(s)) => Self::c(mix(o, s, t)),
+                _ if t < 0.3 => Color::Reset,
+                _ if t < 0.6 => Color::Gray,
+                _ => Color::DarkGray,
+            }
         }
-        /// Primary blended toward the surface.
+        /// Accent blended toward the background.
         pub fn accent_fade(&self, t: f32) -> Color {
-            Self::c(mix(self.primary, self.surface, t))
+            match (self.primary, self.surface) {
+                (Some(p), Some(s)) => Self::c(mix(p, s, t)),
+                // unknown background: blend toward mid-gray, which reads on dark and light
+                (Some(p), None) => Self::c(mix(p, (128, 128, 128), t * 0.8)),
+                (None, _) if t >= 0.5 => Color::DarkGray,
+                (None, _) if t >= 0.25 => Color::Cyan,
+                (None, _) => Color::LightCyan,
+            }
         }
     }
 
@@ -218,8 +264,41 @@ mod theme {
         (l(a.0, b.0), l(a.1, b.1), l(a.2, b.2))
     }
 
-    fn luminance(c: Rgb) -> f32 {
+    pub fn luminance(c: Rgb) -> f32 {
         (0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32) / 255.0
+    }
+
+    /// Nudge an accent colour until it is readable: against `surface` when known, otherwise
+    /// into a mid-brightness band that works on both dark and light terminals.
+    pub fn readable(mut c: Rgb, surface: Option<Rgb>) -> Rgb {
+        const WHITE: Rgb = (255, 255, 255);
+        const BLACK: Rgb = (0, 0, 0);
+        match surface {
+            Some(s) => {
+                let toward = if luminance(s) < 0.5 { WHITE } else { BLACK };
+                for _ in 0..10 {
+                    if (luminance(c) - luminance(s)).abs() >= 0.4 {
+                        break;
+                    }
+                    c = mix(c, toward, 0.15);
+                }
+            }
+            None => {
+                for _ in 0..10 {
+                    if luminance(c) >= 0.4 {
+                        break;
+                    }
+                    c = mix(c, WHITE, 0.12);
+                }
+                for _ in 0..10 {
+                    if luminance(c) <= 0.8 {
+                        break;
+                    }
+                    c = mix(c, BLACK, 0.12);
+                }
+            }
+        }
+        c
     }
 
     /// Parse `#rrggbb`, `rrggbb`, `#rgb`, or `#rrggbbaa` (alpha dropped).
@@ -314,7 +393,10 @@ mod theme {
         "text",
     ];
 
-    fn from_file(path: &PathBuf) -> Option<(Option<Rgb>, Option<Rgb>, Option<Rgb>)> {
+    type FileColors = (Option<Rgb>, Option<Rgb>, Option<Rgb>);
+
+    /// `None` for a missing, unreadable, invalid, empty (`{}`) or colour-less file.
+    fn from_file(path: &PathBuf) -> Option<FileColors> {
         let txt = std::fs::read_to_string(path).ok()?;
         let v: Value = serde_json::from_str(&txt).ok()?;
         let s = extract(&v, SURFACE);
@@ -329,26 +411,34 @@ mod theme {
         let mut surface = None;
         let mut primary = None;
         let mut on_surface = None;
-        let mut source: Option<String> = None;
 
-        let files: Vec<PathBuf> = match &args.colors {
-            Some(p) => vec![p.clone()],
-            None => candidates(),
-        };
-        for f in &files {
-            if let Some((s, p, o)) = from_file(f) {
-                surface = s;
-                primary = p;
-                on_surface = o;
-                source = Some(shorten_home(f));
-                break;
+        // `from_file` = where the colours came from, if a file supplied any.
+        let mut from_file: Option<String> = None;
+        let mut fallback = "terminal colors".to_string();
+        if !args.terminal_colors {
+            let files: Vec<PathBuf> = match &args.colors {
+                Some(p) => vec![p.clone()],
+                None => candidates(),
+            };
+            match files
+                .iter()
+                .find_map(|f| self::from_file(f).map(|c| (f, c)))
+            {
+                Some((f, (s, p, o))) => {
+                    surface = s;
+                    primary = p;
+                    on_surface = o;
+                    from_file = Some(shorten_home(f));
+                }
+                // Nothing usable (missing, unreadable, invalid or `{}`): inherit the
+                // terminal's colours instead of inventing any.
+                None => {
+                    fallback = match &args.colors {
+                        Some(p) => format!("terminal colors ({} unusable)", shorten_home(p)),
+                        None => "terminal colors (no usable colour file)".to_string(),
+                    }
+                }
             }
-        }
-        if source.is_none() && args.colors.is_some() {
-            eprintln!(
-                "music_display: couldn't read colours from {:?}, using defaults",
-                args.colors
-            );
         }
 
         let mut overridden = false;
@@ -363,26 +453,29 @@ mod theme {
                 }
             }
         }
-
-        let surface = surface.unwrap_or((0x1e, 0x1e, 0x2e));
-        let primary = primary.unwrap_or((0xcb, 0xa6, 0xf7));
-        // Derive readable text if the file didn't provide one (or it's unreadable on surface).
-        let derived = if luminance(surface) < 0.5 {
-            mix(surface, (255, 255, 255), 0.88)
-        } else {
-            mix(surface, (0, 0, 0), 0.85)
-        };
-        let on_surface = match on_surface {
-            Some(o) if (luminance(o) - luminance(surface)).abs() > 0.35 => o,
-            _ => derived,
+        let source = match (from_file, overridden) {
+            (Some(f), false) => f,
+            (Some(f), true) => format!("{f} + CLI overrides"),
+            (None, false) => fallback,
+            (None, true) if surface.is_some() && primary.is_some() => "CLI overrides".to_string(),
+            (None, true) if args.terminal_colors => "terminal colors + CLI overrides".to_string(),
+            (None, true) => "CLI overrides + terminal colors".to_string(),
         };
 
-        let source = match (source, overridden) {
-            (Some(s), false) => s,
-            (Some(s), true) => format!("{s} + CLI overrides"),
-            (None, true) => "CLI overrides".into(),
-            (None, false) => "built-in defaults (no colour file found)".into(),
-        };
+        // Text colour is only meaningful against a known surface; otherwise it stays the
+        // terminal's default foreground.
+        let on_surface = surface.map(|s| {
+            let derived = if luminance(s) < 0.5 {
+                mix(s, (255, 255, 255), 0.88)
+            } else {
+                mix(s, (0, 0, 0), 0.85)
+            };
+            match on_surface {
+                Some(o) if (luminance(o) - luminance(s)).abs() > 0.35 => o,
+                _ => derived,
+            }
+        });
+
         Theme {
             surface,
             primary,
@@ -431,7 +524,10 @@ mod player {
     impl Snapshot {
         /// Identity of the track; changes ⇒ refetch year/lyrics.
         pub fn key(&self) -> u64 {
-            crate::util::fnv1a(&format!("{}\0{}\0{}", self.artist, self.title, self.album))
+            let artist = self.artist.trim().to_lowercase();
+            let title = crate::year::clean(&self.title).trim().to_lowercase();
+            let album = crate::year::clean(&self.album).trim().to_lowercase();
+            crate::util::fnv1a(&format!("{}\0{}\0{}", artist, title, album))
         }
     }
 
@@ -1048,9 +1144,10 @@ mod lyrics {
 // Cover art: fetch (file:// or http), cache in /tmp, downscale + duotone tint
 // ════════════════════════════════════════════════════════════════════════════
 mod cover {
-    use crate::theme::{Rgb, mix};
+    use crate::theme::{Rgb, mix, readable};
     use crate::util::{fnv1a, percent_decode, tmp_dir};
     use image::DynamicImage;
+    use image::imageops::FilterType;
 
     async fn bytes(c: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
         if let Some(p) = url.strip_prefix("file://") {
@@ -1075,9 +1172,6 @@ mod cover {
 
     /// Luma → lerp(surface, primary), blended with the original by `strength`.
     fn tint(img: DynamicImage, surface: Rgb, primary: Rgb, strength: f32) -> DynamicImage {
-        if strength <= 0.0 {
-            return img;
-        }
         let mut rgb = img.to_rgb8();
         for p in rgb.pixels_mut() {
             let [r, g, b] = p.0;
@@ -1089,13 +1183,85 @@ mod cover {
         DynamicImage::ImageRgb8(rgb)
     }
 
-    pub async fn load(
-        c: reqwest::Client,
-        url: String,
-        surface: Rgb,
-        primary: Rgb,
-        strength: f32,
-    ) -> Option<DynamicImage> {
+    /// (hue 0..360, saturation 0..1, value 0..1)
+    fn hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+        let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let d = max - min;
+        let h = if d == 0.0 {
+            0.0
+        } else if max == r {
+            60.0 * (((g - b) / d).rem_euclid(6.0))
+        } else if max == g {
+            60.0 * ((b - r) / d + 2.0)
+        } else {
+            60.0 * ((r - g) / d + 4.0)
+        };
+        (h, if max == 0.0 { 0.0 } else { d / max }, max)
+    }
+
+    /// The cover's dominant *vivid* colour: pixels vote into 12 hue buckets weighted by
+    /// saturation × brightness, so a big dark/gray background doesn't win over the artwork's
+    /// real accent. Grayscale covers fall back to the average of their lit pixels.
+    pub fn dominant_accent(img: &DynamicImage) -> Option<Rgb> {
+        let small = img.thumbnail(48, 48).to_rgb8();
+        let n = (small.width() * small.height()) as f32;
+        // per bucket: weight, Σr·w, Σg·w, Σb·w
+        let mut buckets = [[0f32; 4]; 12];
+        let mut lit = [0f32; 4]; // count, Σr, Σg, Σb of non-black pixels
+        for p in small.pixels() {
+            let [r, g, b] = p.0;
+            let (h, s, v) = hsv(r, g, b);
+            if v >= 0.2 {
+                lit[0] += 1.0;
+                lit[1] += r as f32;
+                lit[2] += g as f32;
+                lit[3] += b as f32;
+            }
+            if v < 0.2 || s < 0.2 {
+                continue;
+            }
+            let w = s * v;
+            let bucket = &mut buckets[((h / 30.0) as usize) % 12];
+            bucket[0] += w;
+            bucket[1] += r as f32 * w;
+            bucket[2] += g as f32 * w;
+            bucket[3] += b as f32 * w;
+        }
+        let best = buckets.iter().max_by(|a, b| a[0].total_cmp(&b[0]))?;
+        let (w, r, g, b) = if best[0] >= 0.02 * n {
+            (best[0], best[1], best[2], best[3])
+        } else if lit[0] > 0.0 {
+            (lit[0], lit[1], lit[2], lit[3])
+        } else {
+            return None;
+        };
+        Some((
+            (r / w).round() as u8,
+            (g / w).round() as u8,
+            (b / w).round() as u8,
+        ))
+    }
+
+    /// How the loader should process the decoded cover.
+    #[derive(Clone, Copy)]
+    pub struct Look {
+        pub surface: Option<Rgb>,
+        pub primary: Option<Rgb>,
+        /// 0 = leave the artwork untouched.
+        pub strength: f32,
+        /// Extract an accent from the artwork (also becomes the duotone's highlight).
+        pub cover_theme: bool,
+    }
+
+    pub struct Loaded {
+        pub image: DynamicImage,
+        /// Readable accent derived from the artwork (only with `--cover-theme`).
+        pub accent: Option<Rgb>,
+    }
+
+    pub async fn load(c: reqwest::Client, url: String, look: Look) -> Option<Loaded> {
         let data = bytes(&c, &url).await?;
         // Decoding/resizing is CPU work — keep it off the async workers.
         tokio::task::spawn_blocking(move || {
@@ -1105,11 +1271,77 @@ mod cover {
             } else {
                 img
             };
-            Some(tint(img, surface, primary, strength.clamp(0.0, 1.0)))
+            // Always measured on the untouched artwork, never on the tinted copy.
+            let accent = look
+                .cover_theme
+                .then(|| dominant_accent(&img))
+                .flatten()
+                .map(|a| readable(a, look.surface));
+            // A duotone needs both ends; with terminal colours (unknown RGB) it is skipped.
+            let image = match (look.surface, accent.or(look.primary)) {
+                (Some(s), Some(p)) if look.strength > 0.0 => {
+                    tint(img, s, p, look.strength.clamp(0.0, 1.0))
+                }
+                _ => img,
+            };
+            Some(Loaded { image, accent })
         })
         .await
         .ok()
         .flatten()
+    }
+
+    // ── ASCII rendering ───────────────────────────────────────────────────────
+    /// Dark → light density ramp.
+    const RAMP: &[u8] = b" .:-=+*#%@";
+
+    /// One coloured character per terminal cell.
+    pub struct AsciiArt {
+        pub cols: u16,
+        pub rows: u16,
+        pub cells: Vec<(char, Rgb)>,
+    }
+
+    /// Keep dark pixels' glyphs visible: scale their colour up to at least ~110 brightness.
+    fn lift(c: Rgb) -> Rgb {
+        let m = c.0.max(c.1).max(c.2);
+        match m {
+            0 => (110, 110, 110),
+            110..=255 => c,
+            _ => {
+                let k = 110.0 / m as f32;
+                let f = |x: u8| (x as f32 * k).min(255.0) as u8;
+                (f(c.0), f(c.1), f(c.2))
+            }
+        }
+    }
+
+    /// Resample to exactly `cols`×`rows` cells (the caller picks dimensions that already
+    /// account for the ~1:2 cell aspect) and map brightness to a character, colour to its fg.
+    pub fn ascii_art(img: &DynamicImage, cols: u16, rows: u16) -> AsciiArt {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let small = img
+            .resize_exact(cols as u32, rows as u32, FilterType::Triangle)
+            .to_rgb8();
+        let lum = |p: &image::Rgb<u8>| {
+            (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
+        };
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for p in small.pixels() {
+            let l = lum(p);
+            lo = lo.min(l);
+            hi = hi.max(l);
+        }
+        let span = (hi - lo).max(0.05); // stretch contrast so flat covers still show detail
+        let cells = small
+            .pixels()
+            .map(|p| {
+                let l = ((lum(p) - lo) / span).clamp(0.0, 1.0);
+                let ch = RAMP[(l * (RAMP.len() - 1) as f32).round() as usize] as char;
+                (ch, lift((p[0], p[1], p[2])))
+            })
+            .collect();
+        AsciiArt { cols, rows, cells }
     }
 }
 
@@ -1119,50 +1351,109 @@ mod cover {
 mod cava {
     use crate::AppEvent;
     use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
     use tokio::sync::mpsc::UnboundedSender;
 
     pub const MAX: u16 = 1000;
 
+    /// Headless config: raw ASCII frames on stdout. `channels = mono` makes cava average
+    /// left+right into one set of bars (stereo output is mirrored: left reversed, then right).
+    pub fn config(bars: u16) -> String {
+        format!(
+            "[general]\nbars = {bars}\nframerate = 60\n\n\
+             [output]\nmethod = raw\nchannels = mono\nmono_option = average\n\
+             raw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = {MAX}\n\
+             bar_delimiter = 59\nframe_delimiter = 10\n"
+        )
+    }
+
     pub async fn run(bars: u16, tx: UnboundedSender<AppEvent>) {
-        let cfg = format!(
-            "[general]\nbars = {bars}\nframerate = 60\n\n[output]\nmethod = raw\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = {MAX}\nbar_delimiter = 59\nframe_delimiter = 10\n"
-        );
+        let fail = |msg: String| {
+            let _ = tx.send(AppEvent::CavaError(msg));
+        };
+
         let path = crate::util::tmp_dir().join(format!("cava-{bars}.conf"));
-        if tokio::fs::write(&path, cfg).await.is_err() {
-            let _ = tx.send(AppEvent::CavaError("couldn't write cava config".into()));
-            return;
+        if tokio::fs::write(&path, config(bars)).await.is_err() {
+            return fail("couldn't write the cava config in /tmp".into());
         }
         let child = Command::new("cava")
             .arg("-p")
             .arg(&path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true) // aborting this task kills cava
             .spawn();
         let mut child = match child {
             Ok(c) => c,
-            Err(_) => {
-                let _ = tx.send(AppEvent::CavaError("cava not found in PATH".into()));
-                return;
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return fail("cava not found in PATH (pacman -S cava)".into());
             }
+            Err(e) => return fail(format!("couldn't start cava: {e}")),
         };
-        let Some(out) = child.stdout.take() else {
-            return;
+        let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+            return fail("couldn't attach to cava's output".into());
         };
+
+        // Remember cava's last complaint so a failure can say *why*.
+        let last_err = Arc::new(Mutex::new(String::new()));
+        let le = last_err.clone();
+        let err_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(err).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if !l.trim().is_empty() {
+                    *le.lock().unwrap() = l.trim().to_string();
+                }
+            }
+        });
+
         let mut lines = BufReader::new(out).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let bars: Vec<u16> = line
-                .split(';')
-                .filter_map(|v| v.trim().parse().ok())
-                .collect();
-            if !bars.is_empty() && tx.send(AppEvent::Cava(bars)).is_err() {
-                return;
+        let mut got_data = false;
+        loop {
+            // If nothing arrives at first, say so instead of showing "starting…" forever.
+            let next = if got_data {
+                lines.next_line().await
+            } else {
+                match tokio::time::timeout(Duration::from_secs(4), lines.next_line()).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::CavaNote(
+                            "cava is running but sent no data — check [input] method in your cava config"
+                                .into(),
+                        ));
+                        got_data = true; // stop timing out; keep waiting normally
+                        continue;
+                    }
+                }
+            };
+            match next {
+                Ok(Some(line)) => {
+                    let bars: Vec<u16> = line
+                        .split(';')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    if !bars.is_empty() {
+                        got_data = true;
+                        if tx.send(AppEvent::Cava(bars)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                _ => break,
             }
         }
-        let _ = tx.send(AppEvent::CavaError("cava exited".into()));
+
+        let status = child.wait().await.ok();
+        let _ = tokio::time::timeout(Duration::from_millis(300), err_task).await;
+        let why = last_err.lock().unwrap().clone();
+        fail(match (why.is_empty(), status) {
+            (false, _) => format!("cava failed: {why}"),
+            (true, Some(s)) if !s.success() => format!("cava exited ({s})"),
+            _ => "cava exited".into(),
+        });
     }
 }
 
@@ -1181,9 +1472,12 @@ pub enum AppEvent {
     },
     Cover {
         url: String,
-        image: Option<image::DynamicImage>,
+        loaded: Option<cover::Loaded>,
     },
     Cava(Vec<u16>),
+    /// Informational status while cava has produced nothing yet.
+    CavaNote(String),
+    /// cava failed or exited; the task is gone and `c` twice restarts it.
     CavaError(String),
 }
 
@@ -1191,13 +1485,14 @@ mod app {
     use super::*;
     use crate::lyrics::Lyrics;
     use crate::player::{Snapshot, Status};
+    use crate::theme::Rgb;
     use crate::theme::Theme;
     use crossterm::event::{
         Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     };
     use ratatui::layout::{Position, Rect};
     use ratatui_image::picker::Picker;
-    use ratatui_image::protocol::StatefulProtocol;
+    use ratatui_image::protocol::Protocol;
     use tokio::sync::mpsc::UnboundedSender;
     use tokio::task::JoinHandle;
 
@@ -1219,12 +1514,33 @@ mod app {
     pub enum CoverState {
         None,
         Loading,
+        /// `rendered` is built lazily by the UI for the cell box it actually has, and rebuilt
+        /// whenever that box changes.
         Ready {
-            proto: Box<StatefulProtocol>,
-            w: u32,
-            h: u32,
+            src: image::DynamicImage,
+            rendered: Option<Rendered>,
         },
         Failed,
+    }
+
+    /// The cover prepared for one exact cell box (`cells` = width × height in cells).
+    pub enum Rendered {
+        Graphics {
+            cells: (u16, u16),
+            proto: Box<Protocol>,
+        },
+        Ascii {
+            cells: (u16, u16),
+            art: cover::AsciiArt,
+        },
+    }
+
+    impl Rendered {
+        pub fn cells(&self) -> (u16, u16) {
+            match self {
+                Rendered::Graphics { cells, .. } | Rendered::Ascii { cells, .. } => *cells,
+            }
+        }
     }
 
     /// Click targets recorded during the last render.
@@ -1239,6 +1555,9 @@ mod app {
     pub struct App {
         pub args: crate::cli::Args,
         pub theme: Theme,
+        /// The accent from config/CLI, restored whenever there is no cover to take one from.
+        base_primary: Option<Rgb>,
+        pub big_lyrics: bool,
         pub ctl: player::Ctl,
         pub client: reqwest::Client,
         pub tx: UnboundedSender<AppEvent>,
@@ -1299,6 +1618,8 @@ mod app {
                 show_cava: false,
                 offset: args.offset,
                 placement,
+                big_lyrics: args.big_lyrics,
+                base_primary: theme.primary,
                 args,
                 theme,
                 client,
@@ -1369,17 +1690,21 @@ mod app {
                     self.snap_scroll = true;
                     self.dirty = true;
                 }
-                AppEvent::Cover { url, image } if url == self.art_url => {
-                    self.cover = match image {
-                        Some(img) => {
-                            let (w, h) = (img.width(), img.height());
+                AppEvent::Cover { url, loaded } if url == self.art_url => {
+                    self.cover = match loaded {
+                        Some(l) => {
+                            if self.args.cover_theme {
+                                self.theme.primary = l.accent.or(self.base_primary);
+                            }
                             CoverState::Ready {
-                                proto: Box::new(self.picker.new_resize_protocol(img)),
-                                w,
-                                h,
+                                src: l.image,
+                                rendered: None,
                             }
                         }
-                        None => CoverState::Failed,
+                        None => {
+                            self.reset_accent();
+                            CoverState::Failed
+                        }
                     };
                     self.dirty = true;
                 }
@@ -1390,8 +1715,15 @@ mod app {
                         self.dirty = true;
                     }
                 }
+                AppEvent::CavaNote(n) => {
+                    if self.show_cava && self.cava_bars.is_empty() {
+                        self.cava_status = Some(n);
+                        self.dirty = true;
+                    }
+                }
                 AppEvent::CavaError(e) => {
                     self.cava_status = Some(e);
+                    self.cava_bars.clear();
                     self.cava_task = None;
                     self.dirty = true;
                 }
@@ -1451,13 +1783,19 @@ mod app {
                 self.art_url = s.art_url.clone();
                 if s.art_url.is_empty() {
                     self.cover = CoverState::None;
+                    self.reset_accent();
                 } else {
                     self.cover = CoverState::Loading;
                     let (c, tx, url) = (self.client.clone(), self.tx.clone(), s.art_url.clone());
-                    let (sf, pr, k) = (self.theme.surface, self.theme.primary, self.args.tint);
+                    let look = cover::Look {
+                        surface: self.theme.surface,
+                        primary: self.base_primary,
+                        strength: self.args.tint,
+                        cover_theme: self.args.cover_theme,
+                    };
                     tokio::spawn(async move {
-                        let image = cover::load(c, url.clone(), sf, pr, k).await;
-                        let _ = tx.send(AppEvent::Cover { url, image });
+                        let loaded = cover::load(c, url.clone(), look).await;
+                        let _ = tx.send(AppEvent::Cover { url, loaded });
                     });
                 }
             }
@@ -1471,6 +1809,13 @@ mod app {
             self.snap = Some(s);
             if changed {
                 self.dirty = true;
+            }
+        }
+
+        /// Back to the configured accent (no cover to take one from).
+        fn reset_accent(&mut self) {
+            if self.args.cover_theme {
+                self.theme.primary = self.base_primary;
             }
         }
 
@@ -1514,6 +1859,10 @@ mod app {
                     KeyCode::Char('c') => {
                         let on = !self.show_cava;
                         self.set_cava(on);
+                    }
+                    KeyCode::Char('b') => {
+                        self.big_lyrics = !self.big_lyrics;
+                        self.snap_scroll = true;
                     }
                     _ => {}
                 },
@@ -1579,25 +1928,305 @@ mod app {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Big block font for the active lyric line (5×7 pixels, drawn with half blocks)
+// ════════════════════════════════════════════════════════════════════════════
+mod bigfont {
+    /// 5×7 bitmap, one `u8` per row, bit 4 = leftmost pixel.
+    fn glyph(c: char) -> Option<[u8; 7]> {
+        Some(match c {
+            ' ' => [0; 7],
+            'A' => [
+                0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+            ],
+            'B' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+            ],
+            'C' => [
+                0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+            ],
+            'D' => [
+                0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+            ],
+            'E' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+            ],
+            'F' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+            ],
+            'G' => [
+                0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+            ],
+            'H' => [
+                0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+            ],
+            'I' => [
+                0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+            ],
+            'J' => [
+                0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+            ],
+            'K' => [
+                0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+            ],
+            'L' => [
+                0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+            ],
+            'M' => [
+                0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+            ],
+            'N' => [
+                0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001,
+            ],
+            'O' => [
+                0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'P' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+            ],
+            'Q' => [
+                0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+            ],
+            'R' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+            ],
+            'S' => [
+                0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+            ],
+            'T' => [
+                0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+            ],
+            'U' => [
+                0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'V' => [
+                0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+            ],
+            'W' => [
+                0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+            ],
+            'X' => [
+                0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+            ],
+            'Y' => [
+                0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+            ],
+            'Z' => [
+                0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+            ],
+            '0' => [
+                0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+            ],
+            '1' => [
+                0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+            ],
+            '2' => [
+                0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+            ],
+            '3' => [
+                0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110,
+            ],
+            '4' => [
+                0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+            ],
+            '5' => [
+                0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+            ],
+            '6' => [
+                0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+            ],
+            '7' => [
+                0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+            ],
+            '8' => [
+                0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+            ],
+            '9' => [
+                0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+            ],
+            '.' => [0, 0, 0, 0, 0, 0b01100, 0b01100],
+            ',' => [0, 0, 0, 0, 0b01100, 0b00100, 0b01000],
+            '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100],
+            '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0, 0b00100],
+            '\'' => [0b01100, 0b00100, 0b01000, 0, 0, 0, 0],
+            '"' => [0b01010, 0b01010, 0, 0, 0, 0, 0],
+            '-' => [0, 0, 0, 0b11111, 0, 0, 0],
+            ':' => [0, 0b01100, 0b01100, 0, 0b01100, 0b01100, 0],
+            ';' => [0, 0b01100, 0b01100, 0, 0b01100, 0b00100, 0b01000],
+            '(' => [
+                0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
+            ],
+            ')' => [
+                0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
+            ],
+            '&' => [
+                0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101,
+            ],
+            '/' => [
+                0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000,
+            ],
+            '+' => [0, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0],
+            '=' => [0, 0, 0b11111, 0, 0b11111, 0, 0],
+            '*' => [0, 0b00100, 0b10101, 0b01110, 0b10101, 0b00100, 0],
+            '#' => [
+                0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010,
+            ],
+            '%' => [
+                0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011,
+            ],
+            '_' => [0, 0, 0, 0, 0, 0, 0b11111],
+            '♪' => [
+                0b00010, 0b00011, 0b00010, 0b00010, 0b01110, 0b11110, 0b01100,
+            ],
+            _ => return None,
+        })
+    }
+
+    /// Upper-case and strip common diacritics; `None` if the font can't draw the character.
+    fn fold(c: char) -> Option<char> {
+        let c = match c {
+            'À'..='Å' | 'à'..='å' => 'A',
+            'Ç' | 'ç' => 'C',
+            'È'..='Ë' | 'è'..='ë' => 'E',
+            'Ì'..='Ï' | 'ì'..='ï' => 'I',
+            'Ñ' | 'ñ' => 'N',
+            'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' => 'O',
+            'Ù'..='Ü' | 'ù'..='ü' => 'U',
+            'Ý' | 'ý' | 'ÿ' => 'Y',
+            '’' | '‘' | '`' | '´' => '\'',
+            '“' | '”' => '"',
+            '–' | '—' => '-',
+            c => c.to_ascii_uppercase(),
+        };
+        glyph(c).map(|_| c)
+    }
+
+    /// Columns used by one glyph incl. the 1-column gap after it; a space is 3 columns.
+    fn advance(c: char) -> usize {
+        if c == ' ' { 3 } else { 6 }
+    }
+
+    /// Render `text` as rows of half-block characters, at most `max_cols` wide and
+    /// `max_chunks` wrapped pieces tall (each piece = 4 text rows, pieces separated by one
+    /// blank row). `None` when it can't be drawn — unsupported characters, a word wider than
+    /// the panel, or too many pieces — so the caller can fall back to normal text.
+    pub fn render(text: &str, max_cols: usize, max_chunks: usize) -> Option<Vec<String>> {
+        let text = text.replace('…', "...");
+        let mut words: Vec<Vec<char>> = Vec::new();
+        for w in text.split_whitespace() {
+            words.push(w.chars().map(fold).collect::<Option<Vec<_>>>()?);
+        }
+        if words.is_empty() {
+            return None;
+        }
+
+        // Greedy wrap by rendered width.
+        let mut chunks: Vec<Vec<char>> = Vec::new();
+        let mut cur: Vec<char> = Vec::new();
+        let mut cur_w = 0usize; // columns incl. the trailing gap
+        for w in words {
+            let ww: usize = w.iter().map(|&c| advance(c)).sum();
+            if ww - 1 > max_cols {
+                return None;
+            }
+            if !cur.is_empty() && cur_w + advance(' ') + ww - 1 > max_cols {
+                chunks.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += advance(' ');
+            }
+            cur_w += ww;
+            cur.extend(w);
+        }
+        chunks.push(cur);
+        if chunks.len() > max_chunks {
+            return None;
+        }
+
+        let mut rows = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i > 0 {
+                rows.push(String::new());
+            }
+            // pixel grid: 8 rows (7 + 1 blank so they pair up into 4 half-block rows)
+            let mut px: Vec<Vec<bool>> = vec![Vec::new(); 8];
+            for &c in chunk {
+                let g = glyph(c).unwrap_or([0; 7]);
+                if c == ' ' {
+                    for row in px.iter_mut() {
+                        row.extend([false; 3]);
+                    }
+                    continue;
+                }
+                for (y, row) in px.iter_mut().enumerate() {
+                    for x in 0..5 {
+                        row.push(y < 7 && g[y] & (1 << (4 - x)) != 0);
+                    }
+                    row.push(false);
+                }
+            }
+            for row in px.iter_mut() {
+                row.pop(); // trailing gap
+            }
+            for pair in 0..4 {
+                let (top, bot) = (&px[pair * 2], &px[pair * 2 + 1]);
+                rows.push(
+                    top.iter()
+                        .zip(bot)
+                        .map(|(&t, &b)| match (t, b) {
+                            (true, true) => '█',
+                            (true, false) => '▀',
+                            (false, true) => '▄',
+                            (false, false) => ' ',
+                        })
+                        .collect(),
+                );
+            }
+        }
+        Some(rows)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Rendering
 // ════════════════════════════════════════════════════════════════════════════
 mod ui {
-    use crate::app::{App, CavaPlacement, CoverState, LyricsState, YearState};
+    use crate::app::{App, CavaPlacement, CoverState, LyricsState, Rendered, YearState};
     use crate::lyrics::Lyrics;
     use crate::player::Status;
+    use crate::theme::Theme;
     use crate::util::fmt_time;
+    use crate::{bigfont, cover};
+    use image::imageops::FilterType;
     use ratatui::Frame;
     use ratatui::buffer::Buffer;
-    use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+    use ratatui::layout::{Alignment, Constraint, Layout, Rect, Size};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, BorderType, Paragraph};
-    use ratatui_image::{Resize, StatefulImage};
+    use ratatui_image::{Image, Resize};
+
+    /// Metadata | Lyrics | Cava. The left and right columns get exactly the same width, so
+    /// the cava panel mirrors the album/metadata column; lyrics take whatever is left.
+    pub fn three_panel(main: Rect) -> [Rect; 3] {
+        let side = ((main.width as u32 * 28 / 100) as u16)
+            .max(20)
+            .min(main.width.saturating_sub(20) / 2);
+        Layout::horizontal([
+            Constraint::Length(side),
+            Constraint::Min(1),
+            Constraint::Length(side),
+        ])
+        .areas(main)
+    }
 
     pub fn draw(f: &mut Frame, app: &mut App) {
         let area = f.area();
         let th = app.theme.clone();
-        if !app.args.transparent {
+        // Only paint a background when we actually know the surface colour; otherwise the
+        // terminal's own (possibly transparent) background is left alone.
+        if !app.args.transparent && th.surface.is_some() {
             f.render_widget(
                 Block::new().style(Style::new().bg(th.surface()).fg(th.text())),
                 area,
@@ -1616,19 +2245,21 @@ mod ui {
                         .areas(main);
                 (l, Some(r), None)
             }
-            (false, true, _) => {
+            (false, true, CavaPlacement::ThirdPanel) => {
+                // Lyrics hidden: keep the two remaining columns the same width.
+                let [l, r] =
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .areas(main);
+                (l, None, Some(r))
+            }
+            (false, true, CavaPlacement::UnderLyrics) => {
                 let [l, r] =
                     Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                         .areas(main);
                 (l, None, Some(r))
             }
             (true, true, CavaPlacement::ThirdPanel) => {
-                let [l, m, r] = Layout::horizontal([
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(42),
-                    Constraint::Percentage(24),
-                ])
-                .areas(main);
+                let [l, m, r] = three_panel(main);
                 (l, Some(m), Some(r))
             }
             (true, true, CavaPlacement::UnderLyrics) => {
@@ -1809,26 +2440,57 @@ mod ui {
     fn draw_cover(f: &mut Frame, app: &mut App, area: Rect) {
         let th = app.theme.clone();
         let fs = app.picker.font_size();
-        let (fw, fh) = (fs.width.max(1) as f64, fs.height.max(1) as f64);
+        let (fw, fh) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let ascii = app.args.ascii_cover;
+        let picker = &app.picker;
         match &mut app.cover {
-            CoverState::Ready { proto, w, h } => {
-                // Largest rect (in cells) that keeps the image aspect, centered.
-                let scale = ((area.width as f64 * fw) / *w as f64)
-                    .min((area.height as f64 * fh) / *h as f64);
-                let cw = ((*w as f64 * scale) / fw).floor().max(1.0) as u16;
-                let ch = ((*h as f64 * scale) / fh).floor().max(1.0) as u16;
+            CoverState::Ready { src, rendered } => {
+                // Largest whole-cell box with the artwork's aspect ratio, centred.
+                let (w, h) = (src.width() as f64, src.height() as f64);
+                let scale =
+                    ((area.width as f64 * fw as f64) / w).min((area.height as f64 * fh as f64) / h);
+                let cw = (((w * scale) / fw as f64).floor() as u16).clamp(1, area.width);
+                let ch = (((h * scale) / fh as f64).floor() as u16).clamp(1, area.height);
                 let r = Rect {
-                    x: area.x + (area.width - cw.min(area.width)) / 2,
-                    y: area.y + (area.height - ch.min(area.height)) / 2,
-                    width: cw.min(area.width),
-                    height: ch.min(area.height),
+                    x: area.x + (area.width - cw) / 2,
+                    y: area.y + (area.height - ch) / 2,
+                    width: cw,
+                    height: ch,
                 };
-                f.render_stateful_widget(
-                    StatefulImage::default()
-                        .resize(Resize::Scale(Some(image::imageops::FilterType::Triangle))),
-                    r,
-                    proto.as_mut(),
-                );
+
+                if rendered.as_ref().map(Rendered::cells) != Some((cw, ch)) {
+                    let to_ascii = |src: &image::DynamicImage| Rendered::Ascii {
+                        cells: (cw, ch),
+                        art: cover::ascii_art(src, cw, ch),
+                    };
+                    *rendered = Some(if ascii {
+                        to_ascii(src)
+                    } else {
+                        // Pixel-exact bitmap: scaled and centre-cropped to *precisely* cw×ch
+                        // cells, so the graphics protocol has nothing to pad. (Letting it fit
+                        // a slightly-off aspect padded the remainder with transparent black,
+                        // which showed up as a dark sliver on the right/bottom edge.)
+                        let exact = src.resize_to_fill(
+                            cw as u32 * fw,
+                            ch as u32 * fh,
+                            FilterType::Triangle,
+                        );
+                        match picker.new_protocol(exact, Size::new(cw, ch), Resize::Fit(None)) {
+                            Ok(p) => Rendered::Graphics {
+                                cells: (cw, ch),
+                                proto: Box::new(p),
+                            },
+                            Err(_) => to_ascii(src),
+                        }
+                    });
+                }
+                match rendered {
+                    Some(Rendered::Graphics { proto, .. }) => {
+                        f.render_widget(Image::new(proto.as_ref()), r)
+                    }
+                    Some(Rendered::Ascii { art, .. }) => draw_ascii(f.buffer_mut(), r, art),
+                    None => {}
+                }
             }
             other => {
                 let msg = match other {
@@ -1845,6 +2507,19 @@ mod ui {
                         ..area
                     },
                 );
+            }
+        }
+    }
+
+    fn draw_ascii(buf: &mut Buffer, r: Rect, art: &cover::AsciiArt) {
+        for y in 0..art.rows.min(r.height) {
+            for x in 0..art.cols.min(r.width) {
+                let (ch, (cr, cg, cb)) = art.cells[y as usize * art.cols as usize + x as usize];
+                if let Some(cell) = buf.cell_mut((r.x + x, r.y + y)) {
+                    let mut utf8 = [0u8; 4];
+                    cell.set_symbol(ch.encode_utf8(&mut utf8))
+                        .set_fg(Color::Rgb(cr, cg, cb));
+                }
             }
         }
     }
@@ -1907,6 +2582,76 @@ mod ui {
         }
     }
 
+    /// Style for a non-active lyric line `dist` lines away from the active one:
+    /// fades with distance, and past lines fade a little faster than upcoming ones.
+    fn fade_style(th: &Theme, dist: usize, past: bool) -> Style {
+        let t = 0.40 + 0.08 * dist as f32 + if past { 0.10 } else { 0.0 };
+        Style::new().fg(th.fade(t.min(0.78)))
+    }
+
+    /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
+    /// middle of the panel (big font if it fits, otherwise bold wrapped text), with the lines
+    /// before and after stacked outward from it.
+    fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, lines: &[String], c: usize, gap: usize) {
+        let width = inner.width as usize;
+        let big = bigfont::render(&lines[c], width, 3)
+            .filter(|rows| rows.len() as u16 + 4 <= inner.height);
+        let (stage, stage_style): (Vec<String>, Style) = match big {
+            Some(rows) => (rows, Style::new().fg(th.primary())),
+            None => (
+                wrap(&lines[c], width),
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+            ),
+        };
+        let sh = (stage.len() as u16).min(inner.height);
+        let top = inner.y + (inner.height - sh) / 2;
+
+        let put = |f: &mut Frame, y: i32, text: &str, style: Style| {
+            if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
+                f.render_widget(
+                    Paragraph::new(Line::styled(text.to_string(), style))
+                        .alignment(Alignment::Center),
+                    Rect {
+                        y: y as u16,
+                        height: 1,
+                        ..inner
+                    },
+                );
+            }
+        };
+
+        for (i, row) in stage.iter().take(sh as usize).enumerate() {
+            put(f, top as i32 + i as i32, row, stage_style);
+        }
+
+        // Earlier lines, nearest first, growing upward.
+        let mut y = top as i32 - 2;
+        for k in 1..=c {
+            let style = fade_style(th, k, true);
+            for row in wrap(&lines[c - k], width).iter().rev() {
+                put(f, y, row, style);
+                y -= 1;
+            }
+            y -= gap as i32;
+            if y < inner.y as i32 {
+                break;
+            }
+        }
+        // Upcoming lines, growing downward.
+        let mut y = top as i32 + sh as i32 + 1;
+        for (k, line) in lines.iter().enumerate().skip(c + 1) {
+            let style = fade_style(th, k - c, false);
+            for row in wrap(line, width) {
+                put(f, y, &row, style);
+                y += 1;
+            }
+            y += gap as i32;
+            if y >= inner.bottom() as i32 {
+                break;
+            }
+        }
+    }
+
     fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         let block = panel(app, "lyrics");
         let inner = block.inner(area).inner(ratatui::layout::Margin {
@@ -1955,20 +2700,42 @@ mod ui {
         };
         let plain = matches!(app.lyrics, LyricsState::Ready(Lyrics::Plain(_)));
 
-        // Wrap into rows, remembering which source line each row belongs to.
+        // Blank rows between lines — dropped on short panels where they'd waste the space.
+        let gap = if inner.height >= 10 {
+            app.args.lyric_spacing as usize
+        } else {
+            0
+        };
+
+        // Big-font mode uses the fixed "focus" layout instead of the scrolling one.
+        if app.big_lyrics && !plain {
+            if let Some(c) = current {
+                app.lyric_scroll_target = app.lyric_scroll; // nothing left to animate
+                draw_focus(f, inner, &th, &lines, c, gap);
+                return;
+            }
+        }
+
+        // Wrap into rows, remembering which source line each row belongs to. Spacing rows
+        // belong to the line above them but hold no text.
         let mut rows: Vec<(usize, String)> = Vec::new();
         let mut starts = Vec::with_capacity(lines.len());
+        let mut ends = Vec::with_capacity(lines.len());
         for (i, l) in lines.iter().enumerate() {
             starts.push(rows.len());
             for r in wrap(l, inner.width as usize) {
                 rows.push((i, r));
+            }
+            ends.push(rows.len());
+            for _ in 0..gap {
+                rows.push((i, String::new()));
             }
         }
         if rows.is_empty() {
             return centered_msg(f, inner, &[("♪", dim)]);
         }
 
-        // Scroll target: center of the active line (synced) or proportional (plain).
+        // Scroll target: centre of the active line's text (synced) or proportional (plain).
         let target = if plain {
             if length > 0.0 {
                 (pos / length).clamp(0.0, 1.0) * rows.len() as f64
@@ -1977,10 +2744,7 @@ mod ui {
             }
         } else {
             match current {
-                Some(c) => {
-                    let end = starts.get(c + 1).copied().unwrap_or(rows.len());
-                    (starts[c] + end) as f64 / 2.0 - 0.5
-                }
+                Some(c) => (starts[c] + ends[c]) as f64 / 2.0 - 0.5,
                 None => -1.0,
             }
         };
@@ -2025,12 +2789,12 @@ mod ui {
                 continue;
             }
             let (li, text) = &rows[idx as usize];
+            if text.is_empty() {
+                continue;
+            }
             let style = match current {
                 Some(c) if *li == c => Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
-                Some(c) => {
-                    let d = (*li as i64 - c as i64).unsigned_abs() as f32;
-                    Style::new().fg(th.fade((0.35 + 0.08 * d).min(0.72)))
-                }
+                Some(c) => fade_style(&th, li.abs_diff(c), *li < c),
                 None if plain => Style::new().fg(th.fade(0.35)),
                 None => Style::new().fg(th.fade(0.55)),
             };
@@ -2057,7 +2821,11 @@ mod ui {
 
         if app.cava_bars.is_empty() {
             let msg = app.cava_status.clone().unwrap_or_else(|| "…".into());
-            return centered_msg(f, inner, &[(msg.as_str(), Style::new().fg(th.fade(0.5)))]);
+            // Long error messages wrap instead of being cut off at the panel edge.
+            let style = Style::new().fg(th.fade(0.5));
+            let rows = wrap(&msg, inner.width as usize);
+            let msgs: Vec<(&str, Style)> = rows.iter().map(|r| (r.as_str(), style)).collect();
+            return centered_msg(f, inner, &msgs);
         }
         if inner.width < 2 || inner.height == 0 {
             return;
@@ -2100,9 +2868,14 @@ mod ui {
     fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         let th = &app.theme;
         let dim = Style::new().fg(th.fade(0.45));
+        let source = if app.args.cover_theme {
+            format!("{} + cover accent", th.source)
+        } else {
+            th.source.clone()
+        };
         let left = Line::from(vec![
             Span::styled(" ◆ ", Style::new().fg(th.primary())),
-            Span::styled(th.source.clone(), dim),
+            Span::styled(source, dim),
             Span::styled("  │  ", Style::new().fg(th.fade(0.7))),
             Span::styled(
                 format!("offset {:+.1}s", app.offset),
@@ -2113,7 +2886,7 @@ mod ui {
                 },
             ),
         ]);
-        let hints = "space ⏯  n/p  ←/→ seek  ,/. sync  l lyrics  c cava  q quit ";
+        let hints = "space ⏯  n/p  ←/→ seek  ,/. sync  l lyrics  b big  c cava  q quit ";
         let left_w = left.width() as u16;
         f.render_widget(Paragraph::new(left), area);
         if left_w + hints.chars().count() as u16 + 2 <= area.width {
@@ -2143,10 +2916,19 @@ async fn main() -> Result<()> {
     }));
 
     // Query graphics protocol + font size *after* entering the alt screen, *before* reading events.
-    let mut picker = ratatui_image::picker::Picker::from_query_stdio()
-        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
-    let s = theme.surface;
-    picker.set_background_color(Some(image::Rgba([s.0, s.1, s.2, 255])));
+    // (ASCII covers need no graphics protocol, so skip the terminal query entirely.)
+    let mut picker = if args.ascii_cover {
+        ratatui_image::picker::Picker::halfblocks()
+    } else {
+        ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks())
+    };
+    // Only fill image padding with the surface colour when it is a real, painted colour.
+    let bg = theme
+        .surface
+        .filter(|_| !args.transparent)
+        .map(|s| image::Rgba([s.0, s.1, s.2, 255]));
+    picker.set_background_color(bg);
 
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     let app = app::App::new(args, theme, picker, tx.clone());
@@ -2226,12 +3008,27 @@ mod tests {
         assert_eq!(year::clean("Normal Title"), "Normal Title");
     }
 
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("md-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn theme_from(extra: &[&str], file: Option<&str>) -> theme::Theme {
+        let mut argv = vec!["x".to_string()];
+        if let Some(content) = file {
+            let p = tmp("theme").join(format!("{}.json", util::fnv1a(content)));
+            std::fs::write(&p, content).unwrap();
+            argv.extend(["-c".into(), p.to_str().unwrap().to_string()]);
+        }
+        argv.extend(extra.iter().map(|s| s.to_string()));
+        theme::load(&cli::Args::parse_from(argv))
+    }
+
     #[test]
     fn hex_and_theme_schemas() {
         assert_eq!(theme::parse_hex("#ff8000"), Some((255, 128, 0)));
         assert_eq!(theme::parse_hex("ff8000cc"), Some((255, 128, 0)));
-        let dir = std::env::temp_dir().join(format!("md-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
         let cases = [
             r##"{"mSurface":"#101010","mPrimary":"#ff0000"}"##,
             r##"{"colors":{"dark":{"surface":"#101010","primary":"#ff0000"}}}"##,
@@ -2239,13 +3036,181 @@ mod tests {
             r##"{"dark":{"mSurface":"#101010","mPrimary":"#ff0000"},"light":{"mSurface":"#eeeeee"}}"##,
         ];
         for (i, c) in cases.iter().enumerate() {
-            let p = dir.join(format!("{i}.json"));
-            std::fs::write(&p, c).unwrap();
-            let args = cli::Args::parse_from(["x", "-c", p.to_str().unwrap()]);
-            let t = theme::load(&args);
-            assert_eq!(t.surface, (16, 16, 16), "case {i}");
-            assert_eq!(t.primary, (255, 0, 0), "case {i}");
+            let t = theme_from(&[], Some(c));
+            assert_eq!(t.surface, Some((16, 16, 16)), "case {i}");
+            assert_eq!(t.primary, Some((255, 0, 0)), "case {i}");
+            assert!(t.on_surface.is_some(), "case {i}");
         }
+    }
+
+    #[test]
+    fn empty_or_invalid_json_falls_back_to_terminal_colors() {
+        for bad in [
+            "{}",
+            "",
+            "not json",
+            "[]",
+            r#"{"foo": 1}"#,
+            r##"{"mOnSurface":"#fff"}"##,
+        ] {
+            let t = theme_from(&[], Some(bad));
+            assert_eq!(
+                (t.surface, t.primary, t.on_surface),
+                (None, None, None),
+                "{bad:?}"
+            );
+            assert!(
+                t.source.starts_with("terminal colors"),
+                "{bad:?}: {}",
+                t.source
+            );
+            // terminal slots map to reset/ANSI colours, never a hex value
+            assert_eq!(t.surface(), ratatui::style::Color::Reset);
+            assert_eq!(t.text(), ratatui::style::Color::Reset);
+            assert_eq!(t.primary(), ratatui::style::Color::Cyan);
+            assert!(!matches!(t.fade(0.5), ratatui::style::Color::Rgb(..)));
+            assert!(!matches!(
+                t.accent_fade(0.6),
+                ratatui::style::Color::Rgb(..)
+            ));
+        }
+        // a missing explicit file behaves the same
+        let t = theme::load(&cli::Args::parse_from([
+            "x",
+            "-c",
+            "/nonexistent/colors.json",
+        ]));
+        assert_eq!((t.surface, t.primary), (None, None));
+    }
+
+    #[test]
+    fn terminal_colors_flag_bypasses_files_and_accepts_overrides() {
+        let file = r##"{"mSurface":"#101010","mPrimary":"#ff0000"}"##;
+        let t = theme_from(&["--terminal-colors"], Some(file));
+        assert_eq!((t.surface, t.primary, t.on_surface), (None, None, None));
+        assert_eq!(t.source, "terminal colors");
+
+        // both overrides together → fully custom
+        let t = theme_from(
+            &[
+                "--terminal-colors",
+                "--surface",
+                "#112233",
+                "--primary",
+                "#ffaa00",
+            ],
+            Some(file),
+        );
+        assert_eq!(t.surface, Some((0x11, 0x22, 0x33)));
+        assert_eq!(t.primary, Some((0xff, 0xaa, 0x00)));
+        assert!(t.on_surface.is_some());
+        assert!(t.source.contains("CLI overrides"));
+
+        // only --primary: the background and text stay the terminal's own
+        let t = theme_from(&["--terminal-colors", "--primary", "#ffaa00"], None);
+        assert_eq!((t.surface, t.on_surface), (None, None));
+        assert_eq!(t.primary, Some((0xff, 0xaa, 0x00)));
+        assert_eq!(t.surface(), ratatui::style::Color::Reset);
+
+        // only --surface: text colour is derived so it stays readable on it
+        let t = theme_from(&["--terminal-colors", "--surface", "#101010"], None);
+        assert_eq!(t.surface, Some((16, 16, 16)));
+        assert!(theme::luminance(t.on_surface.unwrap()) > 0.7);
+        assert_eq!(t.primary(), ratatui::style::Color::Cyan);
+    }
+
+    #[test]
+    fn accent_from_cover() {
+        let solid = |c: [u8; 3]| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(32, 32, image::Rgb(c)))
+        };
+        let a = cover::dominant_accent(&solid([220, 30, 40])).unwrap();
+        assert!(a.0 > 200 && a.1 < 60 && a.2 < 70, "{a:?}");
+
+        // a mostly-black cover with a small vivid blue patch → blue, not gray/black
+        let mut img = image::RgbImage::from_pixel(64, 64, image::Rgb([8, 8, 8]));
+        for y in 0..24 {
+            for x in 0..24 {
+                img.put_pixel(x, y, image::Rgb([20, 60, 230]));
+            }
+        }
+        let a = cover::dominant_accent(&image::DynamicImage::ImageRgb8(img)).unwrap();
+        assert!(a.2 > 180 && a.0 < 60, "{a:?}");
+
+        // grayscale → falls back to a neutral instead of None; pure black → None
+        assert!(cover::dominant_accent(&solid([140, 140, 140])).is_some());
+        assert!(cover::dominant_accent(&solid([0, 0, 0])).is_none());
+
+        // readable() lifts a dark accent on a dark surface and keeps unknown-bg accents bright
+        let dark_bg = Some((16, 16, 16));
+        let r = theme::readable((30, 20, 90), dark_bg);
+        assert!(
+            theme::luminance(r) - theme::luminance((16, 16, 16)) >= 0.4 - 1e-3,
+            "{r:?}"
+        );
+        assert!(theme::luminance(theme::readable((10, 10, 40), None)) >= 0.35);
+    }
+
+    #[test]
+    fn ascii_cover_dimensions_and_charset() {
+        let mut img = image::RgbImage::new(64, 64);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            let v = (x * 4) as u8; // left → right gradient
+            *p = image::Rgb([v, 40, 200 - v / 2]);
+        }
+        let art = cover::ascii_art(&image::DynamicImage::ImageRgb8(img), 20, 10);
+        assert_eq!((art.cols, art.rows, art.cells.len()), (20, 10, 200));
+        assert!(
+            art.cells
+                .iter()
+                .all(|(c, _)| c.is_ascii() && !c.is_control())
+        );
+        // dark side is sparse, bright side is dense
+        let density = |c: char| " .:-=+*#%@".find(c).unwrap();
+        assert!(density(art.cells[0].0) < density(art.cells[19].0));
+    }
+
+    #[test]
+    fn big_font_renders_and_falls_back() {
+        let rows = bigfont::render("Hi there", 60, 3).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(
+            rows.iter()
+                .all(|r| r.chars().count() == rows[0].chars().count())
+        );
+        assert!(rows.iter().any(|r| r.contains('█')));
+        // wraps into pieces (4 rows each + 1 blank row between) when narrow
+        let rows = bigfont::render("go on", 24, 3).unwrap();
+        assert_eq!(rows.len(), 9);
+        let rows = bigfont::render("hello world again", 40, 3).unwrap();
+        assert_eq!(rows.len(), 14);
+        assert!(rows.iter().all(|r| r.chars().count() <= 40));
+        // too many pieces / word wider than the panel / unsupported script → None
+        assert!(bigfont::render("one two three four five six seven", 20, 2).is_none());
+        assert!(bigfont::render("supercalifragilistic", 30, 3).is_none());
+        assert!(bigfont::render("你好", 60, 3).is_none());
+        // accents fold, curly quotes and ellipsis work
+        assert!(bigfont::render("Café – don’t…", 100, 1).is_some());
+    }
+
+    #[test]
+    fn three_panel_side_columns_are_equal() {
+        for w in [80u16, 100, 120, 139, 140, 200, 301] {
+            let main = ratatui::layout::Rect::new(0, 0, w, 30);
+            let [l, m, r] = ui::three_panel(main);
+            assert_eq!(l.width, r.width, "width {w}");
+            assert_eq!(l.width + m.width + r.width, w, "width {w}");
+            assert!(m.width >= 20, "width {w}");
+            assert_eq!((l.x, m.x, r.x), (0, l.width, l.width + m.width));
+        }
+    }
+
+    #[test]
+    fn cava_runs_mono() {
+        let c = cava::config(48);
+        assert!(c.contains("channels = mono"));
+        assert!(c.contains("bars = 48"));
+        assert!(c.contains("method = raw") && c.contains("data_format = ascii"));
     }
 
     #[test]
