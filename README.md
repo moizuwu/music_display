@@ -119,6 +119,7 @@ mouse = true                   # false = don't capture the mouse
 spotify = false                # Spotify Web API features (see "Spotify" below)
 # spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
 spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as "this PC"
+use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup)
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -163,6 +164,8 @@ spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | Spotify Connect name of spotifyd on this PC (its `device_name`, default `Desktop (spotifyd)`). |
+| `--use-spotifyd` | spotifyd is the player on this PC; `--setup` turns it on for you (see "Setup (spotifyd)" below). |
+| `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--spotify-login` / `--spotify-logout` | log in in the browser and save the token / forget it, then exit. |
 
 ## Keys
@@ -252,6 +255,18 @@ The login uses PKCE: no client secret is needed or stored. In development mode S
 Lists are loaded when first shown and kept while the app runs. Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
 
 **Other devices.** When no MPRIS player is running (the phone plays, or Spotify runs elsewhere), the app shows what Spotify says plays, with lyrics, cover and chords as usual, and every control (play / pause, next / previous, seek, volume, shuffle, repeat) goes to that device through the API; the footer says `on <device>`. It polls every 1.5 s while that plays (3 s paused, 5 s while an MPRIS player is on screen). `H` moves playback to this PC (the Spotify app when open, else spotifyd, matched by `spotify_device`), and the MPRIS player takes over from there. Play with nothing active anywhere carries on here from where Spotify last stopped, or starts the last played song.
+
+## Setup (spotifyd)
+
+Optional. [spotifyd](https://github.com/Spotifyd/spotifyd) turns this PC into a Spotify Connect device, so music_display can play on it without the Spotify app. Nothing is set up unless you ask: `music_display --setup` does it once, step by step:
+
+1. Checks that `spotifyd` is installed. If it isn't, it prints the install command for your distribution (pacman, apt, dnf or zypper) or the upstream link, and stops without changing anything.
+2. Runs `spotifyd authenticate` in your terminal (spotifyd's own login; follow its prompts).
+3. Logs you in to Spotify in the browser (the PKCE login from the Spotify section; asks for your app's Client ID unless `spotify_client_id` is already set).
+4. Writes `~/.config/spotifyd/spotifyd.conf` (just `device_name`) and the entries `spotify = true`, `spotify_client_id`, `spotify_device` and `use_spotifyd = true` to `config.toml`. The device name is asked for (default: your `spotify_device`, else `music_display`).
+5. Checks that spotifyd is running and that the device shows up in your Spotify devices, and says which of the two is missing if not.
+
+An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself; if it isn't running, start it (for example `spotifyd --no-daemon`, or enable its service) and the device appears in Spotify within a few seconds. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC; leave it off to use whatever player or device is playing.
 
 ## Local files
 

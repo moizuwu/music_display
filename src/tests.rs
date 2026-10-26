@@ -2101,3 +2101,6 @@ fn hangul_chords_follow_the_wide_glyphs() {
     let r = bigfont::render_map("A…B", 60, 3, 2, bigfont::Font::Normal).unwrap();
     assert_eq!(r.chunks[0].cols, [(0, 0), (1, 12), (1, 24), (1, 36), (2, 48)]);
 }
+
+// `--setup` (spotifyd + Spotify login): src/tests/setup_tests.rs
+mod setup_tests;

@@ -170,6 +170,11 @@ mod bigfont;
 mod ui;
 
 // ════════════════════════════════════════════════════════════════════════════
+// --setup: guided spotifyd + Spotify login
+// ════════════════════════════════════════════════════════════════════════════
+mod setup;
+
+// ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown
 // ════════════════════════════════════════════════════════════════════════════
 #[tokio::main]
@@ -185,6 +190,9 @@ async fn main() -> Result<()> {
     if args.print_config {
         print!("{}", config::render(&args, &cfg_path, found));
         return Ok(());
+    }
+    if args.setup {
+        return setup::run_live(&args, cfg_path).await;
     }
     if args.spotify_login {
         return spotify::login(args.spotify_client_id.as_deref().unwrap_or("")).await;
