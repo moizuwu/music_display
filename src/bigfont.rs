@@ -198,20 +198,53 @@ fn accented(c: char) -> Option<[u8; 7]> {
     Some([mark, g[0] | g[1], g[2], g[3], g[4], g[5], g[6]])
 }
 
+/// Which glyph set a piece of text is drawn with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Font {
+    /// Latin 5×7, Hangul composed on 8×8.
+    Normal,
+    /// Latin 3×5 (no Hangul), for panels too narrow for the normal one.
+    Compact,
+    /// Hangul on a 12×12 grid (strokes drawn per jamo), Latin 5×7 beside it; used by
+    /// the caller when the line has Hangul and the room is there, else [`Font::Normal`].
+    Fine,
+}
+
+impl Font {
+    /// Pixel rows in one piece, including the blank row under it (they pair up into
+    /// half-block rows).
+    fn grid_h(self) -> usize {
+        match self {
+            Font::Normal => 8,
+            Font::Compact => 6,
+            Font::Fine => 12,
+        }
+    }
+}
+
 /// One drawable character: `w` pixel columns, bit `w - 1 - x` of a row is column `x`.
 #[derive(Clone, Copy)]
 struct Glyph {
     w: usize,
-    rows: [u16; 8],
+    rows: [u16; 12],
 }
 
 fn latin(c: char) -> Option<Glyph> {
     let g = base_glyph(c).or_else(|| accented(c))?;
-    let mut rows = [0u16; 8];
+    let mut rows = [0u16; 12];
     for (r, b) in rows.iter_mut().zip(g) {
         *r = b as u16;
     }
     Some(Glyph { w: 5, rows })
+}
+
+/// A Latin glyph placed on the 12-row Fine grid, a little above the middle like the Latin
+/// letters of a Korean typeface sit next to Hangul.
+fn latin_fine(c: char) -> Option<Glyph> {
+    let g = latin(c)?;
+    let mut rows = [0u16; 12];
+    rows[3..10].copy_from_slice(&g.rows[..7]);
+    Some(Glyph { w: g.w, rows })
 }
 
 /// Compact 3×5 variant for panels too narrow for the normal font (letters, digits and a
@@ -271,7 +304,7 @@ fn compact_glyph(c: char) -> Option<Glyph> {
         '_' => [0, 0, 0, 0, 0b111],
         _ => return None,
     };
-    let mut rows = [0u16; 8];
+    let mut rows = [0u16; 12];
     for (r, b) in rows.iter_mut().zip(g) {
         *r = b as u16;
     }
@@ -381,7 +414,7 @@ fn stamp_one(cv: &mut Canvas, shape: usize, x0: usize, y0: usize, w: usize, h: u
 }
 
 /// Vertical vowel (ㅏ ㅐ ㅑ ㅒ ㅓ ㅔ ㅕ ㅖ ㅣ = 0–7, 20) in the `w`×`h` box at (`x0`, `y0`).
-fn vowel_vertical(cv: &mut Canvas, v: u32, x0: usize, w: usize, y0: usize, h: usize) {
+fn vowel_vertical<const N: usize>(cv: &mut [[bool; N]; N], v: u32, x0: usize, w: usize, y0: usize, h: usize) {
     let right = x0 + w - 1;
     let mid = y0 + (h - 1) / 2;
     let ticks: Vec<usize> = match v {
@@ -415,7 +448,7 @@ fn vowel_vertical(cv: &mut Canvas, v: u32, x0: usize, w: usize, y0: usize, h: us
 }
 
 /// Horizontal vowel (ㅗ ㅛ ㅜ ㅠ ㅡ = 8, 12, 13, 17, 18) over columns `xa..=xb`, rows `y0..y0 + h`.
-fn vowel_horizontal(cv: &mut Canvas, v: u32, (xa, xb): (usize, usize), y0: usize, h: usize) {
+fn vowel_horizontal<const N: usize>(cv: &mut [[bool; N]; N], v: u32, (xa, xb): (usize, usize), y0: usize, h: usize) {
     let rise = h.saturating_sub(1).min(2);
     let bar = match v {
         8 | 12 => y0 + h - 1,
@@ -479,7 +512,7 @@ fn hangul(c: char) -> Option<Glyph> {
             }
         }
     }
-    let mut rows = [0u16; 8];
+    let mut rows = [0u16; 12];
     for (r, line) in rows.iter_mut().zip(cv) {
         for (x, on) in line.iter().enumerate() {
             if *on {
@@ -490,13 +523,245 @@ fn hangul(c: char) -> Option<Glyph> {
     Some(Glyph { w: 8, rows })
 }
 
-fn glyph(c: char, compact: bool) -> Option<Glyph> {
-    if compact { compact_glyph(c) } else { latin(c).or_else(|| hangul(c)) }
+// ── Hangul, fine: 12×12, every jamo drawn from strokes ──────────────────
+type Fine = [[bool; 12]; 12];
+
+fn px(cv: &mut Fine, x: usize, y: usize) {
+    if x < 12 && y < 12 {
+        cv[y][x] = true;
+    }
+}
+
+fn hline(cv: &mut Fine, y: usize, xa: usize, xb: usize) {
+    for x in xa..=xb {
+        px(cv, x, y);
+    }
+}
+
+fn vline(cv: &mut Fine, x: usize, ya: usize, yb: usize) {
+    for y in ya..=yb {
+        px(cv, x, y);
+    }
+}
+
+/// A straight stroke between two points (Bresenham).
+fn stroke(cv: &mut Fine, (xa, ya): (usize, usize), (xb, yb): (usize, usize)) {
+    let (mut x, mut y) = (xa as i32, ya as i32);
+    let (dx, dy) = ((xb as i32 - x).abs(), -(yb as i32 - y).abs());
+    let (sx, sy) = (if x < xb as i32 { 1 } else { -1 }, if y < yb as i32 { 1 } else { -1 });
+    let mut err = dx + dy;
+    loop {
+        px(cv, x as usize, y as usize);
+        if (x, y) == (xb as i32, yb as i32) {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// ㅅ: two legs from the apex row `y0` to the bottom `y1`, across columns `x0..=x1`.
+fn legs(cv: &mut Fine, x0: usize, x1: usize, y0: usize, y1: usize) {
+    let (xl, xr) = (x0 + (x1 - x0) / 2, x0 + (x1 - x0).div_ceil(2));
+    stroke(cv, (xl, y0), (x0, y1));
+    stroke(cv, (xr, y0), (x1, y1));
+}
+
+/// ㅇ: a ring with rounded corners in the box.
+fn ring(cv: &mut Fine, x0: usize, y0: usize, w: usize, h: usize) {
+    let (x1, y1) = (x0 + w - 1, y0 + h - 1);
+    if w < 3 || h < 3 {
+        hline(cv, y0, x0, x1);
+        hline(cv, y1, x0, x1);
+        return;
+    }
+    hline(cv, y0, x0 + 1, x1 - 1);
+    hline(cv, y1, x0 + 1, x1 - 1);
+    vline(cv, x0, y0 + 1, y1 - 1);
+    vline(cv, x1, y0 + 1, y1 - 1);
+}
+
+/// One initial consonant (`shape`: the [`CONS`] index) in the `w`×`h` box at (`x0`, `y0`).
+fn fine_shape(cv: &mut Fine, shape: usize, x0: usize, y0: usize, w: usize, h: usize) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (x1, y1) = (x0 + w - 1, y0 + h - 1);
+    let ym = y0 + (h - 1) / 2;
+    let xm = x0 + (w - 1) / 2;
+    match shape {
+        0 => {
+            // ㄱ
+            hline(cv, y0, x0, x1);
+            vline(cv, x1, y0, y1);
+        }
+        1 => {
+            // ㄴ
+            vline(cv, x0, y0, y1);
+            hline(cv, y1, x0, x1);
+        }
+        2 => {
+            // ㄷ
+            hline(cv, y0, x0, x1);
+            vline(cv, x0, y0, y1);
+            hline(cv, y1, x0, x1);
+        }
+        3 => {
+            // ㄹ
+            hline(cv, y0, x0, x1);
+            vline(cv, x1, y0, ym);
+            hline(cv, ym, x0, x1);
+            vline(cv, x0, ym, y1);
+            hline(cv, y1, x0, x1);
+        }
+        4 => {
+            // ㅁ
+            hline(cv, y0, x0, x1);
+            hline(cv, y1, x0, x1);
+            vline(cv, x0, y0, y1);
+            vline(cv, x1, y0, y1);
+        }
+        5 => {
+            // ㅂ
+            vline(cv, x0, y0, y1);
+            vline(cv, x1, y0, y1);
+            hline(cv, ym, x0, x1);
+            hline(cv, y1, x0, x1);
+        }
+        6 => legs(cv, x0, x1, y0, y1), // ㅅ
+        7 => ring(cv, x0, y0, w, h),   // ㅇ
+        8 => {
+            // ㅈ
+            hline(cv, y0, x0, x1);
+            legs(cv, x0, x1, (y0 + 1).min(y1), y1);
+        }
+        9 => {
+            // ㅊ
+            px(cv, xm, y0);
+            hline(cv, (y0 + 1).min(y1), x0, x1);
+            legs(cv, x0, x1, (y0 + 2).min(y1), y1);
+        }
+        10 => {
+            // ㅋ
+            hline(cv, y0, x0, x1);
+            vline(cv, x1, y0, y1);
+            hline(cv, ym, x0, x1);
+        }
+        11 => {
+            // ㅌ
+            hline(cv, y0, x0, x1);
+            vline(cv, x0, y0, y1);
+            hline(cv, ym, x0, x1);
+            hline(cv, y1, x0, x1);
+        }
+        12 => {
+            // ㅍ
+            hline(cv, y0, x0, x1);
+            hline(cv, y1, x0, x1);
+            vline(cv, x0 + (w / 4).max(1).min(w - 1), y0, y1);
+            vline(cv, x1 - (w / 4).max(1).min(w - 1), y0, y1);
+        }
+        _ => {
+            // ㅎ
+            px(cv, xm, y0);
+            hline(cv, (y0 + 1).min(y1), x0, x1);
+            if h > 3 {
+                ring(cv, x0 + (w / 4).min(1), y0 + 2, w - 2 * (w / 4).min(1), h - 2);
+            }
+        }
+    }
+}
+
+/// Initial consonant `id` (0–18); the doubled ones (ㄲ ㄸ ㅃ ㅆ ㅉ) are two narrow copies.
+fn fine_cons(cv: &mut Fine, id: u8, x0: usize, y0: usize, w: usize, h: usize) {
+    let (shape, double) = cons_shape(id);
+    if double && w >= 4 {
+        let w1 = w.div_ceil(2);
+        fine_shape(cv, shape, x0, y0, w1 - 1, h);
+        fine_shape(cv, shape, x0 + w1, y0, w - w1, h);
+    } else {
+        fine_shape(cv, shape, x0, y0, w, h);
+    }
+}
+
+/// Compose a syllable block on a 12×12 grid. The body (initial + vowel) takes the top 7
+/// rows when there is a final consonant, which gets the bottom 4.
+fn hangul_fine(c: char) -> Option<Glyph> {
+    let idx = (c as u32).checked_sub(0xAC00).filter(|i| *i < 11172)?;
+    let (l, v, t) = ((idx / 588) as u8, (idx % 588) / 28, idx % 28);
+    let mut cv: Fine = [[false; 12]; 12];
+    let body = if t > 0 { 7 } else { 12 };
+    match v {
+        0..=7 | 20 => {
+            fine_cons(&mut cv, l, 0, 0, 7, body);
+            vowel_vertical(&mut cv, v, 8, 4, 0, body);
+        }
+        8 | 12 | 13 | 17 | 18 => {
+            // initial on top, the horizontal vowel under it (a blank row between)
+            let (ih, vy, vh) = if t > 0 { (4, 5, 2) } else { (7, 8, 4) };
+            fine_cons(&mut cv, l, 2, 0, 8, ih);
+            vowel_horizontal(&mut cv, v, (1, 10), vy, vh);
+        }
+        _ => {
+            // compound: the horizontal part under the initial (left), the vertical part right
+            let (ih, vy, vh) = if t > 0 { (4, 5, 2) } else { (7, 8, 4) };
+            fine_cons(&mut cv, l, 0, 0, 6, ih);
+            let (hor, ver) = match v {
+                9 => (8, 0),
+                10 => (8, 1),
+                11 => (8, 20),
+                14 => (13, 4),
+                15 => (13, 5),
+                16 => (13, 20),
+                _ => (18, 20),
+            };
+            vowel_horizontal(&mut cv, hor, (0, 5), vy, vh);
+            vowel_vertical(&mut cv, ver, 8, 4, 0, body);
+        }
+    }
+    if t > 0 {
+        match final_parts(t) {
+            (a, None) => fine_cons(&mut cv, a, 1, 8, 10, 4),
+            (a, Some(b)) => {
+                fine_cons(&mut cv, a, 0, 8, 5, 4);
+                fine_cons(&mut cv, b, 6, 8, 5, 4);
+            }
+        }
+    }
+    let mut rows = [0u16; 12];
+    for (r, line) in rows.iter_mut().zip(cv) {
+        for (x, on) in line.iter().enumerate() {
+            if *on {
+                *r |= 1 << (11 - x);
+            }
+        }
+    }
+    Some(Glyph { w: 12, rows })
+}
+
+fn glyph(c: char, font: Font) -> Option<Glyph> {
+    match font {
+        Font::Compact => compact_glyph(c),
+        Font::Normal => latin(c).or_else(|| hangul(c)),
+        Font::Fine => latin_fine(c).or_else(|| hangul_fine(c)),
+    }
+}
+
+/// Does the text contain Hangul syllables (so the Fine font applies)?
+pub fn has_hangul(text: &str) -> bool {
+    text.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c))
 }
 
 /// Upper-case; `None` if the font can't draw the character (CJK ideographs, Arabic…
 /// make the caller fall back to normal text).
-fn fold(c: char, compact: bool) -> Option<char> {
+fn fold(c: char, font: Font) -> Option<char> {
     let c = match c {
         '’' | '‘' | '`' | '´' => '\'',
         '“' | '”' => '"',
@@ -510,16 +775,20 @@ fn fold(c: char, compact: bool) -> Option<char> {
             }
         }
     };
-    glyph(c, compact).map(|_| c)
+    glyph(c, font).map(|_| c)
 }
 
-/// Columns used by one glyph incl. the 1-column gap after it: Latin 6, Hangul 9; a space
-/// is 3 columns (2 in the compact font).
-fn advance(c: char, compact: bool) -> usize {
+/// Columns used by one glyph incl. the 1-column gap after it: Latin 6, Hangul 9 (13 in the
+/// Fine font); a space is 3 columns (2 in the compact font, 4 in the Fine one).
+fn advance(c: char, font: Font) -> usize {
     if c == ' ' {
-        if compact { 2 } else { 3 }
+        match font {
+            Font::Normal => 3,
+            Font::Compact => 2,
+            Font::Fine => 4,
+        }
     } else {
-        glyph(c, compact).map_or(6, |g| g.w + 1)
+        glyph(c, font).map_or(6, |g| g.w + 1)
     }
 }
 
@@ -534,33 +803,89 @@ pub fn render(text: &str, max_cols: usize, max_chunks: usize) -> Option<Vec<Stri
 
 /// [`render`] with every pixel drawn `scale` (1–3) times as wide and tall; a piece is
 /// then `4 * scale` rows tall.
+#[cfg(test)]
 pub fn render_scaled(text: &str, max_cols: usize, max_chunks: usize, scale: usize) -> Option<Vec<String>> {
-    render_with(text, max_cols, max_chunks, scale, false)
+    render_map(text, max_cols, max_chunks, scale, Font::Normal).map(|r| r.rows)
 }
 
 /// The compact 3×5 font (Latin letters and digits only): a piece is 3 rows tall.
+#[cfg(test)]
 pub fn render_compact(text: &str, max_cols: usize, max_chunks: usize) -> Option<Vec<String>> {
-    render_with(text, max_cols, max_chunks, 1, true)
+    render_map(text, max_cols, max_chunks, 1, Font::Compact).map(|r| r.rows)
 }
 
-fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, compact: bool) -> Option<Vec<String>> {
-    let scale = if compact { 1 } else { scale.clamp(1, 3) };
-    let adv = |c: char| advance(c, compact) * scale;
-    let text = text.replace('…', "...");
-    let mut words: Vec<Vec<char>> = Vec::new();
-    for w in text.split_whitespace() {
-        words.push(w.chars().map(|c| fold(c, compact)).collect::<Option<Vec<_>>>()?);
+/// One wrapped piece of a rendered line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // read by the chord alignment that follows
+pub struct Chunk {
+    /// Index of its first row in [`Rendered::rows`].
+    pub row: usize,
+    /// Columns it is wide (every row of the piece has this many).
+    pub width: usize,
+    /// For each drawn source character (index into the text's `chars()`), the first column
+    /// of its glyph. Whitespace has no entry.
+    pub cols: Vec<(usize, usize)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // `chunks` is read by the chord alignment that follows
+pub struct Rendered {
+    pub rows: Vec<String>,
+    pub chunks: Vec<Chunk>,
+}
+
+impl Rendered {
+    /// Where a chord attached to source character `idx` goes: (piece, column). A chord on
+    /// whitespace takes the next glyph; past the end it takes the last one.
+    #[allow(dead_code)]
+    pub fn column_of(&self, idx: usize) -> Option<(usize, usize)> {
+        let mut last = None;
+        for (k, ch) in self.chunks.iter().enumerate() {
+            for &(i, col) in &ch.cols {
+                if i >= idx {
+                    return Some((k, col));
+                }
+                last = Some((k, col));
+            }
+        }
+        last
+    }
+}
+
+/// A piece of text becomes words of (folded char, source index); a space has `usize::MAX`.
+type Word = Vec<(char, usize)>;
+
+/// [`render_scaled`] / [`render_compact`] in any [`Font`], also telling where each source
+/// character landed (see [`Chunk::cols`]).
+pub fn render_map(text: &str, max_cols: usize, max_chunks: usize, scale: usize, font: Font) -> Option<Rendered> {
+    let scale = if font == Font::Compact { 1 } else { scale.clamp(1, 3) };
+    let adv = |c: char| advance(c, font) * scale;
+    let mut words: Vec<Word> = Vec::new();
+    let mut word: Word = Vec::new();
+    for (i, c) in text.chars().enumerate() {
+        if c.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else if c == '…' {
+            word.extend(std::iter::repeat_n(('.', i), 3));
+        } else {
+            word.push((fold(c, font)?, i));
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
     }
     if words.is_empty() {
         return None;
     }
 
     // Greedy wrap by rendered width.
-    let mut chunks: Vec<Vec<char>> = Vec::new();
-    let mut cur: Vec<char> = Vec::new();
+    let mut chunks: Vec<Word> = Vec::new();
+    let mut cur: Word = Vec::new();
     let mut cur_w = 0usize; // columns incl. the trailing gap
     for w in words {
-        let ww: usize = w.iter().map(|&c| adv(c)).sum();
+        let ww: usize = w.iter().map(|&(c, _)| adv(c)).sum();
         if ww - 1 > max_cols {
             return None;
         }
@@ -569,7 +894,7 @@ fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, com
             cur_w = 0;
         }
         if !cur.is_empty() {
-            cur.push(' ');
+            cur.push((' ', usize::MAX));
             cur_w += adv(' ');
         }
         cur_w += ww;
@@ -580,23 +905,26 @@ fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, com
         return None;
     }
 
-    // pixel rows per piece: 8 (7 + 1 blank) or 6 (5 + 1 blank), so they pair up into
-    // half-block rows
-    let grid_h = if compact { 6 } else { 8 };
+    // pixel rows per piece (7 + 1 blank, 5 + 1 blank, 12 incl. blank), so they pair up
+    // into half-block rows
+    let grid_h = font.grid_h();
     let mut rows = Vec::new();
+    let mut pieces = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         if i > 0 {
             rows.push(String::new());
         }
         let mut px: Vec<Vec<bool>> = vec![Vec::new(); grid_h];
-        for &c in chunk {
+        let mut cols = Vec::new();
+        for &(c, src) in chunk {
             if c == ' ' {
                 for row in px.iter_mut() {
-                    row.extend(std::iter::repeat_n(false, advance(' ', compact)));
+                    row.extend(std::iter::repeat_n(false, advance(' ', font)));
                 }
                 continue;
             }
-            let g = glyph(c, compact).unwrap_or(Glyph { w: 5, rows: [0; 8] });
+            cols.push((src, px[0].len() * scale));
+            let g = glyph(c, font).unwrap_or(Glyph { w: 5, rows: [0; 12] });
             for (y, row) in px.iter_mut().enumerate() {
                 for x in 0..g.w {
                     row.push(g.rows[y] & (1 << (g.w - 1 - x)) != 0);
@@ -617,6 +945,7 @@ fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, com
                 })
                 .collect();
         }
+        pieces.push(Chunk { row: rows.len(), width: px[0].len(), cols });
         for pair in 0..grid_h / 2 * scale {
             let (top, bot) = (&px[pair * 2], &px[pair * 2 + 1]);
             rows.push(
@@ -632,5 +961,14 @@ fn render_with(text: &str, max_cols: usize, max_chunks: usize, scale: usize, com
             );
         }
     }
-    Some(rows)
+    Some(Rendered { rows, chunks: pieces })
+}
+
+/// The glyph pixels of one character in a font, as text rows (for tests and tuning).
+#[cfg(test)]
+pub fn dump(c: char, font: Font) -> Vec<String> {
+    let g = glyph(c, font).unwrap();
+    (0..font.grid_h().min(12))
+        .map(|y| (0..g.w).map(|x| if g.rows[y] & (1 << (g.w - 1 - x)) != 0 { '#' } else { '.' }).collect())
+        .collect()
 }

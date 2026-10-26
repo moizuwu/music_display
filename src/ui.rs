@@ -1475,12 +1475,25 @@ fn chord_rows(line: &str, cs: &[(usize, String)], width: usize, tr: i32, flats: 
 /// (down to one) whose wrapped pieces (up to 4) leave at least 2 rows for the neighbouring lines;
 /// failing that the compact 3×5 font. `None`: the caller falls back to bold wrapped text.
 /// `spare` leaves that many more rows free (the member tag above the stage).
+#[cfg(test)]
 pub fn big_stage(text: &str, width: usize, height: u16, scale: usize, spare: u16) -> Option<Vec<String>> {
-    let fits = |rows: &Vec<String>| rows.len() as u16 + 2 + spare <= height;
+    big_stage_map(text, width, height, scale, spare).map(|r| r.rows)
+}
+
+/// [`big_stage`] with the column of every source character (for chords above the glyphs).
+/// A line with Hangul tries the finer 12×12 font first at each scale and falls back to the
+/// 8×8 one, so a narrow or short panel keeps working exactly as before.
+pub fn big_stage_map(text: &str, width: usize, height: u16, scale: usize, spare: u16) -> Option<bigfont::Rendered> {
+    use bigfont::Font;
+    let fits = |r: &bigfont::Rendered| r.rows.len() as u16 + 2 + spare <= height;
+    let hangul = bigfont::has_hangul(text);
     (1..=scale.clamp(1, 3))
         .rev()
-        .find_map(|sc| bigfont::render_scaled(text, width, 4, sc).filter(fits))
-        .or_else(|| bigfont::render_compact(text, width, 4).filter(fits))
+        .find_map(|sc| {
+            let fine = hangul.then(|| bigfont::render_map(text, width, 4, sc, Font::Fine).filter(fits));
+            fine.flatten().or_else(|| bigfont::render_map(text, width, 4, sc, Font::Normal).filter(fits))
+        })
+        .or_else(|| bigfont::render_map(text, width, 4, 1, Font::Compact).filter(fits))
 }
 
 /// Everything [`draw_focus`] needs besides the frame, area and theme.
@@ -1524,8 +1537,8 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
     let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
     let (stage, stage_style, stage_li): (Vec<String>, Style, Option<usize>) = match c {
-        Some(c) => match big_stage(&lines[c], width, inner.height, fc.scale, tag_rows) {
-            Some(rows) => (rows, Style::new().fg(th.primary()), Some(c)),
+        Some(c) => match big_stage_map(&lines[c], width, inner.height, fc.scale, tag_rows) {
+            Some(r) => (r.rows, Style::new().fg(th.primary()), Some(c)),
             None => (wrap(&lines[c], width), bold, Some(c)),
         },
         None => (

@@ -1811,3 +1811,52 @@ fn key_hints_drop_whole_items_never_cut_one() {
     assert_eq!(ui::ellipsize("hello world", 8), "hello w…");
     assert_eq!(ui::ellipsize("hi", 8), "hi");
 }
+
+#[test]
+fn fine_hangul_composes_every_syllable() {
+    use bigfont::{Font, dump};
+    let mut seen = std::collections::HashSet::new();
+    for u in 0xAC00u32..=0xD7A3 {
+        let c = char::from_u32(u).unwrap();
+        let g = dump(c, Font::Fine);
+        assert_eq!((g.len(), g[0].chars().count()), (12, 12), "{c}");
+        assert!(g.iter().any(|r| r.contains('#')), "{c} is empty");
+        seen.insert(g);
+    }
+    // 12×12 tells syllables apart better than the 8×8 grid (10 049 distinct of 11 172)
+    assert!(seen.len() >= 10_400, "{} distinct", seen.len());
+    // golden: 가 = ㄱ with ㅏ, and 한 = ㅎ ㅏ ㄴ
+    assert_eq!(
+        dump('가', Font::Fine),
+        [
+            "#######.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.####",
+            "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...", "......#.#...",
+        ]
+    );
+    assert_eq!(
+        dump('한', Font::Fine),
+        [
+            "...#....#...", "#######.#...", "..###...#...", ".#...#..####", ".#...#..#...", ".#...#..#...",
+            "..###...#...", "............", ".#..........", ".#..........", ".#..........", ".##########.",
+        ]
+    );
+    // Latin letters sit beside Hangul on the same 12 rows
+    assert_eq!(dump('A', Font::Fine).iter().filter(|r| r.contains('#')).count(), 7);
+}
+
+#[test]
+fn hangul_lines_use_the_fine_font_and_fall_back() {
+    // "안녕": 2 × 13 − 1 columns, 6 text rows (12 pixel rows), against 17 columns × 4 rows
+    let fine = ui::big_stage("안녕", 60, 20, 1, 0).unwrap();
+    assert_eq!((fine.len(), fine[0].chars().count()), (6, 25));
+    // a panel too short for it keeps the 8×8 font, one too narrow too (13 > 9 columns each)
+    assert_eq!(ui::big_stage("안녕", 60, 7, 1, 0).unwrap().len(), 4);
+    let narrow = ui::big_stage("안녕", 17, 20, 1, 0).unwrap();
+    assert_eq!((narrow.len(), narrow[0].chars().count()), (4, 17));
+    // Latin lines are unchanged, and mixed lines work
+    assert_eq!(ui::big_stage("Hi there", 60, 20, 1, 0).unwrap().len(), 4);
+    assert!(ui::big_stage("Hi 안녕", 60, 20, 1, 0).unwrap().len() == 6);
+    // scale applies to the fine font too, and the compact font still can't draw Hangul
+    assert_eq!(ui::big_stage("안녕", 80, 30, 2, 0).unwrap().len(), 12);
+    assert!(bigfont::render_compact("안녕", 60, 3).is_none());
+}
