@@ -84,6 +84,8 @@ spotify = false                # Spotify Web API features (see "Spotify" below)
 # spotify_client_id = "…"      # Client ID of your Spotify developer app (for --spotify-login)
 spotify_device = ""            # only if you run spotifyd: its `device_name` (e.g. "Living Room PC"), so it
                                # counts as "this PC". Empty = just the Spotify app on this computer
+spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
+spotify_queue_tab = true       # the Queue tab in the library browser
 ```
 
 `music_display --help` lists every flag with its config key.
@@ -126,6 +128,8 @@ spotify_device = ""            # only if you run spotifyd: its `device_name` (e.
 | `--spotify` | turn on the Spotify Web API features: library browser (`o`), like (`f`), play here (`H`), and showing / controlling playback on another device. |
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | only if you run spotifyd: its Spotify Connect name (the `device_name` in its config, say `Living Room PC`), so it counts as "this PC". Default: empty, which matches only the Spotify app on this computer (named after the host name) and devices of type "Computer". |
+| `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
+| `--no-spotify-queue-tab` | hide the Queue tab of the library browser (config `spotify_queue_tab = false`; also in the settings menu). |
 | `--spotify-login` / `--spotify-logout` | log in in the browser and save the token / forget it, then exit. |
 
 ## Keys
@@ -197,11 +201,12 @@ The login uses PKCE: no API key, no client secret, only the Client ID, which is 
 
 **Is spotifyd your player?** Then put its `device_name` into *spotifyd device name* (`spotify_device`) so that it counts as "this PC" for `H` and the device checks. This is only an example of what to enter; nothing is assumed by default, and with the field empty just the Spotify app on this computer is matched.
 
-**Library browser (`o`).** Tabs: Recent · Playlists · Liked · Albums · Artists · Search.
+**Library browser (`o`, or the `[ library ]` button at the top left).** Tabs: Recent · Playlists · Liked · Albums · Artists · Search · Queue. On a terminal at least 110 columns wide it is a **panel on the left** and the player keeps the rest of the width: the player stays usable beside it: keys the browser doesn't use (`n` / `p`, `+` / `-`, `m`, `z`, `M`…) still reach it, and so do clicks on its buttons and progress bar (the browser keeps `space`, `Enter`, `r`, `f` and `l`, so those mean what the table below says while it is open). On a narrower terminal it is an overlay over the middle of the screen, and in the minimal view it is always an overlay. `Esc` (or `q`, or `o` again, or the button) closes it.
 
 | key | action |
 | --- | --- |
-| `Tab` / `Shift-Tab`, `1`–`6` | switch tab |
+| `Tab` / `Shift-Tab`, `1`–`7` | switch tab (`6` search, `7` queue) |
+| `Q` | the Queue tab (`q` is quit, so the queue has a capital) |
 | `/` | search: jumps to the Search tab with the field ready (typing swallows every key, `q` and `o` included; `Enter` runs the search, `Esc` leaves the field) |
 | `d` | choose a device (see below) |
 | `↑` / `↓`, `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, wheel | move |
@@ -214,7 +219,13 @@ The login uses PKCE: no API key, no client secret, only the Client ID, which is 
 | `r` | reload the list |
 | `Esc` / `q` / `o` | close |
 
-Lists are loaded when first shown and kept while the app runs. Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
+Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
+
+**Mouse.** It works the same in the panel and in the overlay, in exactly the places that are drawn: click a tab to switch to it, click a row to select it, click the selected row again to play it (that is `Enter`), the wheel moves the selection three rows at a time, and `Esc` closes. A click outside closes the overlay; beside the side panel a click outside is for the player (its buttons and the progress bar work as usual) and leaves the panel open. The device list (`d`) takes clicks the same way.
+
+**Loading and the cache.** Nothing is requested until Spotify is on and you are logged in. Then the main lists (Recent, Playlists, Albums, Artists) load in the background, one after the other, so they are there when you open the browser; Liked Songs (up to 1000 songs) loads when you first open it. What was loaded is kept in memory for the session and shown at once when you open the browser or switch tabs; a list older than a minute is fetched again in the background while the old rows stay on screen (`refreshing…`), a fresh one costs no request at all. The queue is asked for again almost every time you look at it. Nothing is written to disk. When Spotify answers `429` it says how long to wait (`Retry-After`), and until that time has passed no request is sent at all, not by the browser, the background load or the player polling.
+
+**Queue (`Q`, tab 7).** What is playing now and what comes next (`GET /me/player/queue`). `Enter` plays the one under the cursor (Spotify lets an app start a song, not jump inside the queue, so it plays that song on its own). If Spotify refuses it you see `Queue unavailable: <reason>`. The tab can be switched off in the settings menu (*Queue tab in the library*) or with `spotify_queue_tab = false`.
 
 **Search.** One request finds songs, albums, artists and playlists (at most 10 of each, the most a development-mode app gets), listed under headings. The keys are the same as in the other tabs: `Enter` plays (a song plays alone), `a` queues, `A` adds to a playlist, `f` likes, `→` opens an album, an artist or one of your own playlists, `←` goes back to the results where you left them. While a new search runs the old results stay on screen, dimmed, and an answer to an older search that arrives late is dropped.
 

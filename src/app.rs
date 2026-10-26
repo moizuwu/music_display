@@ -112,7 +112,8 @@ pub const BINDS: &[Bind] = &[
 
 /// Keys inside the library browser (documented in the help and the README).
 pub const LIBRARY_KEYS: &[(&str, &str)] = &[
-    ("Tab / 1-6", "switch tab (6 = search)"),
+    ("Tab / 1-7", "switch tab (6 search, 7 queue)"),
+    ("Q", "the queue: now playing, next up"),
     ("/", "search (Enter runs it)"),
     ("Enter", "play"),
     ("→ / ←", "open / back"),
@@ -122,7 +123,7 @@ pub const LIBRARY_KEYS: &[(&str, &str)] = &[
 ];
 
 pub use crate::browser::{Level, Library, TABS};
-use crate::browser::{DevicePicker, Edit, TAB_LIKED, TAB_PLAYLISTS, TAB_SEARCH, TextInput};
+use crate::browser::{DevicePicker, Edit, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TextInput};
 
 /// Mouse gestures (they are hit-tested where they are drawn, so this is documentation
 /// kept next to the table): (group, gesture, what it does).
@@ -233,6 +234,8 @@ pub enum Setting {
     SpotifyLogin,
     SpotifyLogout,
     SpotifyDevice,
+    SpotifyButton,
+    SpotifyQueueTab,
 }
 
 /// What the settings menu draws, top to bottom: group headers, the Spotify status line, and
@@ -301,6 +304,8 @@ impl Setting {
         Setting::SpotifyLogin,
         Setting::SpotifyLogout,
         Setting::SpotifyDevice,
+        Setting::SpotifyButton,
+        Setting::SpotifyQueueTab,
     ];
 
     pub fn label(self) -> &'static str {
@@ -331,6 +336,8 @@ impl Setting {
             Setting::SpotifyLogin => "Log in",
             Setting::SpotifyLogout => "Log out",
             Setting::SpotifyDevice => "spotifyd device name",
+            Setting::SpotifyButton => "Library button (top left)",
+            Setting::SpotifyQueueTab => "Queue tab in the library",
         }
     }
 
@@ -362,6 +369,8 @@ impl Setting {
             Setting::SpotifyClientId => &["spotify_client_id"],
             Setting::SpotifyLogin | Setting::SpotifyLogout => &[],
             Setting::SpotifyDevice => &["spotify_device"],
+            Setting::SpotifyButton => &["spotify_button"],
+            Setting::SpotifyQueueTab => &["spotify_queue_tab"],
         }
     }
 
@@ -524,6 +533,8 @@ pub struct App {
     pub settings_edit: Option<(Setting, TextInput)>,
     /// `d`: the device picker, while it is open.
     pub devices: Option<DevicePicker>,
+    /// The background load of the main lists after Spotify came on.
+    preload_task: Option<JoinHandle<()>>,
 }
 
 impl App {
@@ -624,7 +635,9 @@ impl App {
             login_msg: None,
             settings_edit: None,
             devices: None,
+            preload_task: None,
         };
+        app.sync_queue_tab();
         app.translate_on = app.args.translate;
         app.vol_step = app.args.volume_step;
         if app.args.cava || app.args.thirdpanel || app.args.underlyrics {
@@ -1318,6 +1331,8 @@ impl App {
                 _ if self.args.spotify_device.is_empty() => "none".into(),
                 _ => self.args.spotify_device.clone(),
             },
+            Setting::SpotifyButton => onoff(!self.args.no_spotify_button),
+            Setting::SpotifyQueueTab => onoff(!self.args.no_spotify_queue_tab),
         }
     }
 
@@ -1442,6 +1457,11 @@ impl App {
             }
             Setting::SpotifyLogin => self.toggle_login(),
             Setting::SpotifyLogout => self.logout_spotify(),
+            Setting::SpotifyButton => self.args.no_spotify_button = !self.args.no_spotify_button,
+            Setting::SpotifyQueueTab => {
+                self.args.no_spotify_queue_tab = !self.args.no_spotify_queue_tab;
+                self.sync_queue_tab();
+            }
         }
         self.save_settings(s);
     }
@@ -1497,6 +1517,8 @@ impl App {
             ("volume_step", I(self.vol_step as i64)),
             ("spotify", B(self.args.spotify)),
             ("spotify_device", S(self.args.spotify_device.clone())),
+            ("spotify_button", B(!self.args.no_spotify_button)),
+            ("spotify_queue_tab", B(!self.args.no_spotify_queue_tab)),
         ]
         .into_iter()
         .chain(self.args.spotify_client_id.clone().map(|id| ("spotify_client_id", S(id))))
@@ -1600,8 +1622,11 @@ impl App {
                     return false;
                 }
                 if self.lib.open {
-                    self.handle_library_key(k.code);
-                    return false;
+                    let used = self.handle_library_key(k.code);
+                    // beside the side panel the player's own keys keep working
+                    if used || !self.lib.hits.panel {
+                        return false;
+                    }
                 }
                 if self.show_help {
                     // Help is open: arrows / paging scroll it, any other key closes it.
@@ -1623,16 +1648,15 @@ impl App {
                 }
             }
             Event::Mouse(_) if self.show_settings => {}
-            Event::Mouse(m) if self.devices.is_some() => match m.kind {
-                MouseEventKind::ScrollUp => self.handle_devices_key(KeyCode::Up),
-                MouseEventKind::ScrollDown => self.handle_devices_key(KeyCode::Down),
-                _ => {}
-            },
-            Event::Mouse(m) if self.lib.open => match m.kind {
-                MouseEventKind::ScrollUp => self.handle_library_key(KeyCode::Up),
-                MouseEventKind::ScrollDown => self.handle_library_key(KeyCode::Down),
-                _ => {}
-            },
+            Event::Mouse(m) if self.devices.is_some() => self.devices_mouse(m),
+            // the toggle button works whether the browser is open or not
+            Event::Mouse(m)
+                if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+                    && self.lib.hits.button.contains(Position::new(m.column, m.row)) =>
+            {
+                self.toggle_library();
+            }
+            Event::Mouse(m) if self.lib.open && self.library_mouse(m) => {}
             Event::Mouse(m) if self.show_help => match m.kind {
                 MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(2),
                 MouseEventKind::ScrollDown => self.help_scroll += 2,
@@ -1936,12 +1960,25 @@ impl App {
             self.spot_task = Some(tokio::spawn(api.clone().remote_loop(self.tx.clone())));
         }
         self.spot = Some(api);
+        // logged in: the lists start loading now, so they are there when the browser opens
+        #[cfg(not(test))]
+        if self.preload_wanted() {
+            self.start_preload();
+        }
         self.dirty = true;
+    }
+
+    /// The background load only makes sense once Spotify is on and there is a token.
+    pub fn preload_wanted(&self) -> bool {
+        self.spot.is_some() && spotify::logged_in()
     }
 
     /// Turn Spotify off: stop the poller, forget what it showed, close the browser.
     pub fn stop_spotify(&mut self) {
         if let Some(t) = self.spot_task.take() {
+            t.abort();
+        }
+        if let Some(t) = self.preload_task.take() {
             t.abort();
         }
         self.spot = None;
@@ -1955,6 +1992,7 @@ impl App {
         self.liked = None;
         self.liked_uri.clear();
         self.lib = Library::new();
+        self.sync_queue_tab();
         self.dirty = true;
     }
 
@@ -2142,13 +2180,35 @@ impl App {
                     Ok(items) => {
                         l.items = items;
                         l.loaded = true;
+                        l.fetched = Some(Instant::now());
                         l.error = None;
                         l.sel = l.sel.min(l.items.len().saturating_sub(1));
                     }
+                    // what was cached stays on screen; the footer says why it didn't refresh
                     Err(e) => l.error = Some(e),
                 }
                 if i == TAB_PLAYLISTS {
                     self.fill_picker();
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Queue(res) => {
+                let failed = res.as_ref().err().map(|e| format!("Queue unavailable: {e}"));
+                let l = &mut self.lib.tabs[TAB_QUEUE];
+                l.loading = false;
+                match res {
+                    Ok((items, has_now)) => {
+                        l.heads = if has_now { vec![(0, "Now playing"), (1, "Next up")] } else { vec![(0, "Next up")] };
+                        l.summary = format!("{} next", items.len().saturating_sub(has_now as usize));
+                        l.items = items;
+                        l.loaded = true;
+                        l.fetched = Some(Instant::now());
+                        l.error = None;
+                        l.sel = l.sel.min(l.items.len().saturating_sub(1));
+                    }
+                    Err(_) => l.error = failed.clone(),
                 }
                 if let Some(e) = failed {
                     self.set_note(e);
@@ -2258,10 +2318,70 @@ impl App {
         if self.api().is_none() {
             return;
         }
+        self.sync_queue_tab();
         self.lib.open = true;
         self.lib.note = self.spot_status.clone();
+        // what is cached shows at once; a stale list is refreshed in the background
         self.load_tab(self.lib.tab, false);
         self.start_search_typing();
+    }
+
+    fn close_library(&mut self) {
+        self.lib.open = false;
+        self.lib.editing = false;
+    }
+
+    /// The button and the mouse toggle the browser like `o` does.
+    fn toggle_library(&mut self) {
+        if self.lib.open {
+            self.close_library();
+        } else {
+            self.open_library();
+        }
+    }
+
+    /// The Queue tab follows the `spotify_queue_tab` setting.
+    fn sync_queue_tab(&mut self) {
+        self.lib.queue_tab = !self.args.no_spotify_queue_tab;
+        if !self.lib.queue_tab && self.lib.tab == TAB_QUEUE {
+            self.lib.tab = 0;
+            self.lib.stack.clear();
+        }
+    }
+
+    /// Load the lists you are most likely to open (one after the other, never in a burst, and
+    /// never before Spotify's Retry-After has run out) so they are in memory when the browser
+    /// opens. Only runs once Spotify is on and logged in; nothing is written to disk.
+    pub fn start_preload(&mut self) {
+        let Some(api) = self.spot.clone() else { return };
+        if let Some(t) = self.preload_task.take() {
+            t.abort();
+        }
+        let tabs: Vec<usize> = [0usize, 1, 3, 4]
+            .into_iter()
+            .filter(|i| !self.lib.tabs[*i].loading && !self.lib.tabs[*i].fresh(browser::FRESH))
+            .collect();
+        for i in &tabs {
+            self.lib.tabs[*i].loading = true;
+        }
+        let tx = self.tx.clone();
+        self.preload_task = Some(tokio::spawn(async move {
+            for i in tabs {
+                if let Some(left) = api.paused_for() {
+                    tokio::time::sleep(left).await;
+                }
+                let r = match i {
+                    0 => api.recent().await,
+                    1 => api.playlists().await,
+                    3 => api.albums().await,
+                    _ => api.artists().await,
+                };
+                if tx.send(AppEvent::Spotify(spotify::Reply::Tab(i, r.map_err(|e| e.msg)))).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }));
     }
 
     /// On the Search tab with nothing searched yet, the field is ready for typing.
@@ -2291,12 +2411,15 @@ impl App {
         });
     }
 
+    /// Make sure tab `i` is loaded and fresh. A fresh list costs no request; a stale one keeps
+    /// showing while it is fetched again in the background.
     fn load_tab(&mut self, i: usize, force: bool) {
         if i == TAB_SEARCH {
             return; // searches run when asked for
         }
+        let ttl = if i == TAB_QUEUE { browser::QUEUE_FRESH } else { browser::FRESH };
         let l = &mut self.lib.tabs[i];
-        if l.loading || (l.loaded && !force) {
+        if l.loading || (!force && l.fresh(ttl)) {
             return;
         }
         let Some(api) = self.spot.clone() else { return };
@@ -2304,6 +2427,12 @@ impl App {
         l.error = None;
         let tx = self.tx.clone();
         tokio::spawn(async move {
+            use spotify::Reply;
+            if i == TAB_QUEUE {
+                let r = api.queue_list().await.map_err(|e| e.msg);
+                let _ = tx.send(AppEvent::Spotify(Reply::Queue(r)));
+                return;
+            }
             let r = match i {
                 0 => api.recent().await,
                 1 => api.playlists().await,
@@ -2311,12 +2440,23 @@ impl App {
                 3 => api.albums().await,
                 _ => api.artists().await,
             };
-            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Tab(i, r.map_err(|e| e.msg))));
+            let _ = tx.send(AppEvent::Spotify(Reply::Tab(i, r.map_err(|e| e.msg))));
         });
     }
 
+    /// Tab / Shift-Tab: the next shown tab (the Queue tab may be switched off).
+    fn step_tab(&mut self, dir: i32) {
+        let shown = self.lib.visible_tabs();
+        let at = shown.iter().position(|t| *t == self.lib.tab).unwrap_or(0) as i32;
+        let to = shown[(at + dir).rem_euclid(shown.len() as i32) as usize];
+        self.switch_tab(to);
+    }
+
     fn switch_tab(&mut self, i: usize) {
-        self.lib.tab = i % TABS.len();
+        if !self.lib.visible_tabs().contains(&i) {
+            return;
+        }
+        self.lib.tab = i;
         self.lib.stack.clear();
         self.lib.picker = None;
         self.lib.editing = false;
@@ -2373,7 +2513,10 @@ impl App {
             _ => spotify::Cmd::Play { ctx: it.uri, track: String::new() },
         };
         self.spot_cmd(cmd);
-        self.lib.open = false;
+        // the overlay gets out of the way; the side panel stays beside the player
+        if !self.lib.hits.panel {
+            self.close_library();
+        }
     }
 
     fn selected_track(&mut self) -> Option<spotify::Item> {
@@ -2409,16 +2552,24 @@ impl App {
         self.fill_picker();
     }
 
-    pub fn handle_library_key(&mut self, code: KeyCode) {
+    /// A key for the browser. Returns whether it was used: the side panel leaves the player's
+    /// own keys (volume, next…) working, so those come back as `false`.
+    pub fn handle_library_key(&mut self, code: KeyCode) -> bool {
         // typing a search: every key is text until Enter (run it) or Esc (leave the field)
         if self.lib.editing {
-            match self.lib.input.key(code) {
-                Some(Edit::Submit) => self.run_search(),
-                Some(Edit::Cancel) => self.lib.editing = false,
-                None => {}
+            match code {
+                // Tab isn't text: it moves on (so Tab can walk past an empty Search tab)
+                KeyCode::Tab => self.step_tab(1),
+                KeyCode::BackTab => self.step_tab(-1),
+                _ => match self.lib.input.key(code) {
+                    Some(Edit::Submit) => self.run_search(),
+                    Some(Edit::Cancel) => self.lib.editing = false,
+                    None => {}
+                },
             }
-            return;
+            return true;
         }
+        let mut used = true;
         let n = self.lib.level().items.len();
         let page = 10;
         let move_sel = |l: &mut Level, to: usize| l.sel = to.min(n.saturating_sub(1));
@@ -2444,10 +2595,10 @@ impl App {
             KeyCode::Home => self.lib.level_mut().sel = 0,
             KeyCode::End => move_sel(self.lib.level_mut(), n),
             KeyCode::Esc | KeyCode::Char('q') if self.lib.picker.is_some() => self.lib.picker = None,
-            KeyCode::Esc | KeyCode::Char('q' | 'o') => self.lib.open = false,
+            KeyCode::Esc | KeyCode::Char('q' | 'o') => self.close_library(),
             KeyCode::Enter if self.lib.picker.is_some() => {
-                let Some((track, _, l)) = &self.lib.picker else { return };
-                let Some(pl) = l.items.get(l.sel).cloned() else { return };
+                let Some((track, _, l)) = &self.lib.picker else { return true };
+                let Some(pl) = l.items.get(l.sel).cloned() else { return true };
                 let track = track.clone();
                 self.lib.picker = None;
                 self.spot_cmd(spotify::Cmd::Add { playlist: pl.uri, name: pl.name, track });
@@ -2455,11 +2606,14 @@ impl App {
             _ if self.lib.picker.is_some() => {
                 if code == KeyCode::Char('r') {
                     self.reload_level();
+                } else {
+                    used = false;
                 }
             }
-            KeyCode::Tab => self.switch_tab(self.lib.tab + 1),
-            KeyCode::BackTab => self.switch_tab(self.lib.tab + TABS.len() - 1),
-            KeyCode::Char(c @ '1'..='6') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Tab => self.step_tab(1),
+            KeyCode::BackTab => self.step_tab(-1),
+            KeyCode::Char(c @ '1'..='7') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Char('Q') => self.switch_tab(TAB_QUEUE),
             KeyCode::Char('/') => {
                 self.switch_tab(TAB_SEARCH);
                 self.lib.editing = true;
@@ -2495,7 +2649,89 @@ impl App {
                 }
             }
             KeyCode::Char('r') => self.reload_level(),
+            _ => used = false,
+        }
+        used
+    }
+
+    // ── mouse in the browser, the device list and on the button ───────────
+
+    /// A mouse event while the browser is open; returns whether it was used. The overlay takes
+    /// every event (a click outside closes it); the side panel only takes those inside it, so
+    /// the player beside it stays clickable. Click targets are the ones recorded while drawing.
+    fn library_mouse(&mut self, m: crossterm::event::MouseEvent) -> bool {
+        let pos = Position::new(m.column, m.row);
+        let h = self.lib.hits.clone();
+        let inside = h.area.contains(pos);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    if h.panel {
+                        return false;
+                    }
+                    self.close_library();
+                    return true;
+                }
+                if let Some((_, tab)) = h.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                    self.switch_tab(*tab);
+                } else if h.field.contains(pos) {
+                    self.lib.editing = true;
+                } else if let Some((_, item)) = h.rows.iter().find(|(r, _)| r.contains(pos)) {
+                    self.lib.editing = false;
+                    if *item == self.lib.level().sel {
+                        // a click on the selected row is Enter
+                        self.handle_library_key(KeyCode::Enter);
+                    } else {
+                        self.lib.level_mut().sel = *item;
+                    }
+                }
+                true
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
+                let n = self.lib.level().items.len();
+                let l = self.lib.level_mut();
+                l.sel = if m.kind == MouseEventKind::ScrollUp {
+                    l.sel.saturating_sub(3)
+                } else {
+                    (l.sel + 3).min(n.saturating_sub(1))
+                };
+                true
+            }
+            _ => !h.panel || inside,
+        }
+    }
+
+    /// The device list takes every mouse event: click a row to select it, again to choose it,
+    /// click outside to close, wheel to move.
+    fn devices_mouse(&mut self, m: crossterm::event::MouseEvent) {
+        let Some(d) = &mut self.devices else { return };
+        let pos = Position::new(m.column, m.row);
+        let (mut close, mut choose) = (false, false);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !d.area.contains(pos) {
+                    close = true;
+                } else if let Some((_, i)) = d.rows.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    if i == d.sel {
+                        choose = true;
+                    } else {
+                        d.sel = i;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => d.sel = d.sel.saturating_sub(1),
+            MouseEventKind::ScrollDown => d.sel = (d.sel + 1).min(d.items.len().saturating_sub(1)),
             _ => {}
         }
+        if close {
+            self.devices = None;
+        } else if choose {
+            self.choose_device();
+        }
+    }
+
+    /// Part of the layout (panel, button) changed since `before`: the screen needs a clean redraw.
+    pub fn layout_key(&self) -> (bool, bool) {
+        (self.lib.hits.panel, self.lib.hits.button.width > 0)
     }
 }

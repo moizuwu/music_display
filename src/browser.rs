@@ -3,6 +3,7 @@
 
 use crate::spotify;
 use crossterm::event::KeyCode;
+use ratatui::layout::Rect;
 
 /// A one-line text field (cursor counted in characters).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -73,10 +74,18 @@ impl TextInput {
 }
 
 /// The library browser's tabs, in order.
-pub const TABS: [&str; 6] = ["Recent", "Playlists", "Liked", "Albums", "Artists", "Search"];
+pub const TABS: [&str; 7] = ["Recent", "Playlists", "Liked", "Albums", "Artists", "Search", "Queue"];
+/// The same tabs for a narrow box (the side panel).
+pub const TABS_SHORT: [&str; 7] = ["Rec", "Lists", "Liked", "Alb", "Art", "Find", "Queue"];
 pub const TAB_LIKED: usize = 2;
 pub const TAB_PLAYLISTS: usize = 1;
 pub const TAB_SEARCH: usize = 5;
+pub const TAB_QUEUE: usize = 6;
+
+/// A loaded list younger than this is shown as it is and not asked for again.
+pub const FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// The queue changes all the time: it is asked for again almost every time it is looked at.
+pub const QUEUE_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// One list in the library browser: a tab, or an album / playlist / artist opened from one.
 #[derive(Default)]
@@ -94,6 +103,10 @@ pub struct Level {
     pub top: usize,
     /// Search results: grouped under headings, and kept (dimmed) while a new search runs.
     pub search: bool,
+    /// When the rows were last fetched (the in-memory cache: nothing is written to disk).
+    pub fetched: Option<std::time::Instant>,
+    /// Headings drawn in front of these item indices (the queue's "Now playing" / "Next up").
+    pub heads: Vec<(usize, &'static str)>,
 }
 
 /// A row of a drawn list: a group heading (search results) or the item at that index.
@@ -124,9 +137,17 @@ impl Level {
                 out.push(ListRow::Head(group_label(&it.kind)));
                 last = &it.kind;
             }
+            if let Some((_, h)) = self.heads.iter().find(|(at, _)| *at == i) {
+                out.push(ListRow::Head(h));
+            }
             out.push(ListRow::Item(i));
         }
         out
+    }
+
+    /// Loaded, and younger than `ttl`.
+    pub fn fresh(&self, ttl: std::time::Duration) -> bool {
+        self.loaded && self.fetched.is_some_and(|t| t.elapsed() < ttl)
     }
 
     /// Keep the selected item inside a view `view_h` rows tall (and its heading with it when
@@ -148,10 +169,28 @@ impl Level {
     }
 }
 
+/// Click targets of the browser and its toggle button, recorded while drawing (so what can
+/// be clicked is exactly what was drawn).
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct LibHits {
+    /// Drawn as a side panel (the rest of the screen is still live); otherwise an overlay.
+    pub panel: bool,
+    /// The whole browser box (empty while it isn't drawn).
+    pub area: Rect,
+    /// The toggle button (empty while it isn't drawn).
+    pub button: Rect,
+    pub tabs: Vec<(Rect, usize)>,
+    /// The search field.
+    pub field: Rect,
+    /// A drawn item row and the item it shows.
+    pub rows: Vec<(Rect, usize)>,
+}
+
 /// `o`: the Spotify library browser.
 #[derive(Default)]
 pub struct Library {
     pub open: bool,
+    pub hits: LibHits,
     pub tab: usize,
     pub tabs: Vec<Level>,
     /// Albums / playlists / artists opened from the tab, innermost last.
@@ -163,6 +202,8 @@ pub struct Library {
     pub input: TextInput,
     pub editing: bool,
     pub query: String,
+    /// The Queue tab is shown (the `spotify_queue_tab` setting).
+    pub queue_tab: bool,
 }
 
 /// `d`: the Spotify Connect device list.
@@ -173,6 +214,9 @@ pub struct DevicePicker {
     pub error: Option<String>,
     pub sel: usize,
     pub top: usize,
+    /// The box and its drawn rows (device index), for the mouse.
+    pub area: Rect,
+    pub rows: Vec<(Rect, usize)>,
 }
 
 impl Library {
@@ -187,7 +231,12 @@ impl Library {
                 ..Default::default()
             })
             .collect();
-        Library { tabs, ..Default::default() }
+        Library { tabs, queue_tab: true, ..Default::default() }
+    }
+
+    /// The tabs shown, as indices into [`TABS`] (the Queue tab can be switched off).
+    pub fn visible_tabs(&self) -> Vec<usize> {
+        (0..TABS.len()).filter(|i| *i != TAB_QUEUE || self.queue_tab).collect()
     }
 
     /// The list on screen.

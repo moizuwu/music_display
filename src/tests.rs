@@ -1956,7 +1956,17 @@ async fn the_client_searches_lists_devices_and_reports_limits() {
     // the limits Spotify sets come out as sentences
     let e = api.run(spotify::Cmd::Pause).await.unwrap_err();
     assert_eq!((e.msg.as_str(), e.status), ("Spotify is rate limiting: try again in 30 s", 429));
+    // inside the Retry-After window nothing is sent at all
+    let pauses = || log.lock().unwrap().iter().filter(|l| l.contains("/me/player/pause")).count();
+    assert_eq!(pauses(), 1);
     let e = api.run(spotify::Cmd::Pause).await.unwrap_err();
+    assert_eq!(e.status, 429);
+    assert!(e.msg.contains("try again in"), "{}", e.msg);
+    assert_eq!(pauses(), 1, "the second try never left the app");
+    assert!(api.paused_for().is_some());
+    // another client (no window of its own) gets the 403 the server answers next
+    let other = spotify::Api::new(reqwest::Client::new(), "id", "").with_fake_server(&base);
+    let e = other.run(spotify::Cmd::Pause).await.unwrap_err();
     assert_eq!((e.msg.as_str(), e.status), ("Spotify Premium is needed for this", 403));
 }
 
@@ -2059,9 +2069,9 @@ async fn the_search_tab_asks_for_text_first_and_esc_leaves_the_field() {
     app.run(app::Action::Library);
     app.handle(key(K::Enter));
     assert!(!app.lib.tabs[browser::TAB_SEARCH].loading);
-    // Tab walks through all six tabs and wraps
+    // Tab walks through all seven tabs and wraps
     app.lib.editing = false;
-    for _ in 0..6 {
+    for _ in 0..7 {
         app.handle(key(K::Tab));
     }
     assert_eq!(app.lib.tab, browser::TAB_SEARCH);
@@ -2158,6 +2168,535 @@ async fn only_what_needs_a_word_reaches_the_footer_from_the_poller() {
     app.apply(AppEvent::Spotify(spotify::Reply::Tab(1, Err("Spotify refused it (403): Forbidden".into()))));
     assert_eq!(app.lib.tabs[1].error.as_deref(), Some("Spotify refused it (403): Forbidden"));
     assert!(app.note_text().unwrap_or("").contains("403"));
+}
+
+// ── queue tab, cache, preload ──────────────────────────────────────────
+
+const PLAYLISTS_JSON: &str = r#"{"items":[{"uri":"spotify:playlist:p1","name":"Roadtrip","owner":{"id":"me1","display_name":"Me"},"tracks":{"total":3}},
+ {"uri":"spotify:playlist:p2","name":"Focus","owner":{"id":"me1"},"tracks":{"total":9}}],"next":null}"#;
+const ALBUMS_JSON: &str = r#"{"items":[{"album":{"uri":"spotify:album:a1","name":"Opera","artists":[{"name":"Queen"}]}}],"next":null}"#;
+const FOLLOWING_JSON: &str = r#"{"artists":{"items":[{"uri":"spotify:artist:r1","name":"Queen"}],"next":null}}"#;
+const QUEUE_JSON: &str = r#"{"currently_playing":{"uri":"spotify:track:n1","name":"Now Song","duration_ms":1000,"artists":[{"name":"A"}]},
+ "queue":[{"uri":"spotify:track:q1","name":"Next One","duration_ms":2000,"artists":[{"name":"B"}]},{"uri":"spotify:track:q2","name":"After That","duration_ms":3000,"artists":[{"name":"C"}]}]}"#;
+
+/// A fake Spotify with every list the browser asks for.
+fn lib_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    scripted_site(vec![
+        ("GET /me HTTP", vec![R::Http(200, JSON_HDR, r#"{"id":"me1"}"#.into())]),
+        ("/me/player/recently-played", vec![R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())]),
+        ("/me/player/queue", vec![R::Http(200, JSON_HDR, QUEUE_JSON.into())]),
+        ("/me/player/devices", vec![R::Http(200, JSON_HDR, DEVICES_JSON.into())]),
+        ("/me/player/play", vec![R::Http(204, "", String::new())]),
+        ("PUT /me/player HTTP", vec![R::Http(204, "", String::new())]),
+        ("/me/playlists", vec![R::Http(200, JSON_HDR, PLAYLISTS_JSON.into())]),
+        ("/me/albums", vec![R::Http(200, JSON_HDR, ALBUMS_JSON.into())]),
+        ("/me/following", vec![R::Http(200, JSON_HDR, FOLLOWING_JSON.into())]),
+        ("/me/tracks", vec![R::Http(200, JSON_HDR, r#"{"items":[],"next":null}"#.into())]),
+    ])
+}
+
+fn hits(log: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, frag: &str) -> usize {
+    log.lock().unwrap().iter().filter(|l| l.contains(frag)).count()
+}
+
+#[test]
+fn the_queue_is_now_playing_then_next_up() {
+    let v: serde_json::Value = serde_json::from_str(QUEUE_JSON).unwrap();
+    let (items, has_now) = spotify::parse_queue(&v);
+    assert!(has_now);
+    assert_eq!(items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Now Song", "Next One", "After That"]);
+    // nothing playing: only what is queued
+    let v = serde_json::json!({"currently_playing": null, "queue": [{"uri": "spotify:track:q", "name": "Only", "artists": []}]});
+    let (items, has_now) = spotify::parse_queue(&v);
+    assert!(!has_now && items.len() == 1);
+    assert_eq!(spotify::parse_queue(&serde_json::json!({})).0.len(), 0);
+}
+
+#[tokio::test]
+async fn the_queue_tab_lists_and_plays_and_can_be_hidden() {
+    use crossterm::event::KeyCode as K;
+    let (base, log) = lib_site();
+    let (mut app, mut rx) = spotify_app(&base, "queuetab");
+    app.run(app::Action::Library);
+    assert_eq!(app::action_for(K::Char('q')), Some(app::Action::Quit), "q is quit; the tab key is Q");
+    assert_eq!(app::action_for(K::Char('Q')), None, "Q is free in the main view");
+    app.handle(key(K::Char('Q')));
+    assert_eq!(app.lib.tab, browser::TAB_QUEUE);
+    pump(&mut app, &mut rx, |a| a.lib.tabs[browser::TAB_QUEUE].loaded).await;
+    let l = &app.lib.tabs[browser::TAB_QUEUE];
+    assert_eq!(l.items.len(), 3);
+    assert_eq!(l.summary, "2 next");
+    use browser::ListRow::{Head, Item};
+    assert_eq!(l.rows(), [Head("Now playing"), Item(0), Head("Next up"), Item(1), Item(2)]);
+    // Enter plays the one under the cursor
+    app.handle(key(K::Down));
+    app.handle(key(K::Enter));
+    pump(&mut app, &mut rx, |_| hits(&log, "PUT /me/player/play") == 1).await;
+    // 7 is the same tab, and the queue is asked for again soon (it changes all the time)
+    app.lib.open = true;
+    app.handle(key(K::Char('1')));
+    app.handle(key(K::Char('7')));
+    assert_eq!(app.lib.tab, browser::TAB_QUEUE);
+    assert_eq!(hits(&log, "/me/player/queue"), 1, "just fetched: no new request");
+    app.lib.tabs[browser::TAB_QUEUE].fetched = Some(Instant::now() - Duration::from_secs(6));
+    app.handle(key(K::Char('1')));
+    app.handle(key(K::Char('Q')));
+    assert!(app.lib.tabs[browser::TAB_QUEUE].loading && !app.lib.tabs[browser::TAB_QUEUE].items.is_empty(), "old rows stay while it refreshes");
+    pump(&mut app, &mut rx, |a| !a.lib.tabs[browser::TAB_QUEUE].loading).await;
+    assert_eq!(hits(&log, "/me/player/queue"), 2);
+
+    // switched off in the settings: gone from the tab row and from the keys, and saved
+    let cfg = tmp("queuetab").join("config.toml");
+    let _ = std::fs::remove_file(&cfg);
+    app.args.config = Some(cfg.clone());
+    app.change_setting(app::Setting::SpotifyQueueTab, 1);
+    assert!(!app.lib.queue_tab && app.lib.visible_tabs() == [0, 1, 2, 3, 4, 5]);
+    assert_eq!(app.lib.tab, 0, "the queue was on screen: back to the first tab");
+    app.handle(key(K::Char('Q')));
+    app.handle(key(K::Char('7')));
+    assert_eq!(app.lib.tab, 0);
+    for _ in 0..6 {
+        app.handle(key(K::Tab));
+    }
+    assert_eq!(app.lib.tab, 0, "Tab wraps after six tabs");
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify_queue_tab"].as_bool(), Some(false));
+    let screen = render(&mut app, 100, 30).join("\n");
+    assert!(screen.contains("Search") && !screen.contains("Queue"), "{screen}");
+    app.change_setting(app::Setting::SpotifyQueueTab, 1);
+    assert!(app.lib.queue_tab);
+}
+
+#[tokio::test]
+async fn a_queue_error_reads_queue_unavailable() {
+    let (base, _log) = scripted_site(vec![
+        ("/me/player/queue", vec![R::Http(403, JSON_HDR, r#"{"error":{"status":403,"message":"Forbidden"}}"#.into())]),
+        ("/me/player/recently-played", vec![R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())]),
+    ]);
+    let (mut app, mut rx) = spotify_app(&base, "queueerr");
+    app.run(app::Action::Library);
+    app.handle(key(crossterm::event::KeyCode::Char('Q')));
+    pump(&mut app, &mut rx, |a| a.lib.tabs[browser::TAB_QUEUE].error.is_some()).await;
+    let e = app.lib.tabs[browser::TAB_QUEUE].error.clone().unwrap();
+    assert_eq!(e, "Queue unavailable: Spotify refused it (403): Forbidden");
+    assert!(app.note_text().unwrap_or("").starts_with("Queue unavailable"));
+    assert!(render(&mut app, 100, 30).join("\n").contains("Queue unavailable"));
+}
+
+#[tokio::test]
+async fn an_open_browser_costs_no_request_while_the_cache_is_fresh() {
+    use crossterm::event::KeyCode as K;
+    let (base, log) = lib_site();
+    let (mut app, mut rx) = spotify_app(&base, "cache");
+    app.run(app::Action::Library);
+    app.handle(key(K::Char('2')));
+    pump(&mut app, &mut rx, |a| a.lib.tabs[browser::TAB_PLAYLISTS].loaded).await;
+    assert_eq!(hits(&log, "/me/playlists"), 1);
+    // closing and opening again, and walking through the tabs, shows the cache and asks for nothing
+    for _ in 0..3 {
+        app.handle(key(K::Esc));
+        app.run(app::Action::Library);
+        app.handle(key(K::Char('2')));
+    }
+    assert!(!app.lib.tabs[browser::TAB_PLAYLISTS].loading);
+    assert_eq!(app.lib.tabs[browser::TAB_PLAYLISTS].items.len(), 2, "shown at once");
+    assert_eq!(hits(&log, "/me/playlists"), 1, "fresh cache: no extra request");
+    // a minute later it is refreshed in the background, the old rows stay until the new ones arrive
+    app.lib.tabs[browser::TAB_PLAYLISTS].fetched = Some(Instant::now() - Duration::from_secs(61));
+    app.handle(key(K::Char('1')));
+    app.handle(key(K::Char('2')));
+    assert!(app.lib.tabs[browser::TAB_PLAYLISTS].loading);
+    assert_eq!(app.lib.tabs[browser::TAB_PLAYLISTS].items.len(), 2);
+    assert!(render(&mut app, 100, 30).join("\n").contains("Roadtrip"), "drawn from the cache while refreshing");
+    // and asking again while it is on its way doesn't pile up requests
+    app.handle(key(K::Char('1')));
+    app.handle(key(K::Char('2')));
+    pump(&mut app, &mut rx, |a| !a.lib.tabs[browser::TAB_PLAYLISTS].loading).await;
+    assert_eq!(hits(&log, "/me/playlists"), 2);
+    // nothing is kept on disk
+    assert!(!spotify::dir().join("library.json").exists());
+}
+
+#[tokio::test]
+async fn the_lists_preload_in_the_background_one_after_the_other() {
+    let (base, log) = lib_site();
+    let (mut app, mut rx) = spotify_app(&base, "preload");
+    app.start_preload();
+    assert!([0usize, 1, 3, 4].iter().all(|i| app.lib.tabs[*i].loading), "marked as on their way");
+    assert!(!app.lib.tabs[browser::TAB_LIKED].loading, "Liked Songs (up to 1000 songs) waits until it is opened");
+    pump(&mut app, &mut rx, |a| [0usize, 1, 3, 4].iter().all(|i| a.lib.tabs[*i].loaded)).await;
+    assert_eq!(hits(&log, "/me/playlists") + hits(&log, "/me/albums") + hits(&log, "/me/following") + hits(&log, "/me/player/recently-played"), 4);
+    // when the browser opens later everything is there, nothing is asked for
+    let before = log.lock().unwrap().len();
+    app.run(app::Action::Library);
+    app.handle(key(crossterm::event::KeyCode::Char('2')));
+    app.handle(key(crossterm::event::KeyCode::Char('4')));
+    assert_eq!(app.lib.tabs[3].items[0].name, "Opera");
+    assert_eq!(log.lock().unwrap().len(), before, "no request on open");
+    // preloading again right away does nothing new
+    app.start_preload();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(log.lock().unwrap().len(), before);
+    // it only runs when Spotify is on and there is a token
+    assert!(!app.preload_wanted(), "no token in the test token folder");
+    std::fs::create_dir_all(spotify::dir()).unwrap();
+    std::fs::write(spotify::dir().join("token.json"), r#"{"access_token":"x","refresh_token":"y","expires_at":1}"#).unwrap();
+    assert!(app.preload_wanted());
+    app.stop_spotify();
+    assert!(!app.preload_wanted(), "off again");
+    let _ = std::fs::remove_file(spotify::dir().join("token.json"));
+}
+
+#[tokio::test]
+async fn retry_after_holds_back_the_next_request() {
+    use crossterm::event::KeyCode as K;
+    let (base, log) = scripted_site(vec![(
+        "/me/player/recently-played",
+        vec![R::Http(429, "Retry-After: 1\r\n", String::new()), R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())],
+    )]);
+    let (mut app, mut rx) = spotify_app(&base, "retryafter");
+    app.run(app::Action::Library);
+    pump(&mut app, &mut rx, |a| a.lib.tabs[0].error.is_some()).await;
+    assert_eq!(hits(&log, "recently-played"), 1);
+    assert!(app.note_text().unwrap_or("").contains("rate limiting"));
+    // reloading right away doesn't leave the app
+    app.handle(key(K::Char('r')));
+    pump(&mut app, &mut rx, |a| !a.lib.tabs[0].loading).await;
+    assert_eq!(hits(&log, "recently-played"), 1, "no request inside the window");
+    assert!(app.lib.tabs[0].error.as_deref().unwrap_or("").contains("try again in"));
+    // once it has run out the request goes through
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    app.handle(key(K::Char('r')));
+    pump(&mut app, &mut rx, |a| a.lib.tabs[0].loaded).await;
+    assert_eq!(hits(&log, "recently-played"), 2);
+}
+
+#[tokio::test]
+async fn the_preload_waits_for_retry_after() {
+    let (base, log) = scripted_site(vec![
+        ("GET /me HTTP", vec![R::Http(200, JSON_HDR, r#"{"id":"me1"}"#.into())]),
+        ("/me/player/recently-played", vec![R::Http(429, "Retry-After: 1\r\n", String::new()), R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())]),
+        ("/me/playlists", vec![R::Http(200, JSON_HDR, PLAYLISTS_JSON.into())]),
+        ("/me/albums", vec![R::Http(200, JSON_HDR, ALBUMS_JSON.into())]),
+        ("/me/following", vec![R::Http(200, JSON_HDR, FOLLOWING_JSON.into())]),
+    ]);
+    let (mut app, mut rx) = spotify_app(&base, "preloadwait");
+    let t0 = Instant::now();
+    app.start_preload();
+    pump(&mut app, &mut rx, |a| a.lib.tabs[1].loaded).await;
+    // the first list was refused; the next ones were not even asked for until the window ended
+    assert!(t0.elapsed() >= Duration::from_millis(900), "{:?}", t0.elapsed());
+    assert!(app.lib.tabs[0].error.is_some());
+    assert_eq!(hits(&log, "recently-played"), 1);
+    assert_eq!(hits(&log, "/me/playlists"), 1);
+}
+
+// ── side panel, overlay, button and the mouse ──────────────────────────
+
+use crossterm::event::{Event, KeyCode as Kc, MouseButton, MouseEvent, MouseEventKind as Mk};
+use ratatui::layout::Rect;
+
+fn mouse(kind: Mk, x: u16, y: u16) -> Event {
+    Event::Mouse(MouseEvent { kind, column: x, row: y, modifiers: crossterm::event::KeyModifiers::NONE })
+}
+
+fn click(app: &mut app::App, x: u16, y: u16) {
+    app.handle(mouse(Mk::Down(MouseButton::Left), x, y));
+}
+
+fn text_at(screen: &[String], r: Rect) -> String {
+    screen[r.y as usize].chars().skip(r.x as usize).take(r.width as usize).collect()
+}
+
+fn playlist_item(n: &str) -> spotify::Item {
+    spotify::Item { kind: "playlist".into(), uri: format!("spotify:playlist:{n}"), name: format!("List {n}"), sub: "3 songs".into(), openable: true, duration: 0.0 }
+}
+
+fn track_item(n: &str) -> spotify::Item {
+    spotify::Item { kind: "track".into(), uri: format!("spotify:track:{n}"), name: format!("Song {n}"), sub: "Band".into(), openable: false, duration: 61.0 }
+}
+
+/// An app on a fake Spotify with a few cached lists, the browser closed, nothing selected.
+fn browser_app(base: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    use spotify::Reply;
+    let (mut app, rx) = spotify_app(base, name);
+    let lists: Vec<spotify::Item> = ["a", "b", "c", "d"].iter().map(|n| playlist_item(n)).collect();
+    app.apply(AppEvent::Spotify(Reply::Tab(1, Ok(lists))));
+    app.apply(AppEvent::Spotify(Reply::Tab(0, Ok(vec![playlist_item("r")]))));
+    app.apply(AppEvent::Spotify(Reply::Tab(3, Ok(vec![playlist_item("alb")]))));
+    app.apply(AppEvent::Spotify(Reply::Tab(2, Ok(vec![track_item("l1")]))));
+    app.apply(AppEvent::Spotify(Reply::Tab(4, Ok(vec![]))));
+    let found = vec![track_item("s1"), track_item("s2"), playlist_item("sp")];
+    app.lib.query = "x".into();
+    app.apply(AppEvent::Spotify(Reply::Search { q: "x".into(), result: Ok(found) }));
+    app.apply(AppEvent::Spotify(Reply::Queue(Ok((vec![track_item("n"), track_item("q1")], true)))));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn the_library_is_a_side_panel_when_wide_and_an_overlay_when_narrow() {
+    let (base, _log) = lib_site();
+    let (mut app, _rx) = browser_app(&base, "panelmode");
+    // closed: only the button
+    render(&mut app, 120, 30);
+    assert_eq!(app.lib.hits.button, Rect { x: 0, y: 0, width: 11, height: 1 });
+    assert!(!app.lib.hits.panel && app.lib.hits.area == Rect::default());
+    assert_eq!(app.layout_key(), (false, true));
+    app.run(app::Action::Library);
+    app.handle(key(Kc::Char('2')));
+    let screen = render(&mut app, 120, 30);
+    assert!(app.lib.hits.panel);
+    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 1, width: ui::PANEL_WIDTH, height: 28 });
+    assert!(screen[0].starts_with("[ library ]"), "{}", screen[0]);
+    let first = screen.iter().position(|r| r.contains("List a")).expect("the first list is drawn");
+    assert_eq!(first, 4, "border row 1, tabs 2, crumbs 3, then the list");
+    assert!(screen.iter().all(|r| !r.contains("List a") || r.find("List a").unwrap() < ui::PANEL_WIDTH as usize));
+    assert_eq!(app.layout_key(), (true, true), "the layout changed: the screen is cleared and drawn again");
+    // the player gets the rest of the width, so it moved right of the panel
+    assert!(screen.iter().any(|r| r.chars().skip(ui::PANEL_WIDTH as usize).any(|c| c != ' ')), "the player is drawn beside the panel");
+    // 110 is the first width with a panel; 109 falls back to the overlay
+    render(&mut app, 110, 30);
+    assert!(app.lib.hits.panel);
+    let screen = render(&mut app, 109, 30);
+    assert!(!app.lib.hits.panel);
+    assert_eq!(app.lib.hits.area, Rect { x: 18, y: 1, width: 72, height: 28 }, "centred, 72 wide");
+    assert!(screen.join("\n").contains("List a"));
+    assert_eq!(app.layout_key(), (false, true));
+    // the minimal view has no room for either
+    app.minimal = true;
+    render(&mut app, 120, 30);
+    assert!(!app.lib.hits.panel && app.lib.hits.button.width == 0 && app.lib.hits.area.width == 72);
+    app.minimal = false;
+    // no button when it is switched off, when the screen is short, or while Spotify is off
+    app.args.no_spotify_button = true;
+    render(&mut app, 120, 30);
+    assert!(app.lib.hits.button.width == 0 && app.lib.hits.panel);
+    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 0, width: ui::PANEL_WIDTH, height: 29 }, "the panel gets the strip's row");
+    app.args.no_spotify_button = false;
+    render(&mut app, 120, 9);
+    assert_eq!(app.lib.hits.button.width, 0);
+    app.stop_spotify();
+    let screen = render(&mut app, 120, 30).join("\n");
+    assert!(!app.lib.open && app.lib.hits.button.width == 0 && !screen.contains("[ library ]"));
+}
+
+#[tokio::test]
+async fn what_can_be_clicked_is_exactly_what_was_drawn() {
+    let (base, _log) = lib_site();
+    let (mut app, _rx) = browser_app(&base, "hitareas");
+    let sizes = [(140u16, 40u16), (120, 30), (110, 12), (100, 30), (80, 24), (60, 16), (45, 12), (40, 10), (30, 8), (20, 6), (10, 4)];
+    for open in [false, true] {
+        for tab in [0usize, 1, 2, 3, 5, 6] {
+            for (w, h) in sizes {
+                app.lib.open = open;
+                app.lib.tab = tab;
+                app.lib.stack.clear();
+                app.lib.editing = false;
+                let screen = render(&mut app, w, h);
+                let ctx = format!("open={open} tab={tab} {w}x{h}");
+                let frame = Rect { x: 0, y: 0, width: w, height: h };
+                let inside = |r: Rect, outer: Rect| r.x >= outer.x && r.y >= outer.y && r.right() <= outer.right() && r.bottom() <= outer.bottom();
+                let hits = app.lib.hits.clone();
+                // the button: whole text or nothing, in the top row
+                if hits.button.width > 0 {
+                    assert!(inside(hits.button, frame) && hits.button.y == 0 && hits.button.x == 0, "{ctx}");
+                    let t = text_at(&screen, hits.button);
+                    assert!(["[ library ]", "[ lib ]", "[≡]"].contains(&t.as_str()), "{ctx}: {t:?}");
+                }
+                if !open {
+                    assert!(hits.area == Rect::default() && hits.rows.is_empty() && hits.tabs.is_empty(), "{ctx}");
+                    continue;
+                }
+                assert!(inside(hits.area, frame), "{ctx}: {:?}", hits.area);
+                // tabs: inside the box, apart from each other, and each one reads as a whole tab name
+                let mut last_right = 0;
+                for (r, i) in &hits.tabs {
+                    assert!(inside(*r, hits.area) && r.x >= last_right, "{ctx}: tab {r:?}");
+                    last_right = r.right();
+                    let t = text_at(&screen, *r);
+                    assert!(t == browser::TABS[*i] || t == browser::TABS_SHORT[*i], "{ctx}: {t:?} is not tab {i}");
+                }
+                // rows: one per line, inside the box, showing the item they say they are
+                let mut last_y = None;
+                for (r, i) in &hits.rows {
+                    assert!(inside(*r, hits.area) && last_y.is_none_or(|y| r.y > y), "{ctx}: row {r:?}");
+                    last_y = Some(r.y);
+                    let t = text_at(&screen, *r);
+                    let name = &app.lib.level().items[*i].name;
+                    if r.width >= 24 {
+                        assert!(t.contains(name.as_str()), "{ctx}: row shows {t:?}, expected {name}");
+                    }
+                }
+                // (a box under 6 rows is too small to draw anything: no targets then)
+                if hits.area.height < 6 {
+                    assert!(hits.tabs.is_empty() && hits.rows.is_empty() && hits.field == Rect::default(), "{ctx}");
+                    continue;
+                }
+                if tab == browser::TAB_SEARCH {
+                    assert!(hits.field.width > 0 && inside(hits.field, hits.area), "{ctx}");
+                    if hits.area.width >= 20 {
+                        assert!(text_at(&screen, hits.field).starts_with("Search:"), "{ctx}: {:?}", text_at(&screen, hits.field));
+                    }
+                } else {
+                    assert_eq!(hits.field, Rect::default(), "{ctx}");
+                }
+                // a click on a drawn row selects exactly that item
+                if let Some((r, i)) = hits.rows.last() {
+                    let before = app.lib.level().sel;
+                    click(&mut app, r.x + r.width / 2, r.y);
+                    let after = app.lib.level().sel;
+                    // (a click on the selected row would play it: only look at the other case)
+                    if *i != before {
+                        assert_eq!(after, *i, "{ctx}");
+                    }
+                    app.lib.open = true;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_mouse_works_in_the_side_panel_and_in_the_overlay() {
+    for (w, h, panel) in [(120u16, 30u16, true), (90, 30, false)] {
+        let (base, log) = lib_site();
+        let (mut app, mut rx) = browser_app(&base, if panel { "mousepanel" } else { "mouseoverlay" });
+        let ctx = format!("{w}x{h} panel={panel}");
+        // the toggle button opens it
+        render(&mut app, w, h);
+        let b = app.lib.hits.button;
+        click(&mut app, b.x + 2, b.y);
+        assert!(app.lib.open, "{ctx}");
+        render(&mut app, w, h);
+        assert_eq!(app.lib.hits.panel, panel, "{ctx}");
+        // tabs by click
+        let albums = app.lib.hits.tabs.iter().find(|(_, i)| *i == 3).unwrap().0;
+        click(&mut app, albums.x, albums.y);
+        assert_eq!(app.lib.tab, 3, "{ctx}");
+        render(&mut app, w, h);
+        let lists = app.lib.hits.tabs.iter().find(|(_, i)| *i == 1).unwrap().0;
+        click(&mut app, lists.x + 1, lists.y);
+        assert_eq!(app.lib.tab, 1, "{ctx}");
+        // a click on a row selects it, the wheel moves, nothing was asked of Spotify yet
+        render(&mut app, w, h);
+        let row = |app: &app::App, i: usize| app.lib.hits.rows.iter().find(|(_, n)| *n == i).unwrap().0;
+        let r2 = row(&app, 2);
+        click(&mut app, r2.x + 3, r2.y);
+        assert_eq!(app.lib.level().sel, 2, "{ctx}");
+        let r = row(&app, 2);
+        app.handle(mouse(Mk::ScrollUp, r.x, r.y));
+        assert_eq!(app.lib.level().sel, 0, "{ctx}: the wheel moves three rows");
+        app.handle(mouse(Mk::ScrollDown, r.x, r.y));
+        assert_eq!(app.lib.level().sel, 3, "{ctx}: and stops at the end");
+        assert_eq!(hits(&log, "PUT"), 0, "{ctx}");
+        // a click outside: the overlay closes, the panel leaves the player beside it alone
+        let outside = if panel { (w - 5, h / 2) } else { (1, h / 2) };
+        click(&mut app, outside.0, outside.1);
+        assert_eq!(app.lib.open, panel, "{ctx}: outside click");
+        app.run(app::Action::Library); // (a no-op beside the panel: it is still open)
+        assert!(app.lib.open);
+        render(&mut app, w, h);
+        // a click on the selected row is Enter: it plays
+        let sel = app.lib.level().sel;
+        let r = row(&app, sel);
+        click(&mut app, r.x + 2, r.y);
+        pump(&mut app, &mut rx, |_| hits(&log, "PUT /me/player/play") == 1).await;
+        assert_eq!(app.lib.open, panel, "{ctx}: the overlay gets out of the way, the panel stays");
+        // Esc closes either
+        app.lib.open = true;
+        render(&mut app, w, h);
+        app.handle(key(Kc::Esc));
+        assert!(!app.lib.open, "{ctx}");
+    }
+}
+
+#[tokio::test]
+async fn beside_the_panel_the_players_keys_work_and_in_the_overlay_they_do_not() {
+    for (w, panel) in [(120u16, true), (90, false)] {
+        let (base, _log) = lib_site();
+        let (mut app, _rx) = browser_app(&base, if panel { "keyspanel" } else { "keysoverlay" });
+        app.run(app::Action::Library);
+        render(&mut app, w, 30);
+        assert_eq!(app.lib.hits.panel, panel);
+        // keys the browser uses are used by it
+        assert!(app.handle_library_key(Kc::Char('j')));
+        assert!(app.handle_library_key(Kc::Tab));
+        // M (minimal view) isn't one of them
+        assert!(!app.handle_library_key(Kc::Char('M')));
+        app.handle(key(Kc::Char('M')));
+        assert_eq!(app.minimal, panel, "w={w}: only beside the panel does it reach the player");
+        app.minimal = false;
+        // Esc closes in both
+        app.handle(key(Kc::Esc));
+        assert!(!app.lib.open);
+    }
+}
+
+#[tokio::test]
+async fn the_device_list_takes_clicks_and_the_wheel() {
+    let (base, log) = lib_site();
+    let (mut app, mut rx) = spotify_app(&base, "devmouse");
+    app.handle(key(Kc::Char('d')));
+    pump(&mut app, &mut rx, |a| a.devices.as_ref().is_some_and(|d| !d.loading)).await;
+    let screen = render(&mut app, 100, 30);
+    let d = app.devices.as_ref().unwrap();
+    assert_eq!(d.rows.len(), 3);
+    for (r, i) in &d.rows {
+        assert!(r.x >= d.area.x && r.right() <= d.area.right() && r.y >= d.area.y && r.bottom() <= d.area.bottom());
+        assert!(text_at(&screen, *r).contains(&d.items[*i].name), "{:?}", text_at(&screen, *r));
+    }
+    let rows = d.rows.clone();
+    // click selects, a second click on the same one chooses; a restricted device only says so
+    click(&mut app, rows[2].0.x + 2, rows[2].0.y);
+    assert_eq!(app.devices.as_ref().unwrap().sel, 2);
+    click(&mut app, rows[2].0.x + 2, rows[2].0.y);
+    assert!(app.devices.is_some() && app.note_text().unwrap_or("").contains("restricted"));
+    assert_eq!(hits(&log, "PUT /me/player HTTP"), 0);
+    app.handle(mouse(Mk::ScrollUp, rows[0].0.x, rows[0].0.y));
+    assert_eq!(app.devices.as_ref().unwrap().sel, 1);
+    click(&mut app, rows[1].0.x + 2, rows[1].0.y);
+    assert!(app.devices.is_none());
+    pump(&mut app, &mut rx, |_| hits(&log, "PUT /me/player HTTP") == 1).await;
+    // a click outside closes it without choosing anything
+    app.handle(key(Kc::Char('d')));
+    pump(&mut app, &mut rx, |a| a.devices.as_ref().is_some_and(|d| !d.loading)).await;
+    render(&mut app, 100, 30);
+    click(&mut app, 0, 0);
+    assert!(app.devices.is_none());
+    assert_eq!(hits(&log, "PUT /me/player HTTP"), 1);
+}
+
+#[tokio::test]
+async fn the_button_and_the_queue_tab_are_settings() {
+    let (base, _log) = lib_site();
+    let (mut app, _rx) = browser_app(&base, "btnsetting");
+    let cfg = tmp("btnsetting").join("config.toml");
+    let _ = std::fs::remove_file(&cfg);
+    app.args.config = Some(cfg.clone());
+    assert_eq!(app.setting_value(app::Setting::SpotifyButton), "[x]");
+    assert_eq!(app.setting_value(app::Setting::SpotifyQueueTab), "[x]");
+    render(&mut app, 100, 30);
+    assert!(app.lib.hits.button.width > 0);
+    app.change_setting(app::Setting::SpotifyButton, 1);
+    assert!(app.args.no_spotify_button);
+    render(&mut app, 100, 30);
+    assert_eq!(app.lib.hits.button.width, 0, "gone: `o` still opens the library");
+    app.run(app::Action::Library);
+    assert!(app.lib.open);
+    let t: toml::Table = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    assert_eq!(t["spotify_button"].as_bool(), Some(false));
+    // the file comes back as the same state on the next start
+    let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x"]);
+    let mut a = <cli::Args as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+    assert!(!a.no_spotify_button && !a.no_spotify_queue_tab, "both are shown by default");
+    config::apply(&mut a, &m, &cfg, true, &mut |_| {});
+    assert!(a.no_spotify_button && !a.no_spotify_queue_tab);
+    let out = config::render(&a, &cfg, true);
+    assert!(out.contains("spotify_button = false") && out.contains("spotify_queue_tab = true"), "{out}");
+    // the flags say the same
+    let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x", "--no-spotify-button", "--no-spotify-queue-tab"]);
+    let a = <cli::Args as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+    assert!(a.no_spotify_button && a.no_spotify_queue_tab);
 }
 
 #[test]

@@ -185,6 +185,15 @@ pub struct Args {
     #[arg(long, default_value = "", value_name = "NAME")]
     pub spotify_device: String,
 
+    /// Hide the library button at the top left (it is only shown while Spotify is on; open the
+    /// library with `o` instead) [config: spotify_button = false]
+    #[arg(long)]
+    pub no_spotify_button: bool,
+
+    /// Hide the Queue tab of the library browser [config: spotify_queue_tab = false]
+    #[arg(long)]
+    pub no_spotify_queue_tab: bool,
+
     /// Log in to Spotify in the browser, save the token and exit [no config key]
     #[arg(long)]
     pub spotify_login: bool,

@@ -282,7 +282,14 @@ async fn run(
                 // or ~10×/s during playback (clock, progress bar, lyric line changes).
                 let periodic = app.playing() && last_draw.elapsed() >= Duration::from_millis(100);
                 if app.dirty || app.animating() || periodic {
+                    let layout = app.layout_key();
                     terminal.draw(|f| ui::draw(f, &mut app))?;
+                    // The side panel or the library button came or went: wipe the screen and
+                    // draw it again, so no old cover image (Sixel / iTerm2) is left behind.
+                    if app.layout_key() != layout {
+                        terminal.clear()?;
+                        terminal.draw(|f| ui::draw(f, &mut app))?;
+                    }
                     app.dirty = false;
                     last_draw = Instant::now();
                 }

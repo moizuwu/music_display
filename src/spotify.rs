@@ -574,6 +574,16 @@ pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
     out
 }
 
+/// `/me/player/queue` → the song playing now (if any) followed by what is queued next.
+/// The flag says whether the first row is the song playing now.
+pub fn parse_queue(v: &Value) -> (Vec<Item>, bool) {
+    let now = track_item(&v["currently_playing"]);
+    let has_now = now.is_some();
+    let mut out: Vec<Item> = now.into_iter().collect();
+    out.extend(v["queue"].as_array().into_iter().flatten().filter_map(track_item));
+    (out, has_now)
+}
+
 fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()
@@ -619,6 +629,8 @@ pub enum Reply {
     Done(Result<String, String>),
     /// The login started from the settings menu made progress or ended.
     Login(LoginMsg),
+    /// The queue: rows, and whether the first one is the song playing now.
+    Queue(Result<(Vec<Item>, bool), String>),
     /// A search finished (`q` is what was asked, so a slow old answer can be dropped).
     Search { q: String, result: Result<Vec<Item>, String> },
     /// The device list for the picker.
@@ -640,6 +652,8 @@ pub struct Api {
     pub wake: Arc<Notify>,
     /// An MPRIS player is showing: poll the API more slowly.
     pub mpris: Arc<AtomicBool>,
+    /// After a 429: no request leaves before this moment (Spotify's `Retry-After`).
+    pause_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Api {
@@ -654,6 +668,21 @@ impl Api {
             me: Arc::new(Mutex::new(String::new())),
             wake: Arc::new(Notify::new()),
             mpris: Arc::new(AtomicBool::new(false)),
+            pause_until: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// How much longer Spotify asked us to wait (after a 429), if it still does.
+    pub fn paused_for(&self) -> Option<Duration> {
+        let until = (*self.pause_until.lock().ok()?)?;
+        until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+    }
+
+    /// Spotify said "slow down": nothing is sent for `secs` seconds (5 when it didn't say).
+    fn pause_for(&self, secs: Option<u64>) {
+        if let Ok(mut p) = self.pause_until.lock() {
+            let until = std::time::Instant::now() + Duration::from_secs(secs.unwrap_or(5).clamp(1, 3600));
+            *p = Some(p.map_or(until, |old| old.max(until)));
         }
     }
 
@@ -714,6 +743,10 @@ impl Api {
     /// One request; `None` for an empty answer. `path` may be a full `next` URL.
     async fn call(&self, method: Method, path: &str, query: &[(&str, String)], body: Option<Value>) -> Res<Option<Value>> {
         let url = if path.starts_with("http") { path.to_string() } else { format!("{}{path}", self.base) };
+        // inside a Retry-After window nothing is sent at all
+        if let Some(left) = self.paused_for() {
+            return Err(ApiError::new(explain(429, "", Some(left.as_secs() + 1)), 429));
+        }
         let token = self.access_token().await?;
         let mut req = self.http.request(method.clone(), &url).bearer_auth(token).query(query);
         req = match body {
@@ -730,6 +763,9 @@ impl Api {
             .and_then(|v| v.trim().parse::<u64>().ok());
         let text = r.text().await.unwrap_or_default();
         if status >= 400 {
+            if status == 429 {
+                self.pause_for(retry_after);
+            }
             let e = api_error(status, &text);
             return Err(ApiError::new(explain(status, &e.msg, retry_after), status));
         }
@@ -940,6 +976,11 @@ impl Api {
         Ok(parse_search(&v, &uid))
     }
 
+    /// Now playing and next up (the first row is the song playing when the flag is set).
+    pub async fn queue_list(&self) -> Res<(Vec<Item>, bool)> {
+        Ok(parse_queue(&self.get("/me/player/queue", &[]).await?))
+    }
+
     /// Move playback to one device and keep playing.
     async fn transfer_to(&self, id: &str) -> Res<()> {
         self.call(Method::PUT, "/me/player", &[], Some(json!({"device_ids": [id], "play": true}))).await?;
@@ -1094,6 +1135,8 @@ impl Api {
                 Ok(Some(x)) if x.snap.status == Status::Playing => 1500,
                 _ => 3000,
             };
+            // never ask again before Spotify's Retry-After has run out
+            let wait = wait.max(self.paused_for().map_or(0, |d| d.as_millis() as u64 + 100));
             if tx.send(AppEvent::Spotify(Reply::Remote(r.map(|o| o.map(Box::new)).map_err(|e| e.msg)))).is_err() {
                 return;
             }
