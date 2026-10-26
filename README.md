@@ -56,6 +56,7 @@ interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental /
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
 translate = false              # start with translated lyrics (toggle with K)
 translate_lang = "en"          # language lyrics are translated into
+translate_skip = ""              # languages never translated, e.g. "sv,fi"
 translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
 translate_fallback_url = "https://libretranslate.com/translate"
 # translate_fallback_key = "…" # libretranslate.com needs a key; your own server may not
@@ -90,8 +91,9 @@ mouse = true                   # false = don't capture the mouse
 | `--lyrics-retries N` | retries after a failed lyrics request (timeouts, 429 with `Retry-After`, disconnects, 5xx), 0.5 s / 1 s / 2 s backoff. |
 | `--big-scale 1..3` / `--lyric-pad 0..10` | size of the big-font line (pixels drawn 1–3× as wide and tall; falls back to a smaller size when it doesn't fit) / blank columns beside the lyrics. |
 | `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
+| `--translate-skip CODES` | languages that are never translated, comma separated (`sv,fi`): a line the service detects as one of them stays as written. Also in the settings menu ("Never translate": ←/→ pick a language, space adds or removes it). |
 | `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
-| `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords are hidden while a translation is shown. |
+| `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |
 | `--no-mouse` | don't capture the mouse. |
@@ -123,7 +125,7 @@ mouse = true                   # false = don't capture the mouse
 | `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `q` / `Esc` | quit |
 
-Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] [ prev ] [ pause ] [ next ]` (shuffle and repeat are lit while on and hidden when the player reports neither); `[ - ] [ 65% ] [ + ]` change the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 65% ] [ + ]` (dashes separate the groups; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
 
 Shuffle and repeat are read with `playerctl shuffle` / `playerctl loop` about every 2 s and shown as they are reported. Some players (Spotify desktop in particular) may ignore the write, in which case the button simply flips back on the next poll.
 
