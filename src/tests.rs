@@ -1417,7 +1417,10 @@ fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
     assert_eq!(app::action_for(KeyCode::Char('?')), Some(A::Help));
     assert_eq!(app::action_for(KeyCode::Esc), Some(A::Quit));
     assert_eq!(app::action_for(KeyCode::Char('z')), Some(A::Shuffle));
-    assert_eq!(app::action_for(KeyCode::Char('x')), None);
+    assert_eq!(app::action_for(KeyCode::Char('y')), None);
+    assert_eq!(app::action_for(KeyCode::Char('x')), Some(A::BigScale));
+    assert_eq!(app::action_for(KeyCode::Char('i')), Some(A::LineSpacing));
+    assert_eq!(app::action_for(KeyCode::Char('u')), Some(A::LyricPad));
     assert_eq!(app::action_for(KeyCode::Char('o')), Some(A::Library));
     assert_eq!(app::action_for(KeyCode::Char('f')), Some(A::Like));
     assert_eq!(app::action_for(KeyCode::Char('H')), Some(A::PlayHere));
@@ -1427,6 +1430,7 @@ fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
         A::SyncLater, A::VolUp, A::VolDown, A::Mute, A::ToggleLyrics, A::ToggleBig,
         A::ToggleCava, A::ToggleChords, A::TransposeUp, A::TransposeDown, A::CapoDown,
         A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help, A::Library, A::Like, A::PlayHere,
+        A::BigScale, A::LineSpacing, A::LyricPad,
     ] {
         assert!(BINDS.iter().any(|b| b.action == a), "{a:?} has no key");
     }
@@ -1810,6 +1814,29 @@ fn key_hints_drop_whole_items_never_cut_one() {
     assert_eq!(ui::fit_hints(&items, 2), "");
     assert_eq!(ui::ellipsize("hello world", 8), "hello w…");
     assert_eq!(ui::ellipsize("hi", 8), "hi");
+}
+
+#[tokio::test]
+async fn runtime_keys_cycle_size_spacing_and_padding() {
+    use app::Action as A;
+    let mut app = test_app();
+    let mut after = |a: A, get: fn(&app::App) -> u16, n: usize| -> Vec<u16> {
+        (0..n).map(|_| { app.run(a); get(&app) }).collect()
+    };
+    assert_eq!(after(A::BigScale, |a| a.args.big_scale, 4), [2, 3, 1, 2]);
+    assert_eq!(after(A::LineSpacing, |a| a.args.lyric_spacing, 5), [2, 3, 0, 1, 2]);
+    assert_eq!(after(A::LyricPad, |a| a.args.lyric_pad, 7), [2, 4, 6, 8, 10, 0, 2]);
+    assert!(app.note_text().is_some_and(|n| n.contains("side padding")));
+    // an odd value from the config can't step past the range
+    app.args.lyric_pad = 9;
+    app.run(A::LyricPad);
+    assert_eq!(app.args.lyric_pad, 0);
+    // the three keys are plain lowercase letters: no Shift, no AltGr on a Swedish layout
+    for (k, a) in [('x', A::BigScale), ('i', A::LineSpacing), ('u', A::LyricPad)] {
+        let b = app::BINDS.iter().find(|b| b.action == a).unwrap();
+        assert_eq!(b.codes, [crossterm::event::KeyCode::Char(k)]);
+        assert!(b.group == "Lyrics" && k.is_ascii_lowercase());
+    }
 }
 
 #[test]

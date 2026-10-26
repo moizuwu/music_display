@@ -116,6 +116,8 @@ spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |
+
+`x`, `i` and `u` change `big_scale`, `lyric_spacing` and `lyric_pad` while the app runs and show the new value in the footer. They are plain lowercase letters, so they work on every keyboard layout (no Shift or AltGr; `+` / `-` are volume and `[` / `]` are capo, which need AltGr on a Swedish layout). They are not saved: the settings menu (`s`) and the config file keep the saved defaults.
 | `--no-mouse` | don't capture the mouse. |
 
 ### Spotify
@@ -142,6 +144,9 @@ spotify_device = "Desktop (spotifyd)"  # spotifyd's device_name, so it counts as
 | `l` | show / hide the lyrics |
 | `K` | translate lyrics on / off (cached per song while the app runs) |
 | `b` | big-font active line |
+| `x` | big-font size 1 → 2 → 3 → 1 (`big_scale`; the line steps down by itself when it doesn't fit) |
+| `i` | line spacing 0 → 1 → 2 → 3 → 0 (`lyric_spacing`) |
+| `u` | side padding 0 → 2 → 4 … → 10 → 0 (`lyric_pad`) |
 | `↑` / `↓`, `PgUp` / `PgDn`, mouse wheel over the lyrics | browse the lyrics without leaving the song; `End` (or 6 s idle) returns to the playing line |
 | `g` | chords on / off |
 | `t` / `T` | transpose chords up / down one semitone |

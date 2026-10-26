@@ -31,6 +31,9 @@ pub enum Action {
     Mute,
     ToggleLyrics,
     ToggleBig,
+    BigScale,
+    LineSpacing,
+    LyricPad,
     ToggleCava,
     ToggleChords,
     TransposeUp,
@@ -85,6 +88,9 @@ pub const BINDS: &[Bind] = &[
     bind!("Lyrics", ".", "lyrics 0.1 s earlier", [KeyCode::Char('.')], SyncLater),
     bind!("Lyrics", "l", "show / hide lyrics", [KeyCode::Char('l')], ToggleLyrics),
     bind!("Lyrics", "b", "big-font active line", [KeyCode::Char('b')], ToggleBig),
+    bind!("Lyrics", "x", "big-font size 1 / 2 / 3", [KeyCode::Char('x')], BigScale),
+    bind!("Lyrics", "i", "line spacing 0-3", [KeyCode::Char('i')], LineSpacing),
+    bind!("Lyrics", "u", "side padding 0-10", [KeyCode::Char('u')], LyricPad),
     bind!("Chords", "g", "chords on / off", [KeyCode::Char('g')], ToggleChords),
     bind!("Chords", "t", "transpose up", [KeyCode::Char('t')], TransposeUp),
     bind!("Chords", "T", "transpose down", [KeyCode::Char('T')], TransposeDown),
@@ -1597,6 +1603,23 @@ impl App {
             Action::ToggleBig => {
                 self.big_lyrics = !self.big_lyrics;
                 self.snap_scroll = true;
+            }
+            // runtime only (the settings menu saves them): unshifted keys, each one cycles
+            Action::BigScale => {
+                self.args.big_scale = self.args.big_scale % 3 + 1;
+                self.snap_scroll = true;
+                self.set_note(format!("big-font size {}", self.args.big_scale));
+            }
+            Action::LineSpacing => {
+                self.args.lyric_spacing = (self.args.lyric_spacing + 1) % 4;
+                self.snap_scroll = true;
+                self.set_note(format!("line spacing {}", self.args.lyric_spacing));
+            }
+            Action::LyricPad => {
+                let pad = self.args.lyric_pad + 2;
+                self.args.lyric_pad = if pad > 10 { 0 } else { pad };
+                self.snap_scroll = true;
+                self.set_note(format!("side padding {}", self.args.lyric_pad));
             }
             Action::ToggleCava if self.minimal => {
                 // hidden for now; remember the choice for when minimal view ends
