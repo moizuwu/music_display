@@ -688,13 +688,94 @@ fn compact_font_takes_over_when_the_normal_one_is_too_wide() {
     assert!(bigfont::render_scaled("HELLO", 20, 4, 1).is_none());
     let rows = bigfont::render_compact("HELLO", 20, 4).unwrap();
     assert_eq!((rows.len(), rows[0].chars().count()), (3, 19));
-    let stage = ui::big_stage("Hello world", 20, 12, 3).unwrap();
+    let stage = ui::big_stage("Hello world", 20, 12, 3, 0).unwrap();
     assert_eq!(stage.len(), 3 + 1 + 3);
     // too short for two pieces plus room for neighbours: bold text instead
-    assert!(ui::big_stage("Hello world", 20, 8, 3).is_none());
+    assert!(ui::big_stage("Hello world", 20, 8, 3, 0).is_none());
     // wide panels still get the largest scale that fits
-    assert_eq!(ui::big_stage("HI", 60, 40, 3).unwrap().len(), 12);
-    assert_eq!(ui::big_stage("HI", 60, 12, 3).unwrap().len(), 8);
+    assert_eq!(ui::big_stage("HI", 60, 40, 3, 0).unwrap().len(), 12);
+    assert_eq!(ui::big_stage("HI", 60, 12, 3, 0).unwrap().len(), 8);
+    // a spare row for the member tag can shrink the stage by one step
+    assert_eq!(ui::big_stage("HI", 60, 10, 3, 0).unwrap().len(), 8);
+    assert_eq!(ui::big_stage("HI", 60, 10, 3, 1).unwrap().len(), 4);
+}
+
+#[test]
+fn member_tag_shows_above_the_big_line_and_never_overlaps() {
+    use clap::Parser;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let args = cli::Args::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    let lines: Vec<String> = ["first line", "HI THERE", "third line"].map(String::from).to_vec();
+    let aligned = chords::Aligned {
+        per_line: vec![vec![], vec![(0, "Am".into())], vec![]],
+        matched: 1,
+        total: 3,
+        flats: false,
+        intro: vec![],
+        gaps: vec![vec![], vec![], vec![]],
+    };
+    let members = ["Jimin".to_string(), "V".to_string()];
+    let run = |w: u16, h: u16, with_chords: bool, members: &[String], reserve: bool| -> (Vec<String>, Vec<Option<usize>>) {
+        let fc = ui::Focus {
+            lines: &lines,
+            current: Some(1),
+            gap: 0,
+            scale: 1,
+            chords: with_chords.then_some(&aligned),
+            tr: 0,
+            flats: false,
+            context: 99,
+            in_break: false,
+            members,
+            reserve_tag: reserve,
+        };
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut hits = Vec::new();
+        term.draw(|f| hits = ui::draw_focus(f, Rect::new(0, 0, w, h), &theme, &fc)).unwrap();
+        let b = term.backend().buffer();
+        ((0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect::<String>()).collect(), hits)
+    };
+    let row_of = |text: &[String], needle: &str| text.iter().position(|r| r.contains(needle));
+    // without chords: the tag is the row right above the big glyphs (the stage's first row)
+    let (text, hits) = run(40, 24, false, &members, true);
+    let tag = row_of(&text, "[Jimin, V]").expect("tag drawn");
+    assert_eq!(hits[tag], None, "the tag row belongs to no lyric line");
+    let stage_top = text.iter().position(|r| r.contains('█') || r.contains('▀') || r.contains('▄')).unwrap();
+    assert_eq!(tag + 1, stage_top, "{text:#?}");
+    // with chords: chord summary directly above the big text, the tag above that
+    let (text, _) = run(40, 24, true, &members, true);
+    let (tag, chord) = (row_of(&text, "[Jimin, V]").unwrap(), row_of(&text, "Am").unwrap());
+    assert_eq!(tag + 1, chord, "{text:#?}");
+    // the earlier line stays above the tag, nothing is overwritten
+    let first = row_of(&text, "first line").unwrap();
+    assert!(first < tag, "{text:#?}");
+    // no member data: nothing drawn, and the stage keeps its place for lines without a tag
+    let (text, _) = run(40, 24, false, &[], false);
+    assert!(row_of(&text, "[").is_none(), "{text:#?}");
+    // narrow panels shorten the tag, whole or with an ellipsis, and never overflow the row
+    for w in [6u16, 8, 10, 12, 14, 20] {
+        let (text, _) = run(w, 24, true, &members, true);
+        for r in &text {
+            assert_eq!(r.chars().count(), w as usize);
+        }
+        if let Some(t) = text.iter().find(|r| r.contains('[') && r.contains(']')) {
+            let t = t.trim();
+            assert!(t.starts_with('[') && t.ends_with(']'), "w={w} {t:?}");
+        }
+    }
+    let three = ["Jimin".to_string(), "V".to_string(), "Jungkook".to_string()];
+    let (text, _) = run(12, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jimin +2]")), "{text:#?}");
+    let (text, _) = run(7, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jimin]")), "{text:#?}");
+    let (text, _) = run(6, 24, false, &three, true);
+    assert!(text.iter().any(|r| r.contains("[Jim…]")), "{text:#?}");
+    // a short panel keeps what it can: no panic, the tag only appears where a row is free
+    for h in 1..=14u16 {
+        let (text, _) = run(30, h, true, &members, true);
+        assert_eq!(text.len(), h as usize);
+    }
 }
 
 #[test]
@@ -722,6 +803,8 @@ fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
         flats: false,
         context: 99,
         in_break,
+        members: &[],
+        reserve_tag: false,
     };
     let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
     let area = Rect::new(0, 0, 40, 24);

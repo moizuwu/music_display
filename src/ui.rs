@@ -1474,8 +1474,9 @@ fn chord_rows(line: &str, cs: &[(usize, String)], width: usize, tr: i32, flats: 
 /// Big-font rows for `text` in a panel `width` × `height`: the largest scale
 /// (down to one) whose wrapped pieces (up to 4) leave at least 2 rows for the neighbouring lines;
 /// failing that the compact 3×5 font. `None`: the caller falls back to bold wrapped text.
-pub fn big_stage(text: &str, width: usize, height: u16, scale: usize) -> Option<Vec<String>> {
-    let fits = |rows: &Vec<String>| rows.len() as u16 + 2 <= height;
+/// `spare` leaves that many more rows free (the member tag above the stage).
+pub fn big_stage(text: &str, width: usize, height: u16, scale: usize, spare: u16) -> Option<Vec<String>> {
+    let fits = |rows: &Vec<String>| rows.len() as u16 + 2 + spare <= height;
     (1..=scale.clamp(1, 3))
         .rev()
         .find_map(|sc| bigfont::render_scaled(text, width, 4, sc).filter(fits))
@@ -1498,6 +1499,11 @@ pub struct Focus<'a> {
     pub context: usize,
     /// The active line is in an instrumental break: show its break chords under the stage.
     pub in_break: bool,
+    /// Members singing the active line (`--member-parts`): a dim tag row above the stage.
+    pub members: &'a [String],
+    /// This song has member data: keep one row free above the stage for the tag on every
+    /// line, so the layout doesn't jump between tagged and untagged lines.
+    pub reserve_tag: bool,
 }
 
 /// "Focus" layout used by the big-font mode: the active line sits on a fixed stage in the
@@ -1516,8 +1522,9 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
     let bold = Style::new().fg(th.primary()).add_modifier(Modifier::BOLD);
     // which lyric line each panel row belongs to (chord rows and the intro belong to none)
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
+    let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
     let (stage, stage_style, stage_li): (Vec<String>, Style, Option<usize>) = match c {
-        Some(c) => match big_stage(&lines[c], width, inner.height, fc.scale) {
+        Some(c) => match big_stage(&lines[c], width, inner.height, fc.scale, tag_rows) {
             Some(rows) => (rows, Style::new().fg(th.primary()), Some(c)),
             None => (wrap(&lines[c], width), bold, Some(c)),
         },
@@ -1528,7 +1535,8 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
         ),
     };
     let sh = (stage.len() as u16).min(inner.height);
-    let top = inner.y + (inner.height - sh) / 2;
+    // the spare row for the tag sits above the stage, so the stage moves down by half of it
+    let top = inner.y + (inner.height - sh + tag_rows) / 2;
 
     let put = |f: &mut Frame, y: i32, li: Option<usize>, text: &str, style: Style| {
         if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
@@ -1561,8 +1569,18 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
             v.dedup();
             v.join("   ")
         });
+        let has_summary = summary.is_some();
         if let Some(cs) = summary {
             put(f, top as i32 - 1, Some(c), &cs, bold);
+        }
+        // who sings it: one dim row right above the big text, or above the chord summary
+        let y = top as i32 - 1 - has_summary as i32;
+        let tag = member_tag_line(fc.members, width);
+        if tag_rows > 0 && !tag.is_empty() && y >= inner.y as i32 {
+            f.render_widget(
+                Paragraph::new(Line::from(tag)).alignment(Alignment::Center),
+                Rect { y: y as u16, height: 1, ..inner },
+            );
         }
     }
     // chords played during an instrumental break, right under the stage
@@ -1583,8 +1601,8 @@ pub fn draw_focus(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focus) -> Vec<Opt
         chord_rows(&lines[li], cs.map_or(&[], |v| v.as_slice()), width, fc.tr, fc.flats)
     };
 
-    // Earlier lines, nearest first, growing upward.
-    let mut y = top as i32 - 2;
+    // Earlier lines, nearest first, growing upward (above the tag row when there is one).
+    let mut y = top as i32 - 2 - tag_rows as i32;
     for k in 1..=c.unwrap_or(0) {
         let li = c.unwrap_or(0) - k;
         let style = fade_style(th, k, true);
@@ -1639,8 +1657,43 @@ fn member_tag(members: &[String], width: usize, text_w: usize) -> Vec<Span<'stat
     if w + text_w > width { Vec::new() } else { spans }
 }
 
+/// The tag for the big layout, one line that always fits `width`: `[Jimin, V]`, else
+/// `[Jimin +1]`, else the first name shortened with `…`; empty when even that doesn't fit.
+fn member_tag_line(members: &[String], width: usize) -> Vec<Span<'static>> {
+    let Some(first) = members.first() else { return Vec::new() };
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let name = |m: &str, text: String| Span::styled(text, Style::new().fg(crate::genius::color(m)).add_modifier(Modifier::DIM));
+    let fits = |s: &[Span]| s.iter().map(|s| s.width()).sum::<usize>() <= width;
+    let mut full = vec![Span::styled("[", dim)];
+    for (i, m) in members.iter().enumerate() {
+        if i > 0 {
+            full.push(Span::styled(", ", dim));
+        }
+        full.push(name(m, m.clone()));
+    }
+    full.push(Span::styled("]", dim));
+    if fits(&full) {
+        return full;
+    }
+    if members.len() > 1 {
+        let more = vec![
+            Span::styled("[", dim),
+            name(first, first.clone()),
+            Span::styled(format!(" +{}]", members.len() - 1), dim),
+        ];
+        if fits(&more) {
+            return more;
+        }
+    }
+    let room = width.saturating_sub(2);
+    if room < 2 {
+        return Vec::new();
+    }
+    vec![Span::styled("[", dim), name(first, ellipsize(first, room)), Span::styled("]", dim)]
+}
+
 fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
-    let shown = app.translation().is_some_and(|t| app.lyric_lines().is_some_and(|l| l.len() == t.len()));
+    let shown =app.translation().is_some_and(|t| app.lyric_lines().is_some_and(|l| l.len() == t.len()));
     if app.browse_expired() {
         app.browse = 0.0;
     }
@@ -1775,6 +1828,8 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             flats,
             context: app.args.chords_context as usize,
             in_break,
+            members: current.and_then(|c| app.members.get(c)).map_or(&[][..], |m| m.as_slice()),
+            reserve_tag: app.members.iter().any(|m| !m.is_empty()),
         };
         let rows = draw_focus(f, inner, &th, &focus);
         // top = 0: the row index is the offset from the panel's top edge
