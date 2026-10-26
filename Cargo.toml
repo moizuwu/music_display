@@ -2,7 +2,7 @@
 name = "music_display"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.90"
 description = "Zero-flicker terminal now-playing display for MPRIS players: cover art, synced lyrics, chords, cava, optional Spotify Web API"
 license = "MIT"
 
@@ -36,6 +36,11 @@ anyhow = "1"
 unicode-width = "0.2"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "display", "serde"] }
 lofty = "0.24.0"
+
+[lints.clippy]
+# rust-version 1.90 (what the dependencies need) makes clippy suggest let chains for 19 nested
+# `if let`s in code written before; collapse them in a separate cleanup, not here.
+collapsible_if = "allow"
 
 [profile.release]
 opt-level = 3
