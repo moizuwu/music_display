@@ -188,6 +188,21 @@ pub fn api_error(status: u16, body: &str) -> ApiError {
     ApiError::new(msg, status)
 }
 
+/// What the footer says about a failed request: the cases a person can do something about
+/// get a sentence, anything else is Spotify's own text.
+pub fn explain(status: u16, msg: &str, retry_after: Option<u64>) -> String {
+    match status {
+        429 => match retry_after {
+            Some(n) => format!("Spotify is rate limiting: try again in {n} s"),
+            None => "Spotify is rate limiting: try again in a moment".into(),
+        },
+        403 if msg.to_ascii_uppercase().contains("PREMIUM") => "Spotify Premium is needed for this".into(),
+        403 => format!("Spotify refused it (403): {msg}"),
+        404 if msg == "NO_ACTIVE_DEVICE" => "no active Spotify device: press d to pick one".into(),
+        _ => msg.to_string(),
+    }
+}
+
 async fn post_form(http: &reqwest::Client, fields: &[(&str, &str)]) -> Res<Value> {
     let r = http
         .post(TOKEN_URL)
@@ -490,6 +505,75 @@ pub fn artist_rows(mut albums: Vec<Value>, mut singles: Vec<Value>) -> (String, 
     (summary, items)
 }
 
+/// One Spotify Connect device from `/me/player/devices`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// Computer, Smartphone, Speaker…
+    pub kind: String,
+    pub active: bool,
+    /// Spotify won't let apps control it.
+    pub restricted: bool,
+    /// The Spotify app on this computer, or spotifyd by the name given in the settings.
+    pub local: bool,
+}
+
+pub fn parse_devices(v: &Value, is_local: impl Fn(&str) -> bool) -> Vec<Device> {
+    v["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d.is_object())
+        .map(|d| Device {
+            id: s(&d["id"]),
+            name: s(&d["name"]),
+            kind: s(&d["type"]),
+            active: d["is_active"].as_bool() == Some(true),
+            restricted: d["is_restricted"].as_bool() == Some(true),
+            local: is_local(&s(&d["name"])),
+        })
+        .collect()
+}
+
+/// `/search` → songs, albums, artists, playlists (in that order, each as Spotify ranks them).
+/// `uid` decides which playlists are yours (only those can be opened).
+pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
+    let list = |key: &str| v[key]["items"].as_array().cloned().unwrap_or_default();
+    let mut out: Vec<Item> = list("tracks").iter().filter_map(track_item).collect();
+    out.extend(list("albums").iter().filter(|a| a.is_object()).map(|a| Item {
+        kind: "album".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: names(&a["artists"]),
+        openable: true,
+        duration: 0.0,
+    }));
+    out.extend(list("artists").iter().filter(|a| a.is_object()).map(|a| Item {
+        kind: "artist".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: "Artist".into(),
+        openable: true,
+        duration: 0.0,
+    }));
+    // playlists may contain nulls (removed or private ones)
+    out.extend(list("playlists").iter().filter(|p| p.is_object()).map(|p| {
+        let own = !uid.is_empty() && s(&p["owner"]["id"]) == uid;
+        let by = Some(s(&p["owner"]["display_name"])).filter(|n| !n.is_empty()).unwrap_or_else(|| "someone else".into());
+        Item {
+            kind: "playlist".into(),
+            uri: s(&p["uri"]),
+            name: s(&p["name"]),
+            sub: if own { "Playlist".into() } else { format!("by {by}") },
+            openable: own,
+            duration: 0.0,
+        }
+    }));
+    out.retain(|i| !i.uri.is_empty() && !i.name.is_empty());
+    out
+}
+
 fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()
@@ -516,6 +600,8 @@ pub enum Cmd {
     /// or a single `spotify:track:` URI.
     Play { ctx: String, track: String },
     Transfer,
+    /// Move playback to this device (id, name for the note).
+    TransferTo { id: String, name: String },
     Queue(String),
     Like(String, bool),
     Add { playlist: String, name: String, track: String },
@@ -533,6 +619,10 @@ pub enum Reply {
     Done(Result<String, String>),
     /// The login started from the settings menu made progress or ended.
     Login(LoginMsg),
+    /// A search finished (`q` is what was asked, so a slow old answer can be dropped).
+    Search { q: String, result: Result<Vec<Item>, String> },
+    /// The device list for the picker.
+    Devices(Result<Vec<Device>, String>),
 }
 
 #[derive(Clone)]
@@ -633,9 +723,15 @@ impl Api {
         };
         let r = req.send().await.map_err(|e| ApiError::new(format!("no connection: {e}"), 0))?;
         let status = r.status().as_u16();
+        let retry_after = r
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let text = r.text().await.unwrap_or_default();
         if status >= 400 {
-            return Err(api_error(status, &text));
+            let e = api_error(status, &text);
+            return Err(ApiError::new(explain(status, &e.msg, retry_after), status));
         }
         Ok(serde_json::from_str(&text).ok())
     }
@@ -824,6 +920,32 @@ impl Api {
         Ok(self.get("/me/player/devices", &[]).await?["devices"].as_array().cloned().unwrap_or_default())
     }
 
+    /// The devices for the picker.
+    pub async fn devices_list(&self) -> Res<Vec<Device>> {
+        let v = self.get("/me/player/devices", &[]).await?;
+        Ok(parse_devices(&v, |n| self.is_local(n)))
+    }
+
+    /// Songs, albums, artists and playlists matching `q` (10 of each: the most a development-mode
+    /// app gets).
+    pub async fn search(&self, q: &str) -> Res<Vec<Item>> {
+        let query = [
+            ("q", q.to_string()),
+            ("type", "track,album,artist,playlist".into()),
+            ("limit", "10".into()),
+        ];
+        let v = self.get("/search", &query).await?;
+        // only needed to tell your playlists from the rest; a failure just makes none of them yours
+        let uid = self.me_id().await.unwrap_or_default();
+        Ok(parse_search(&v, &uid))
+    }
+
+    /// Move playback to one device and keep playing.
+    async fn transfer_to(&self, id: &str) -> Res<()> {
+        self.call(Method::PUT, "/me/player", &[], Some(json!({"device_ids": [id], "play": true}))).await?;
+        Ok(())
+    }
+
     /// Where "this PC" plays: the Spotify app when it is open (named after the host, or any
     /// device of type "Computer"), else spotifyd when its name is set.
     pub fn local_device<'a>(&self, devs: &'a [Value]) -> Option<&'a Value> {
@@ -865,7 +987,7 @@ impl Api {
         let Some(dev) = self.local_device(&devs).map(|d| s(&d["id"])) else {
             return Err(ApiError::new("this PC isn't a Spotify device: start spotifyd or open Spotify", 404));
         };
-        self.call(Method::PUT, "/me/player", &[], Some(json!({"device_ids": [dev], "play": true}))).await?;
+        self.transfer_to(&dev).await?;
         Ok(dev)
     }
 
@@ -937,6 +1059,10 @@ impl Api {
             Cmd::Transfer => {
                 self.transfer_here().await?;
                 return Ok("Playing on this PC".into());
+            }
+            Cmd::TransferTo { id, name } => {
+                self.transfer_to(&id).await?;
+                return Ok(format!("Playing on {name}"));
             }
             Cmd::Queue(uri) => {
                 self.player(Method::POST, &format!("{p}/queue"), &[("uri", uri)], None).await?;

@@ -156,6 +156,7 @@ spotify_device = ""            # only if you run spotifyd: its `device_name` (e.
 | `o` | Spotify library browser (`--spotify`, see below) |
 | `f` | like / unlike the song playing (`♥` / `♡` beside the title) |
 | `H` | play here: move Spotify playback from the phone / another device to this PC |
+| `d` | choose a Spotify device (the list of where Spotify can play; `Enter` moves playback there) |
 | `q` / `Esc` | quit |
 
 Mouse: click the progress bar to seek; click `[ shuf ] [ rep ] - [ prev ] [ pause ] [ next ] - [ - ] [ 65% ] [ + ]` (dashes separate the groups; shuffle and repeat are lit while on and hidden when the player reports neither); the `[ - ] [ 65% ] [ + ]` part changes the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
@@ -196,11 +197,13 @@ The login uses PKCE: no API key, no client secret, only the Client ID, which is 
 
 **Is spotifyd your player?** Then put its `device_name` into *spotifyd device name* (`spotify_device`) so that it counts as "this PC" for `H` and the device checks. This is only an example of what to enter; nothing is assumed by default, and with the field empty just the Spotify app on this computer is matched.
 
-**Library browser (`o`).** Tabs: Recent · Playlists · Liked · Albums · Artists.
+**Library browser (`o`).** Tabs: Recent · Playlists · Liked · Albums · Artists · Search.
 
 | key | action |
 | --- | --- |
-| `Tab` / `Shift-Tab`, `1`–`5` | switch tab |
+| `Tab` / `Shift-Tab`, `1`–`6` | switch tab |
+| `/` | search: jumps to the Search tab with the field ready (typing swallows every key, `q` and `o` included; `Enter` runs the search, `Esc` leaves the field) |
+| `d` | choose a device (see below) |
 | `↑` / `↓`, `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, wheel | move |
 | `Enter` / `space` | play: a song plays in its list (album, playlist, Liked Songs) from that song on; an album / playlist / artist plays itself |
 | `→` / `l` | open an album, your own playlist, an artist (albums and singles, newest first) or Liked Songs (`›` marks what opens) |
@@ -212,6 +215,12 @@ The login uses PKCE: no API key, no client secret, only the Client ID, which is 
 | `Esc` / `q` / `o` | close |
 
 Lists are loaded when first shown and kept while the app runs. Spotify only lets development-mode apps open your own (and collaborative) playlists; other people's play with `Enter`. Liked Songs shows the first 1000.
+
+**Search.** One request finds songs, albums, artists and playlists (at most 10 of each, the most a development-mode app gets), listed under headings. The keys are the same as in the other tabs: `Enter` plays (a song plays alone), `a` queues, `A` adds to a playlist, `f` likes, `→` opens an album, an artist or one of your own playlists, `←` goes back to the results where you left them. While a new search runs the old results stay on screen, dimmed, and an answer to an older search that arrives late is dropped.
+
+**Devices (`d`, also inside the browser).** Lists where Spotify can play right now (phone, computer, speakers): `▶` marks the one playing, `this PC` the Spotify app on this computer (or spotifyd when `spotify_device` names it). `Enter` moves playback there and keeps playing; `r` reloads the list. A device Spotify restricts can't be controlled by apps and says so; with no device at all the list tells you to open Spotify somewhere or start spotifyd.
+
+**Errors.** What Spotify refuses is shown in the footer instead of failing silently: `429` as "rate limiting: try again in N s" (from its `Retry-After`), `403` as "Premium is needed" or Spotify's own reason, and a command with nothing playing anywhere as "no active device: press d".
 
 **Other devices.** When no MPRIS player is running (the phone plays, or Spotify runs elsewhere), the app shows what Spotify says plays, with lyrics, cover and chords as usual, and every control (play / pause, next / previous, seek, volume, shuffle, repeat) goes to that device through the API; the footer says `on <device>`. It polls every 1.5 s while that plays (3 s paused, 5 s while an MPRIS player is on screen). `H` moves playback to this PC (the Spotify app when it is open, else spotifyd when `spotify_device` names it), and the MPRIS player takes over from there. Play with nothing active anywhere carries on here from where Spotify last stopped, or starts the last played song.
 

@@ -45,6 +45,7 @@ pub enum Action {
     Library,
     Like,
     PlayHere,
+    Devices,
     BrowseUp,
     BrowseDown,
     BrowsePageUp,
@@ -106,19 +107,22 @@ pub const BINDS: &[Bind] = &[
     bind!("Spotify", "o", "library: playlists, liked, albums…", [KeyCode::Char('o')], Library),
     bind!("Spotify", "f", "like / unlike this song", [KeyCode::Char('f')], Like),
     bind!("Spotify", "H", "play here (move to this PC)", [KeyCode::Char('H')], PlayHere),
+    bind!("Spotify", "d", "choose a Spotify device", [KeyCode::Char('d')], Devices),
 ];
 
 /// Keys inside the library browser (documented in the help and the README).
 pub const LIBRARY_KEYS: &[(&str, &str)] = &[
-    ("Tab / 1-5", "switch tab"),
+    ("Tab / 1-6", "switch tab (6 = search)"),
+    ("/", "search (Enter runs it)"),
     ("Enter", "play"),
     ("→ / ←", "open / back"),
     ("a / A", "queue / add to playlist"),
     ("f / r", "like / reload"),
+    ("d", "choose a device"),
 ];
 
 pub use crate::browser::{Level, Library, TABS};
-use crate::browser::{Edit, TAB_LIKED, TAB_PLAYLISTS, TextInput};
+use crate::browser::{DevicePicker, Edit, TAB_LIKED, TAB_PLAYLISTS, TAB_SEARCH, TextInput};
 
 /// Mouse gestures (they are hit-tested where they are drawn, so this is documentation
 /// kept next to the table): (group, gesture, what it does).
@@ -518,6 +522,8 @@ pub struct App {
     login_msg: Option<String>,
     /// A settings row being typed into.
     pub settings_edit: Option<(Setting, TextInput)>,
+    /// `d`: the device picker, while it is open.
+    pub devices: Option<DevicePicker>,
 }
 
 impl App {
@@ -617,6 +623,7 @@ impl App {
             login_task: None,
             login_msg: None,
             settings_edit: None,
+            devices: None,
         };
         app.translate_on = app.args.translate;
         app.vol_step = app.args.volume_step;
@@ -1588,6 +1595,10 @@ impl App {
                     self.handle_settings_key(k.code);
                     return false;
                 }
+                if self.devices.is_some() {
+                    self.handle_devices_key(k.code);
+                    return false;
+                }
                 if self.lib.open {
                     self.handle_library_key(k.code);
                     return false;
@@ -1612,6 +1623,11 @@ impl App {
                 }
             }
             Event::Mouse(_) if self.show_settings => {}
+            Event::Mouse(m) if self.devices.is_some() => match m.kind {
+                MouseEventKind::ScrollUp => self.handle_devices_key(KeyCode::Up),
+                MouseEventKind::ScrollDown => self.handle_devices_key(KeyCode::Down),
+                _ => {}
+            },
             Event::Mouse(m) if self.lib.open => match m.kind {
                 MouseEventKind::ScrollUp => self.handle_library_key(KeyCode::Up),
                 MouseEventKind::ScrollDown => self.handle_library_key(KeyCode::Down),
@@ -1729,6 +1745,7 @@ impl App {
             Action::Library => self.open_library(),
             Action::Like => self.toggle_like(),
             Action::PlayHere => self.spot_cmd(spotify::Cmd::Transfer),
+            Action::Devices => self.open_devices(),
             Action::Help => {
                 self.show_help = true;
                 self.help_scroll = 0;
@@ -2080,7 +2097,13 @@ impl App {
                     self.restart_spotify();
                 }
             }
-            Reply::Remote(Err(e)) => self.spot_status = Some(e),
+            Reply::Remote(Err(e)) => {
+                // the poller runs every second or two: only what needs a word goes to the footer
+                if e.starts_with("Spotify ") {
+                    self.set_note(e.clone());
+                }
+                self.spot_status = Some(e);
+            }
             Reply::Remote(Ok(r)) => {
                 self.spot_status = None;
                 self.remote = r.map(|r| (*r, Instant::now()));
@@ -2112,6 +2135,7 @@ impl App {
                 self.set_note(e);
             }
             Reply::Tab(i, res) => {
+                let failed = res.as_ref().err().cloned();
                 let l = &mut self.lib.tabs[i];
                 l.loading = false;
                 match res {
@@ -2126,8 +2150,12 @@ impl App {
                 if i == TAB_PLAYLISTS {
                     self.fill_picker();
                 }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
             }
             Reply::Opened { uri, result } => {
+                let failed = result.as_ref().err().cloned();
                 let Some(l) = self.lib.stack.iter_mut().rev().find(|l| l.uri == uri && l.loading) else {
                     return;
                 };
@@ -2140,8 +2168,88 @@ impl App {
                     }
                     Err(e) => l.error = Some(e),
                 }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Search { q, result } => {
+                if q != self.lib.query {
+                    return; // an older search that finished late
+                }
+                let failed = result.as_ref().err().cloned();
+                let l = &mut self.lib.tabs[TAB_SEARCH];
+                l.loading = false;
+                match result {
+                    Ok(items) => {
+                        l.summary = format!("{} results", items.len());
+                        l.items = items;
+                        l.loaded = true;
+                        l.error = None;
+                        l.sel = 0;
+                        l.top = 0;
+                    }
+                    Err(e) => l.error = Some(e),
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
+            }
+            Reply::Devices(res) => {
+                let Some(d) = &mut self.devices else { return };
+                d.loading = false;
+                let failed = res.as_ref().err().cloned();
+                match res {
+                    Ok(items) => {
+                        // start on the device playing now
+                        d.sel = items.iter().position(|x| x.active).unwrap_or(0);
+                        d.items = items;
+                        d.error = None;
+                    }
+                    Err(e) => d.error = Some(e),
+                }
+                if let Some(e) = failed {
+                    self.set_note(e);
+                }
             }
         }
+    }
+
+    // ── device picker (d) ──────────────────────────────────────────────
+
+    fn open_devices(&mut self) {
+        let Some(api) = self.api() else { return };
+        self.devices = Some(DevicePicker { loading: true, ..Default::default() });
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let r = api.devices_list().await.map_err(|e| e.msg);
+            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Devices(r)));
+        });
+    }
+
+    fn handle_devices_key(&mut self, code: KeyCode) {
+        let Some(d) = &mut self.devices else { return };
+        let last = d.items.len().saturating_sub(1);
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => d.sel = d.sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => d.sel = (d.sel + 1).min(last),
+            KeyCode::Home => d.sel = 0,
+            KeyCode::End => d.sel = last,
+            KeyCode::Char('r') => self.open_devices(),
+            KeyCode::Esc | KeyCode::Char('q' | 'd') => self.devices = None,
+            KeyCode::Enter | KeyCode::Char(' ') => self.choose_device(),
+            _ => {}
+        }
+    }
+
+    /// Enter in the picker: move playback there (a device Spotify won't let apps control says so).
+    fn choose_device(&mut self) {
+        let Some(dev) = self.devices.as_ref().and_then(|d| d.items.get(d.sel)).cloned() else { return };
+        if dev.restricted {
+            self.set_note(format!("{} is restricted by Spotify: it can't be controlled from here", dev.name));
+            return;
+        }
+        self.devices = None;
+        self.spot_cmd(spotify::Cmd::TransferTo { id: dev.id, name: dev.name });
     }
 
     // ── library browser ────────────────────────────────────────────────
@@ -2153,9 +2261,40 @@ impl App {
         self.lib.open = true;
         self.lib.note = self.spot_status.clone();
         self.load_tab(self.lib.tab, false);
+        self.start_search_typing();
+    }
+
+    /// On the Search tab with nothing searched yet, the field is ready for typing.
+    fn start_search_typing(&mut self) {
+        if self.lib.tab == TAB_SEARCH && self.lib.stack.is_empty() && self.lib.query.is_empty() {
+            self.lib.editing = true;
+        }
+    }
+
+    /// Run the search typed in the field (results replace the old ones when they arrive).
+    fn run_search(&mut self) {
+        self.lib.editing = false;
+        let q = self.lib.input.text.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        let Some(api) = self.spot.clone() else { return };
+        self.lib.query = q.clone();
+        self.lib.stack.clear();
+        let l = &mut self.lib.tabs[TAB_SEARCH];
+        l.loading = true;
+        l.error = None;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = api.search(&q).await.map_err(|e| e.msg);
+            let _ = tx.send(AppEvent::Spotify(spotify::Reply::Search { q, result }));
+        });
     }
 
     fn load_tab(&mut self, i: usize, force: bool) {
+        if i == TAB_SEARCH {
+            return; // searches run when asked for
+        }
         let l = &mut self.lib.tabs[i];
         if l.loading || (l.loaded && !force) {
             return;
@@ -2180,7 +2319,9 @@ impl App {
         self.lib.tab = i % TABS.len();
         self.lib.stack.clear();
         self.lib.picker = None;
+        self.lib.editing = false;
         self.load_tab(self.lib.tab, false);
+        self.start_search_typing();
     }
 
     /// Open an album / own playlist / artist / Liked Songs as a new level.
@@ -2211,6 +2352,10 @@ impl App {
             Some(l) => {
                 let kind = l.uri.split(':').nth(1).unwrap_or("liked").to_string();
                 self.open_item(spotify::Item { kind, uri: l.uri, name: l.title, openable: true, ..Default::default() });
+            }
+            None if self.lib.tab == TAB_SEARCH => {
+                self.lib.input = TextInput::with(&self.lib.query.clone());
+                self.run_search();
             }
             None => self.load_tab(self.lib.tab, true),
         }
@@ -2265,6 +2410,15 @@ impl App {
     }
 
     pub fn handle_library_key(&mut self, code: KeyCode) {
+        // typing a search: every key is text until Enter (run it) or Esc (leave the field)
+        if self.lib.editing {
+            match self.lib.input.key(code) {
+                Some(Edit::Submit) => self.run_search(),
+                Some(Edit::Cancel) => self.lib.editing = false,
+                None => {}
+            }
+            return;
+        }
         let n = self.lib.level().items.len();
         let page = 10;
         let move_sel = |l: &mut Level, to: usize| l.sel = to.min(n.saturating_sub(1));
@@ -2305,7 +2459,12 @@ impl App {
             }
             KeyCode::Tab => self.switch_tab(self.lib.tab + 1),
             KeyCode::BackTab => self.switch_tab(self.lib.tab + TABS.len() - 1),
-            KeyCode::Char(c @ '1'..='5') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Char(c @ '1'..='6') => self.switch_tab(c as usize - '1' as usize),
+            KeyCode::Char('/') => {
+                self.switch_tab(TAB_SEARCH);
+                self.lib.editing = true;
+            }
+            KeyCode::Char('d') => self.open_devices(),
             KeyCode::Enter | KeyCode::Char(' ') => self.play_selected(),
             KeyCode::Right | KeyCode::Char('l') => {
                 let l = self.lib.level();

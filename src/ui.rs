@@ -35,9 +35,107 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.lib.open {
         draw_library(f, app);
     }
+    if app.devices.is_some() {
+        draw_devices(f, app);
+    }
     if app.show_settings {
         draw_settings(f, app);
     }
+}
+
+/// `d`: where Spotify can play (this PC marked), the active one with a ▶.
+fn draw_devices(f: &mut Frame, app: &mut App) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let th = app.theme.clone();
+    let Some(d) = &mut app.devices else { return };
+    let w = area.width.min(60);
+    let h = area.height.min((d.items.len().max(1) as u16 + 5).clamp(8, 20));
+    let r = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(th.primary()))
+        .title(Span::styled(
+            " devices ",
+            Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::new().bg(th.surface()).fg(th.text()));
+    let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, r);
+    if inner.height < 3 {
+        return;
+    }
+    let dim = Style::new().fg(th.fade(0.45));
+    let width = inner.width as usize;
+    let list = Rect { height: inner.height - 1, ..inner };
+    let view_h = list.height as usize;
+    if d.sel < d.top {
+        d.top = d.sel;
+    } else if d.sel >= d.top + view_h.max(1) {
+        d.top = d.sel + 1 - view_h.max(1);
+    }
+    let lines: Vec<Line> = if d.loading {
+        vec![Line::styled("Loading…", dim)]
+    } else if let Some(e) = &d.error {
+        vec![Line::styled(e.clone(), dim)]
+    } else if d.items.is_empty() {
+        vec![
+            Line::styled("No Spotify devices found.", dim),
+            Line::styled("Open Spotify on a device, or start spotifyd.", dim),
+        ]
+    } else {
+        d.items
+            .iter()
+            .enumerate()
+            .skip(d.top)
+            .take(view_h)
+            .map(|(i, dev)| {
+                let sel = i == d.sel;
+                let style = if sel {
+                    Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+                } else if dev.restricted {
+                    dim
+                } else {
+                    Style::new().fg(th.text())
+                };
+                let mut tags = vec![dev.kind.to_lowercase()];
+                if dev.local {
+                    tags.push("this PC".into());
+                }
+                if dev.restricted {
+                    tags.push("restricted".into());
+                }
+                let tags = tags.join(" · ");
+                let name_room = width.saturating_sub(crate::util::width(&tags).min(width / 2) + 6);
+                let mut name = dev.name.clone();
+                while crate::util::width(&name) > name_room && name.pop().is_some() {}
+                let tags: String = tags.chars().take(width.saturating_sub(crate::util::width(&name) + 6)).collect();
+                let pad = width.saturating_sub(crate::util::width(&name) + crate::util::width(&tags) + 4);
+                Line::from(vec![
+                    Span::styled(if sel { "▸ " } else { "  " }, style),
+                    Span::styled(if dev.active { "▶ " } else { "  " }, Style::new().fg(th.primary())),
+                    Span::styled(name, style),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(tags, if sel { style } else { dim }),
+                ])
+            })
+            .collect()
+    };
+    f.render_widget(Paragraph::new(lines), list);
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            crate::browser::fit_items(&["↑/↓ select", "enter play here", "r reload", "esc"], width),
+            dim,
+        ))
+        .alignment(Alignment::Center),
+        Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
+    );
 }
 
 /// `o`: tabs, the list (scrolled to the selection), and a hint / note line.
@@ -83,7 +181,8 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     }
     f.render_widget(Paragraph::new(Line::from(tabs)), Rect { height: 1, ..inner });
 
-    // where we are: tab › album…, or the playlist picker
+    // where we are: tab › album…, the playlist picker, or the search field
+    let searching = app.lib.tab == crate::browser::TAB_SEARCH && app.lib.stack.is_empty() && app.lib.picker.is_none();
     let crumbs = match &app.lib.picker {
         Some((_, _, l)) => l.title.clone(),
         None => std::iter::once(TABS[app.lib.tab].to_string())
@@ -93,11 +192,24 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     };
     let summary = app.lib.level().summary.clone();
     let room = width.saturating_sub(crate::util::width(&summary) + 2);
+    let (crumbs, crumb_style) = if searching {
+        let shown = if app.lib.editing {
+            format!("Search: {}", app.lib.input.shown())
+        } else if app.lib.query.is_empty() {
+            "Search: (press / to type)".to_string()
+        } else {
+            format!("Search: {}", app.lib.query)
+        };
+        let style = if app.lib.editing { Style::new().fg(th.text()).add_modifier(Modifier::BOLD) } else { dim };
+        (shown, style)
+    } else {
+        (crumbs, Style::new().fg(th.accent_fade(0.2)))
+    };
     let crumbs: String = crumbs.chars().take(room).collect();
     let pad = width.saturating_sub(crate::util::width(&crumbs) + crate::util::width(&summary));
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(crumbs, Style::new().fg(th.accent_fade(0.2))),
+            Span::styled(crumbs, crumb_style),
             Span::raw(" ".repeat(pad)),
             Span::styled(summary, dim),
         ])),
@@ -109,31 +221,43 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     let view_h = list.height as usize;
     let liked_uri = app.liked_uri.clone();
     let l = app.lib.level_mut();
-    if l.sel < l.top {
-        l.top = l.sel;
-    } else if l.sel >= l.top + view_h.max(1) {
-        l.top = l.sel + 1 - view_h.max(1);
-    }
-    let empty = if l.loading {
+    let rows = l.scroll(view_h);
+    // a new search keeps the old results (dimmed) until the new ones arrive
+    let stale = l.search && l.loading && !l.items.is_empty();
+    let empty = if l.loading && !stale {
         Some("Loading…".to_string())
     } else if let Some(e) = &l.error {
         Some(e.clone())
     } else if l.items.is_empty() {
-        Some("Nothing here".to_string())
+        Some(if l.search { "Type a search and press Enter" } else { "Nothing here" }.to_string())
     } else {
         None
     };
     let lines: Vec<Line> = match empty {
         Some(msg) => vec![Line::styled(msg, dim)],
-        None => l
-            .items
+        None => rows
             .iter()
-            .enumerate()
             .skip(l.top)
             .take(view_h)
-            .map(|(i, it)| {
+            .map(|row| {
+                let i = match row {
+                    crate::browser::ListRow::Head(h) => {
+                        return Line::styled(
+                            format!("── {h} "),
+                            Style::new().fg(th.accent_fade(0.2)).add_modifier(Modifier::BOLD),
+                        );
+                    }
+                    crate::browser::ListRow::Item(i) => *i,
+                };
+                let it = &l.items[i];
                 let sel = i == l.sel;
-                let style = if sel { sel_style } else { Style::new().fg(th.text()) };
+                let style = if stale {
+                    dim
+                } else if sel {
+                    sel_style
+                } else {
+                    Style::new().fg(th.text())
+                };
                 let mut sub = it.sub.clone();
                 if it.kind == "track" && it.duration > 0.0 {
                     let d = it.duration.round() as u64;
@@ -158,12 +282,25 @@ fn draw_library(f: &mut Frame, app: &mut App) {
     };
     f.render_widget(Paragraph::new(lines), list);
 
-    let hint = match (&app.lib.note, &app.lib.picker) {
-        (Some(n), _) => n.clone(),
-        (None, Some(_)) => "enter add · esc back".to_string(),
-        (None, None) => "tab/1-5 · enter play · →/← open/back · a queue · A add · f like · r reload · esc".to_string(),
+    // hints drop whole items from the end when the width runs out
+    let hint = match (&app.lib.note, &app.lib.picker, app.lib.editing) {
+        (_, _, true) => crate::browser::fit_items(&["type", "enter search", "esc back"], width),
+        (Some(n), _, _) => {
+            if crate::util::width(n) <= width {
+                n.clone()
+            } else {
+                format!("{}…", n.chars().take(width.saturating_sub(1)).collect::<String>())
+            }
+        }
+        (None, Some(_), _) => crate::browser::fit_items(&["enter add", "esc back"], width),
+        (None, None, _) => crate::browser::fit_items(
+            &[
+                "enter play", "tab/1-6", "→/← open/back", "/ search", "a queue", "A add", "f like", "d devices",
+                "r reload", "esc",
+            ],
+            width,
+        ),
     };
-    let hint: String = hint.chars().take(width).collect();
     f.render_widget(
         Paragraph::new(Line::styled(hint, dim)).alignment(Alignment::Center),
         Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },

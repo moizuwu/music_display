@@ -1340,12 +1340,14 @@ fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
     assert_eq!(app::action_for(KeyCode::Char('o')), Some(A::Library));
     assert_eq!(app::action_for(KeyCode::Char('f')), Some(A::Like));
     assert_eq!(app::action_for(KeyCode::Char('H')), Some(A::PlayHere));
+    assert_eq!(app::action_for(KeyCode::Char('d')), Some(A::Devices));
+    assert_eq!(app::action_for(KeyCode::Char('D')), Some(A::Diagrams), "capital D is still the chord diagrams");
     // every action can be triggered by some key
     for a in [
         A::Quit, A::PlayPause, A::Next, A::Prev, A::Shuffle, A::Repeat, A::SeekBack, A::SeekFwd, A::SyncEarlier,
         A::SyncLater, A::VolUp, A::VolDown, A::Mute, A::ToggleLyrics, A::ToggleBig,
         A::ToggleCava, A::ToggleChords, A::TransposeUp, A::TransposeDown, A::CapoDown,
-        A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help, A::Library, A::Like, A::PlayHere,
+        A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help, A::Library, A::Like, A::PlayHere, A::Devices,
     ] {
         assert!(BINDS.iter().any(|b| b.action == a), "{a:?} has no key");
     }
@@ -1839,6 +1841,323 @@ async fn the_client_only_talks_to_the_server_it_was_given() {
         _ => panic!("the poller sent something else"),
     }
     poller.abort();
+}
+
+// ── search and devices ─────────────────────────────────────────────────
+
+const SEARCH_JSON: &str = r#"{"tracks":{"items":[{"uri":"spotify:track:t1","name":"Bohemian","duration_ms":354000,"artists":[{"name":"Queen"}]}]},
+ "albums":{"items":[{"uri":"spotify:album:a1","name":"Opera","artists":[{"name":"Queen"}]}]},
+ "artists":{"items":[{"uri":"spotify:artist:r1","name":"Queen"}]},
+ "playlists":{"items":[null,{"uri":"spotify:playlist:p1","name":"Mine","owner":{"id":"me1","display_name":"Me"}},{"uri":"spotify:playlist:p2","name":"Theirs","owner":{"id":"zz","display_name":"Zed"}}]}}"#;
+
+const DEVICES_JSON: &str = r#"{"devices":[{"id":"d1","name":"Phone","type":"Smartphone","is_active":true,"is_restricted":false},
+ {"id":"d2","name":"Pawtix","type":"Computer","is_active":false},{"id":"d3","name":"Echo","type":"Speaker","is_restricted":true}]}"#;
+
+const JSON_HDR: &str = "Content-Type: application/json\r\n";
+
+#[test]
+fn search_results_are_grouped_and_only_your_playlists_open() {
+    let v: serde_json::Value = serde_json::from_str(SEARCH_JSON).unwrap();
+    let items = spotify::parse_search(&v, "me1");
+    let kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+    assert_eq!(kinds, ["track", "album", "artist", "playlist", "playlist"], "the null playlist is skipped");
+    assert_eq!((items[0].name.as_str(), items[0].sub.as_str(), items[0].duration), ("Bohemian", "Queen", 354.0));
+    assert!(items[1].openable && items[2].openable);
+    assert_eq!((items[3].openable, items[3].sub.as_str()), (true, "Playlist"));
+    assert_eq!((items[4].openable, items[4].sub.as_str()), (false, "by Zed"));
+    // without knowing who you are none of them counts as yours
+    assert!(spotify::parse_search(&v, "").iter().all(|i| i.kind != "playlist" || !i.openable));
+    assert!(spotify::parse_search(&serde_json::Value::Null, "me1").is_empty());
+    // the browser draws a heading where the kind changes
+    let level = browser::Level { items, search: true, ..Default::default() };
+    use browser::ListRow::{Head, Item};
+    assert_eq!(
+        level.rows(),
+        [Head("Songs"), Item(0), Head("Albums"), Item(1), Head("Artists"), Item(2), Head("Playlists"), Item(3), Item(4)]
+    );
+    let plain = browser::Level { items: level.items.clone(), ..Default::default() };
+    assert_eq!(plain.rows().len(), 5, "other lists have no headings");
+}
+
+#[test]
+fn scrolling_keeps_the_selection_and_its_heading_in_view() {
+    let items: Vec<spotify::Item> = ["track", "track", "album", "album"]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| spotify::Item { kind: k.to_string(), uri: format!("u{i}"), name: format!("n{i}"), ..Default::default() })
+        .collect();
+    let mut l = browser::Level { items, search: true, ..Default::default() };
+    // rows: 0 Head(Songs), 1 item0, 2 item1, 3 Head(Albums), 4 item2, 5 item3
+    assert_eq!(l.scroll(3).len(), 6);
+    l.sel = 3;
+    l.scroll(3);
+    assert_eq!(l.top, 3, "item 3 (row 5) is the last of the three rows shown");
+    // scrolling back up to the first album brings its heading along
+    l.top = 5;
+    l.sel = 2;
+    l.scroll(3);
+    assert_eq!(l.top, 3);
+    // and the first song shows the very first heading
+    l.sel = 0;
+    l.scroll(3);
+    assert_eq!(l.top, 0);
+    // a short list never scrolls
+    l.sel = 3;
+    l.scroll(10);
+    assert_eq!(l.top, 0);
+}
+
+#[test]
+fn devices_are_parsed_with_this_pc_marked() {
+    let v: serde_json::Value = serde_json::from_str(DEVICES_JSON).unwrap();
+    let d = spotify::parse_devices(&v, |n| n == "Pawtix");
+    assert_eq!(d.len(), 3);
+    assert_eq!((d[0].name.as_str(), d[0].kind.as_str(), d[0].active, d[0].local), ("Phone", "Smartphone", true, false));
+    assert!(d[1].local && !d[1].active && !d[1].restricted);
+    assert!(d[2].restricted);
+    assert!(spotify::parse_devices(&serde_json::json!({}), |_| false).is_empty());
+}
+
+#[test]
+fn failed_requests_are_explained() {
+    assert_eq!(spotify::explain(429, "x", Some(30)), "Spotify is rate limiting: try again in 30 s");
+    assert_eq!(spotify::explain(429, "x", None), "Spotify is rate limiting: try again in a moment");
+    assert_eq!(spotify::explain(403, "PREMIUM_REQUIRED", None), "Spotify Premium is needed for this");
+    assert_eq!(spotify::explain(403, "Forbidden", None), "Spotify refused it (403): Forbidden");
+    assert!(spotify::explain(404, "NO_ACTIVE_DEVICE", None).contains("press d"));
+    assert_eq!(spotify::explain(404, "Not found", None), "Not found");
+    assert_eq!(spotify::explain(500, "boom", None), "boom");
+}
+
+#[tokio::test]
+async fn the_client_searches_lists_devices_and_reports_limits() {
+    let (base, log) = scripted_site(vec![
+        ("GET /me HTTP", vec![R::Http(200, JSON_HDR, r#"{"id":"me1"}"#.into())]),
+        ("/search", vec![R::Http(200, JSON_HDR, SEARCH_JSON.into())]),
+        ("/me/player/devices", vec![R::Http(200, JSON_HDR, DEVICES_JSON.into())]),
+        ("/me/player/pause", vec![R::Http(429, "Retry-After: 30\r\n", String::new()), R::Http(403, JSON_HDR, r#"{"error":{"status":403,"message":"Player command failed: Premium required","reason":"PREMIUM_REQUIRED"}}"#.into())]),
+        ("PUT /me/player HTTP", vec![R::Http(204, "", String::new())]),
+    ]);
+    let api = spotify::Api::new(reqwest::Client::new(), "id", "").with_fake_server(&base);
+    // one /search call for the four kinds, ten of each
+    let found = api.search("Queen & more").await.unwrap();
+    assert_eq!(found.len(), 5);
+    let req = log.lock().unwrap().iter().find(|l| l.contains("/search")).cloned().unwrap();
+    assert!(req.contains("q=Queen") && req.contains("type=track%2Calbum%2Cartist%2Cplaylist") && req.contains("limit=10"), "{req}");
+    assert!(req.contains("%26"), "the & of the query is escaped: {req}");
+    assert!(found.iter().any(|i| i.kind == "playlist" && i.openable), "your playlist is recognised through /me");
+    // devices
+    let devs = api.devices_list().await.unwrap();
+    assert_eq!(devs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Phone", "Pawtix", "Echo"]);
+    // moving playback
+    let ok = api.run(spotify::Cmd::TransferTo { id: "d2".into(), name: "Pawtix".into() }).await.unwrap();
+    assert_eq!(ok, "Playing on Pawtix");
+    assert!(log.lock().unwrap().iter().any(|l| l.starts_with("PUT /me/player HTTP")));
+    // the limits Spotify sets come out as sentences
+    let e = api.run(spotify::Cmd::Pause).await.unwrap_err();
+    assert_eq!((e.msg.as_str(), e.status), ("Spotify is rate limiting: try again in 30 s", 429));
+    let e = api.run(spotify::Cmd::Pause).await.unwrap_err();
+    assert_eq!((e.msg.as_str(), e.status), ("Spotify Premium is needed for this", 403));
+}
+
+/// An app with Spotify on that talks to a fake server, and the channel its answers come back on.
+fn spotify_app(base: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    let args = cli::Args::parse_from(["music_display"]);
+    let theme = theme::load(&args);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    app.args.config = Some(tmp(name).join("config.toml"));
+    app.args.spotify = true;
+    app.start_spotify();
+    app.spot = Some(spotify::Api::new(app.client.clone(), "id", "").with_fake_server(base));
+    (app, rx)
+}
+
+async fn pump(
+    app: &mut app::App,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    until: impl Fn(&app::App) -> bool,
+) {
+    for _ in 0..200 {
+        if until(app) {
+            return;
+        }
+        if let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+            app.apply(ev);
+        }
+    }
+    panic!("the app never got there");
+}
+
+fn type_text(app: &mut app::App, text: &str) {
+    for c in text.chars() {
+        app.handle(key(crossterm::event::KeyCode::Char(c)));
+    }
+}
+
+#[tokio::test]
+async fn searching_in_the_library_browser() {
+    use crossterm::event::KeyCode as K;
+    let album_tracks = r#"{"items":[{"uri":"spotify:track:t2","name":"Dreamer","duration_ms":1000,"artists":[{"name":"Queen"}]}],"next":null}"#;
+    let (base, log) = scripted_site(vec![
+        ("GET /me HTTP", vec![R::Http(200, JSON_HDR, r#"{"id":"me1"}"#.into())]),
+        ("/search", vec![R::Http(200, JSON_HDR, SEARCH_JSON.into())]),
+        ("/albums/a1/tracks", vec![R::Http(200, JSON_HDR, album_tracks.into())]),
+        ("/me/player/recently-played", vec![R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())]),
+        ("/me/player/play", vec![R::Http(204, "", String::new())]),
+        ("/me/player/queue", vec![R::Http(204, "", String::new())]),
+    ]);
+    let (mut app, mut rx) = spotify_app(&base, "searchflow");
+    app.run(app::Action::Library);
+    assert!(app.lib.open);
+    // `/` jumps to the Search tab with the field ready; q, o and d are letters there
+    app.handle(key(K::Char('/')));
+    assert!(app.lib.editing && app.lib.tab == browser::TAB_SEARCH);
+    type_text(&mut app, "queen do");
+    assert!(app.lib.open && app.lib.editing);
+    app.handle(key(K::Enter));
+    assert!(!app.lib.editing);
+    pump(&mut app, &mut rx, |a| a.lib.tabs[browser::TAB_SEARCH].loaded).await;
+    assert_eq!(app.lib.tabs[browser::TAB_SEARCH].items.len(), 5);
+    assert_eq!(app.lib.tabs[browser::TAB_SEARCH].summary, "5 results");
+    let req = log.lock().unwrap().iter().find(|l| l.contains("/search")).cloned().unwrap();
+    assert!(req.contains("q=queen+do") || req.contains("q=queen%20do"), "{req}");
+    // an older search that finishes late is dropped
+    app.apply(AppEvent::Spotify(spotify::Reply::Search { q: "old".into(), result: Ok(vec![]) }));
+    assert_eq!(app.lib.tabs[browser::TAB_SEARCH].items.len(), 5);
+    // open the album (second item), see its song, go back to the results where they were
+    app.handle(key(K::Down));
+    app.handle(key(K::Right));
+    pump(&mut app, &mut rx, |a| a.lib.stack.last().is_some_and(|l| l.loaded)).await;
+    assert_eq!(app.lib.level().items[0].name, "Dreamer");
+    app.handle(key(K::Left));
+    assert!(app.lib.stack.is_empty() && app.lib.tabs[browser::TAB_SEARCH].sel == 1);
+    // a on the song queues it, Enter plays it (alone: a search result has no context)
+    app.handle(key(K::Home));
+    app.handle(key(K::Char('a')));
+    pump(&mut app, &mut rx, |a| a.note_text().is_some_and(|n| n.contains("queue"))).await;
+    app.handle(key(K::Enter));
+    assert!(!app.lib.open, "playing closes the browser");
+    pump(&mut app, &mut rx, |_| log.lock().unwrap().iter().any(|l| l.starts_with("PUT /me/player/play"))).await;
+    let calls = log.lock().unwrap().clone();
+    assert!(calls.iter().any(|l| l.starts_with("POST /me/player/queue?uri=spotify%3Atrack%3At1")), "{calls:?}");
+}
+
+#[tokio::test]
+async fn the_search_tab_asks_for_text_first_and_esc_leaves_the_field() {
+    use crossterm::event::KeyCode as K;
+    let (base, _log) = scripted_site(vec![("/me/player/recently-played", vec![R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())])]);
+    let (mut app, _rx) = spotify_app(&base, "searchtab");
+    app.run(app::Action::Library);
+    app.handle(key(K::Char('6')));
+    assert!(app.lib.editing, "nothing searched yet: the field is ready");
+    app.handle(key(K::Esc));
+    assert!(app.lib.open && !app.lib.editing, "Esc only leaves the field");
+    app.handle(key(K::Esc));
+    assert!(!app.lib.open);
+    // an empty query runs nothing
+    app.run(app::Action::Library);
+    app.handle(key(K::Enter));
+    assert!(!app.lib.tabs[browser::TAB_SEARCH].loading);
+    // Tab walks through all six tabs and wraps
+    app.lib.editing = false;
+    for _ in 0..6 {
+        app.handle(key(K::Tab));
+    }
+    assert_eq!(app.lib.tab, browser::TAB_SEARCH);
+}
+
+#[tokio::test]
+async fn the_device_picker_moves_playback_and_respects_restrictions() {
+    use crossterm::event::KeyCode as K;
+    let (base, log) = scripted_site(vec![
+        ("/me/player/devices", vec![R::Http(200, JSON_HDR, DEVICES_JSON.into())]),
+        ("PUT /me/player HTTP", vec![R::Http(204, "", String::new())]),
+    ]);
+    let (mut app, mut rx) = spotify_app(&base, "devices");
+    assert_eq!(app::action_for(K::Char('d')), Some(app::Action::Devices));
+    app.handle(key(K::Char('d')));
+    assert!(app.devices.as_ref().is_some_and(|d| d.loading));
+    pump(&mut app, &mut rx, |a| a.devices.as_ref().is_some_and(|d| !d.loading)).await;
+    let picker = app.devices.as_ref().unwrap();
+    assert_eq!(picker.items.len(), 3);
+    assert_eq!(picker.sel, 0, "starts on the device that plays");
+    // a restricted device (Echo) is refused with a word, nothing is sent
+    app.handle(key(K::End));
+    app.handle(key(K::Enter));
+    assert!(app.devices.is_some());
+    assert!(app.note_text().unwrap_or("").contains("restricted"));
+    assert!(!log.lock().unwrap().iter().any(|l| l.starts_with("PUT")));
+    // the second one takes playback
+    app.handle(key(K::Up));
+    app.handle(key(K::Enter));
+    assert!(app.devices.is_none());
+    pump(&mut app, &mut rx, |a| a.note_text().is_some_and(|n| n.contains("Playing on Pawtix"))).await;
+    assert!(log.lock().unwrap().iter().any(|l| l.starts_with("PUT /me/player HTTP")));
+    // Esc closes it, and it also opens from inside the browser
+    app.handle(key(K::Char('d')));
+    app.handle(key(K::Esc));
+    assert!(app.devices.is_none());
+    app.run(app::Action::Library);
+    app.handle(key(K::Char('d')));
+    assert!(app.devices.is_some() && app.lib.open);
+}
+
+/// Draw the app on a `w`×`h` terminal and return what is on screen, one string per row.
+fn render(app: &mut app::App, w: u16, h: u16) -> Vec<String> {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+}
+
+#[tokio::test]
+async fn search_results_and_devices_are_drawn() {
+    let (base, _log) = scripted_site(vec![("/me/player/recently-played", vec![R::Http(200, JSON_HDR, r#"{"items":[]}"#.into())])]);
+    let (mut app, _rx) = spotify_app(&base, "drawsearch");
+    app.run(app::Action::Library);
+    app.lib.tab = browser::TAB_SEARCH;
+    let v: serde_json::Value = serde_json::from_str(SEARCH_JSON).unwrap();
+    app.apply(AppEvent::Spotify(spotify::Reply::Search { q: String::new(), result: Ok(spotify::parse_search(&v, "me1")) }));
+    for (w, h) in [(80u16, 24u16), (60, 12), (30, 8), (10, 4)] {
+        let screen = render(&mut app, w, h).join("\n");
+        if w >= 60 {
+            assert!(screen.contains("Songs") && screen.contains("Bohemian"), "{w}x{h}\n{screen}");
+            assert!(screen.contains("Search:"), "the field is shown: {w}x{h}");
+        }
+    }
+    // loading a new search keeps the old results on screen
+    app.lib.tabs[browser::TAB_SEARCH].loading = true;
+    assert!(render(&mut app, 80, 24).join("\n").contains("Bohemian"));
+    app.lib.tabs[browser::TAB_SEARCH].loading = false;
+    // the device list
+    let d: serde_json::Value = serde_json::from_str(DEVICES_JSON).unwrap();
+    app.devices = Some(browser::DevicePicker { items: spotify::parse_devices(&d, |n| n == "Pawtix"), ..Default::default() });
+    for (w, h) in [(80u16, 24u16), (40, 10), (20, 5), (10, 3)] {
+        let screen = render(&mut app, w, h).join("\n");
+        if w >= 40 {
+            assert!(screen.contains("Phone") && screen.contains("this PC") && screen.contains("▶"), "{w}x{h}\n{screen}");
+        }
+    }
+    app.devices = Some(browser::DevicePicker::default());
+    assert!(render(&mut app, 80, 24).join("\n").contains("No Spotify devices"));
+}
+
+#[tokio::test]
+async fn only_what_needs_a_word_reaches_the_footer_from_the_poller() {
+    let (mut app, _rx) = settings_app("poller-notes");
+    app.args.spotify = true;
+    app.start_spotify();
+    let err = |m: &str| AppEvent::Spotify(spotify::Reply::Remote(Err(m.into())));
+    app.apply(err("no connection: dns"));
+    assert!(app.note_text().is_none());
+    app.apply(err("Spotify is rate limiting: try again in 30 s"));
+    assert!(app.note_text().unwrap_or("").contains("30 s"));
+    // a failed list shows its error in the list and in the footer
+    app.apply(AppEvent::Spotify(spotify::Reply::Tab(1, Err("Spotify refused it (403): Forbidden".into()))));
+    assert_eq!(app.lib.tabs[1].error.as_deref(), Some("Spotify refused it (403): Forbidden"));
+    assert!(app.note_text().unwrap_or("").contains("403"));
 }
 
 #[test]
