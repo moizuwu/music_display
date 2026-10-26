@@ -24,7 +24,6 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, EventStream};
 use crossterm::execute;
 use futures::StreamExt;
@@ -44,100 +43,353 @@ mod cli {
         about = "Terminal now-playing display with synced lyrics, cover art and cava"
     )]
     pub struct Args {
-        /// Use this colour file instead of auto-detecting Noctalia/Matugen
+        /// Use this colour file instead of auto-detecting Noctalia/Matugen [no config key]
         #[arg(short = 'c', long = "colors", value_name = "FILE")]
         pub colors: Option<PathBuf>,
 
-        /// Force the surface (background/shadow) colour, e.g. '#1e1e2e'
+        /// Force the surface (background/shadow) colour, e.g. '#1e1e2e' [no config key]
         #[arg(long, value_name = "HEX")]
         pub surface: Option<String>,
 
-        /// Force the primary (accent/highlight) colour, e.g. '#cba6f7'
+        /// Force the primary (accent/highlight) colour, e.g. '#cba6f7' [no config key]
         #[arg(long, value_name = "HEX")]
         pub primary: Option<String>,
 
-        /// Start with the lyrics panel hidden (toggle with `l`)
+        /// Start with the lyrics panel hidden (toggle with `l`) [no config key]
         #[arg(long)]
         pub nolyrics: bool,
 
-        /// Start with the cava visualiser shown (toggle with `c`)
+        /// Start with the cava visualiser shown (toggle with `c`) [config: cava]
         #[arg(long)]
         pub cava: bool,
 
-        /// Put cava in its own third column: Metadata | Lyrics | Cava
+        /// Put cava in its own third column: Metadata | Lyrics | Cava [config: thirdpanel]
         #[arg(long, conflicts_with = "underlyrics")]
         pub thirdpanel: bool,
 
-        /// Put cava underneath the lyrics panel (default placement)
+        /// Put cava underneath the lyrics panel (default placement) [no config key]
         #[arg(long)]
         pub underlyrics: bool,
 
-        /// MPRIS player name passed to `playerctl -p` ("any" = playerctl's default choice)
+        /// MPRIS player name passed to `playerctl -p` ("any" = playerctl's default choice) [config: player]
         #[arg(long, default_value = "spotify")]
         pub player: String,
 
-        /// Cover tint strength: 0 = original colours, 1 = full surface→primary duotone
+        /// Cover tint strength: 0 = original colours, 1 = full surface→primary duotone [config: tint]
         #[arg(long, default_value_t = 1.0)]
         pub tint: f32,
 
-        /// Default lyric offset in seconds, applied on every new track (+ = lyrics earlier)
+        /// Default lyric offset in seconds, applied on every new track (+ = lyrics earlier) [config: offset]
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         pub offset: f64,
 
-        /// Number of bars cava renders (resampled to the panel width)
+        /// Number of bars cava renders (resampled to the panel width) [config: cava_bars]
         #[arg(long, default_value_t = 64)]
         pub cava_bars: u16,
 
-        /// Don't paint the surface colour as background (keep terminal transparency)
+        /// Don't paint the surface colour as background (keep terminal transparency) [config: transparent]
         #[arg(long)]
         pub transparent: bool,
 
         /// Inherit the terminal's own colours: default background/foreground and the ANSI
         /// accent. Skips every colour file. --surface/--primary still override their slot.
+        /// [config: terminal_colors]
         #[arg(long)]
         pub terminal_colors: bool,
 
-        /// Draw the cover as coloured ASCII characters instead of a terminal graphics image
+        /// Draw the cover as coloured ASCII characters instead of a terminal graphics image [config: ascii_cover]
         #[arg(long)]
         pub ascii_cover: bool,
 
-        /// Take the UI accent colour from the current album cover (updates every track)
+        /// Take the UI accent colour from the current album cover (updates every track) [config: cover_theme]
         #[arg(long)]
         pub cover_theme: bool,
 
-        /// Render the active lyric line in a big block font (toggle with `b`)
+        /// Render the active lyric line in a big block font (toggle with `b`) [config: big_lyrics]
         #[arg(long)]
         pub big_lyrics: bool,
 
         /// Show guitar chords above the lyrics (toggle with `g`). Sheets are read from
         /// --chords-dir as `Artist - Title.cho` (ChordPro) or `.txt` (chords over lyrics)
+        /// [config: chords]
         #[arg(long)]
         pub chords: bool,
 
-        /// Folder with your chord sheets [default: ~/.local/share/music_display/chords]
+        /// Folder with your chord sheets [default: ~/.local/share/music_display/chords] [config: chords_dir]
         #[arg(long, value_name = "DIR")]
         pub chords_dir: Option<PathBuf>,
 
         /// Also look chords up on Ultimate Guitar when there is no local sheet (unofficial,
-        /// opt-in; results are cached)
+        /// opt-in; results are cached) [config: chords_ug]
         #[arg(long)]
         pub chords_ug: bool,
 
-        /// Diagnose the Ultimate Guitar lookup for one song, print the steps and exit
+        /// Diagnose the Ultimate Guitar lookup for one song, print the steps and exit [no config key]
         #[arg(long, num_args = 2, value_names = ["ARTIST", "TITLE"])]
         pub chords_probe: Option<Vec<String>>,
 
-        /// With --chords-probe: save the raw pages here (to use as test fixtures)
+        /// With --chords-probe: save the raw pages here (to use as test fixtures) [no config key]
         #[arg(long, value_name = "DIR")]
         pub probe_save: Option<PathBuf>,
 
-        /// How many upcoming lyric lines show chords besides the active one
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=99))]
+        /// Limit chords to the active line plus N upcoming ones (default 99 = every line) [config: chords_context]
+        #[arg(long, default_value_t = 99, value_parser = clap::value_parser!(u16).range(0..=99))]
         pub chords_context: u16,
 
-        /// Blank rows between lyric lines (0-3)
+        /// Blank rows between lyric lines (0-3) [config: lyric_spacing]
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=3))]
         pub lyric_spacing: u16,
+
+        /// Volume change per `+` / `-` / mouse-wheel notch, in percent [config: volume_step]
+        #[arg(long, default_value_t = DEFAULT_VOLUME_STEP, value_parser = clap::value_parser!(u32).range(1..=50))]
+        pub volume_step: u32,
+
+        /// A silence between two lyric lines longer than this many seconds shows
+        /// `[ Instrumental / Solo ]` [config: interlude_threshold_secs]
+        #[arg(long = "interlude-secs", default_value_t = DEFAULT_INTERLUDE_SECS)]
+        pub interlude_secs: f64,
+
+        /// Retries after a failed lyrics request (timeout, 429, 5xx), with exponential backoff
+        /// [config: lyrics_retries]
+        #[arg(long, default_value_t = DEFAULT_LYRICS_RETRIES, value_parser = clap::value_parser!(u32).range(0..=10))]
+        pub lyrics_retries: u32,
+
+        /// Start in the minimal teleprompter view (toggle with `M`) [config: minimal_view]
+        #[arg(long)]
+        pub minimal: bool,
+
+        /// Don't capture the mouse (no click / wheel controls) [config: mouse = false]
+        #[arg(long)]
+        pub no_mouse: bool,
+
+        /// Read settings from this file instead of ~/.config/music_display/config.toml [no config key]
+        #[arg(long, value_name = "FILE")]
+        pub config: Option<PathBuf>,
+
+        /// Print the effective configuration (defaults + config file + flags) and exit [no config key]
+        #[arg(long)]
+        pub print_config: bool,
+    }
+
+    pub const DEFAULT_VOLUME_STEP: u32 = 5;
+    pub const DEFAULT_INTERLUDE_SECS: f64 = 8.0;
+    pub const DEFAULT_LYRICS_RETRIES: u32 = 3;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Config file: ~/.config/music_display/config.toml (flags > file > built-in defaults)
+// ════════════════════════════════════════════════════════════════════════════
+mod config {
+    use crate::cli::{self, Args};
+    use clap::parser::ValueSource;
+    use clap::ArgMatches;
+    use std::path::{Path, PathBuf};
+
+    pub enum Kind {
+        Bool,
+        Int(i64, i64),
+        Float(f64, f64),
+        Str,
+    }
+
+    pub struct Key {
+        pub name: &'static str,
+        pub kind: Kind,
+        /// The command-line argument it sets (an explicit flag always wins).
+        pub arg: &'static str,
+    }
+
+    macro_rules! k {
+        ($n:literal, $k:expr, $a:literal) => {
+            Key { name: $n, kind: $k, arg: $a }
+        };
+    }
+
+    /// Every setting the file understands.
+    pub const KEYS: &[Key] = &[
+        k!("player", Kind::Str, "player"),
+        k!("offset", Kind::Float(-60.0, 60.0), "offset"),
+        k!("tint", Kind::Float(0.0, 1.0), "tint"),
+        k!("transparent", Kind::Bool, "transparent"),
+        k!("terminal_colors", Kind::Bool, "terminal_colors"),
+        k!("ascii_cover", Kind::Bool, "ascii_cover"),
+        k!("cover_theme", Kind::Bool, "cover_theme"),
+        k!("cava", Kind::Bool, "cava"),
+        k!("cava_bars", Kind::Int(4, 1000), "cava_bars"),
+        k!("thirdpanel", Kind::Bool, "thirdpanel"),
+        k!("big_lyrics", Kind::Bool, "big_lyrics"),
+        k!("lyric_spacing", Kind::Int(0, 3), "lyric_spacing"),
+        k!("chords", Kind::Bool, "chords"),
+        k!("chords_ug", Kind::Bool, "chords_ug"),
+        k!("chords_dir", Kind::Str, "chords_dir"),
+        k!("chords_context", Kind::Int(0, 99), "chords_context"),
+        k!("volume_step", Kind::Int(1, 50), "volume_step"),
+        k!("interlude_threshold_secs", Kind::Float(1.0, 120.0), "interlude_secs"),
+        k!("lyrics_retries", Kind::Int(0, 10), "lyrics_retries"),
+        k!("minimal_view", Kind::Bool, "minimal"),
+        k!("mouse", Kind::Bool, "no_mouse"),
+    ];
+
+    pub fn default_path() -> PathBuf {
+        // dirs::config_dir() honours $XDG_CONFIG_HOME
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("music_display")
+            .join("config.toml")
+    }
+
+    fn check(kind: &Kind, v: &toml::Value) -> Result<(), String> {
+        match kind {
+            Kind::Bool => v.as_bool().map(|_| ()).ok_or("expected true or false".into()),
+            Kind::Str => match v.as_str() {
+                Some(s) if !s.trim().is_empty() => Ok(()),
+                _ => Err("expected a non-empty string".into()),
+            },
+            Kind::Int(lo, hi) => match v.as_integer() {
+                Some(n) if (*lo..=*hi).contains(&n) => Ok(()),
+                Some(_) => Err(format!("expected a whole number from {lo} to {hi}")),
+                None => Err(format!("expected a whole number from {lo} to {hi}")),
+            },
+            Kind::Float(lo, hi) => {
+                let f = v.as_float().or_else(|| v.as_integer().map(|n| n as f64));
+                match f {
+                    Some(f) if f.is_finite() && (*lo..=*hi).contains(&f) => Ok(()),
+                    _ => Err(format!("expected a number from {lo} to {hi}")),
+                }
+            }
+        }
+    }
+
+    /// 1-based line of `key = …` in the file, for error messages.
+    fn line_of(raw: &str, key: &str) -> usize {
+        raw.lines()
+            .position(|l| {
+                let l = l.trim_start();
+                l.strip_prefix(key)
+                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+            })
+            .map_or(0, |i| i + 1)
+    }
+
+    fn set(args: &mut Args, name: &str, v: &toml::Value) {
+        let b = || v.as_bool().unwrap_or(false);
+        let f = || v.as_float().or_else(|| v.as_integer().map(|n| n as f64)).unwrap_or(0.0);
+        let i = || v.as_integer().unwrap_or(0);
+        let st = || v.as_str().unwrap_or("").to_string();
+        match name {
+            "player" => args.player = st(),
+            "offset" => args.offset = f(),
+            "tint" => args.tint = f() as f32,
+            "transparent" => args.transparent = b(),
+            "terminal_colors" => args.terminal_colors = b(),
+            "ascii_cover" => args.ascii_cover = b(),
+            "cover_theme" => args.cover_theme = b(),
+            "cava" => args.cava = b(),
+            "cava_bars" => args.cava_bars = i() as u16,
+            "thirdpanel" => args.thirdpanel = b() && !args.underlyrics,
+            "big_lyrics" => args.big_lyrics = b(),
+            "lyric_spacing" => args.lyric_spacing = i() as u16,
+            "chords" => args.chords = b(),
+            "chords_ug" => args.chords_ug = b(),
+            "chords_dir" => args.chords_dir = Some(PathBuf::from(st())),
+            "chords_context" => args.chords_context = i() as u16,
+            "volume_step" => args.volume_step = i() as u32,
+            "interlude_threshold_secs" => args.interlude_secs = f(),
+            "lyrics_retries" => args.lyrics_retries = i() as u32,
+            "minimal_view" => args.minimal = b(),
+            "mouse" => args.no_mouse = !b(),
+            _ => {}
+        }
+    }
+
+    /// Apply the file at `path` to `args` for every setting not given on the command line.
+    /// Problems go to `warn`; none of them stop the program. Returns whether a file was read.
+    pub fn apply(
+        args: &mut Args,
+        m: &ArgMatches,
+        path: &Path,
+        explicit: bool,
+        warn: &mut dyn FnMut(String),
+    ) -> bool {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(e) => {
+                // A missing default file is normal; a missing --config file deserves a word.
+                if explicit || e.kind() != std::io::ErrorKind::NotFound {
+                    warn(format!("{}: {e}; using defaults", path.display()));
+                }
+                return false;
+            }
+        };
+        let table: toml::Table = match raw.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                warn(format!("{}: {e}; ignoring the file", path.display()));
+                return true;
+            }
+        };
+        let at = |key: &str| format!("{}:{}", path.display(), line_of(&raw, key));
+        // (line, message): reported in file order, not the table's alphabetical order
+        let mut problems: Vec<(usize, String)> = Vec::new();
+        for (name, v) in &table {
+            let line = line_of(&raw, name);
+            let Some(key) = KEYS.iter().find(|k| k.name == name) else {
+                problems.push((line, format!("{}: unknown key '{name}' (ignored)", at(name))));
+                continue;
+            };
+            if let Err(why) = check(&key.kind, v) {
+                problems.push((
+                    line,
+                    format!("{}: invalid value for '{name}': {why}; using the default", at(name)),
+                ));
+                continue;
+            }
+            if m.value_source(key.arg) == Some(ValueSource::CommandLine) {
+                continue; // an explicit flag beats the file
+            }
+            set(args, name, v);
+        }
+        problems.sort();
+        for (_, p) in problems {
+            warn(p);
+        }
+        true
+    }
+
+    /// The effective settings as TOML (what `--print-config` shows).
+    pub fn render(args: &Args, path: &Path, found: bool) -> String {
+        let q = |s: &str| format!("{:?}", s);
+        let mut o = format!(
+            "# effective configuration: built-in defaults < {} < command-line flags\n",
+            if found { path.display().to_string() } else { format!("{} (not found)", path.display()) }
+        );
+        let mut line = |k: &str, v: String| o.push_str(&format!("{k} = {v}\n"));
+        line("player", q(&args.player));
+        line("offset", format!("{:?}", args.offset));
+        line("tint", format!("{:?}", args.tint));
+        line("transparent", args.transparent.to_string());
+        line("terminal_colors", args.terminal_colors.to_string());
+        line("ascii_cover", args.ascii_cover.to_string());
+        line("cover_theme", args.cover_theme.to_string());
+        line("cava", args.cava.to_string());
+        line("cava_bars", args.cava_bars.to_string());
+        line("thirdpanel", args.thirdpanel.to_string());
+        line("big_lyrics", args.big_lyrics.to_string());
+        line("lyric_spacing", args.lyric_spacing.to_string());
+        line("chords", args.chords.to_string());
+        line("chords_ug", args.chords_ug.to_string());
+        match &args.chords_dir {
+            Some(d) => line("chords_dir", q(&d.display().to_string())),
+            None => line("# chords_dir", "\"~/.local/share/music_display/chords\"  # default".into()),
+        }
+        line("chords_context", args.chords_context.to_string());
+        line("volume_step", args.volume_step.to_string());
+        line("interlude_threshold_secs", format!("{:?}", args.interlude_secs));
+        line("lyrics_retries", args.lyrics_retries.to_string());
+        line("minimal_view", args.minimal.to_string());
+        line("mouse", (!args.no_mouse).to_string());
+        let _ = (cli::DEFAULT_VOLUME_STEP, cli::DEFAULT_LYRICS_RETRIES);
+        o
     }
 }
 
@@ -526,7 +778,7 @@ mod player {
     use tokio::sync::{Notify, mpsc::UnboundedSender};
 
     /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
-    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}";
+    const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Status {
@@ -547,12 +799,28 @@ mod player {
         pub track_no: Option<u32>,
         pub disc_no: Option<u32>,
         pub content_created: String,
+        /// Player volume 0.0..=1.0 (`None` if the player doesn't report one).
+        pub volume: Option<f64>,
     }
 
     impl Snapshot {
-        /// Identity of the track; changes ⇒ refetch year/lyrics.
+        /// Identity of the track; changes ⇒ refetch year/lyrics. Case, spacing and
+        /// edition/remaster suffixes are ignored, so "Metallica" and "Metallica (Remastered
+        /// Deluxe Box Set)" are the same track and don't regenerate any state.
         pub fn key(&self) -> u64 {
-            crate::util::fnv1a(&format!("{}\0{}\0{}", self.artist, self.title, self.album))
+            let n = |s: &str| {
+                s.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase()
+            };
+            let clean = |s: &str| n(&crate::year::clean(s.trim()));
+            crate::util::fnv1a(&format!(
+                "{}\0{}\0{}",
+                n(&self.artist),
+                clean(&self.title),
+                clean(&self.album)
+            ))
         }
     }
 
@@ -583,6 +851,11 @@ mod player {
             track_no: num(f[7]),
             disc_no: num(f[8]),
             content_created: f[9].trim().to_string(),
+            volume: f
+                .get(10)
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 1.0)),
         })
     }
 
@@ -718,6 +991,18 @@ mod year {
     }
 
     /// `"2011-09-26T…"` / `"2011"` → `Some("2011")`.
+    /// `YYYY-MM-DD` from an MPRIS `contentCreated` ("1969-09-26T00:00:00Z"); `None` if it
+    /// only carries a year (or nothing).
+    pub fn full_date(s: &str) -> Option<String> {
+        let d = s.trim().get(..10)?;
+        let b = d.as_bytes();
+        let ok = b[4] == b'-'
+            && b[7] == b'-'
+            && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+        let (m, day) = (&d[5..7], &d[8..10]);
+        (ok && m != "00" && day != "00").then(|| d.to_string())
+    }
+
     pub fn from_content_created(s: &str) -> Option<String> {
         let y: String = s.trim().chars().take(4).collect();
         let n: i32 = y.parse().ok()?;
@@ -1036,47 +1321,123 @@ mod lyrics {
             .and_then(classify)
     }
 
-    async fn get(
-        c: &reqwest::Client,
-        artist: &str,
-        title: &str,
-        album: &str,
-        length: f64,
-    ) -> Result<Option<Rec>, ()> {
-        let dur = format!("{}", length.round() as i64);
-        let mut q = vec![("artist_name", artist), ("track_name", title)];
-        if !album.is_empty() {
-            q.push(("album_name", album));
-        }
-        if length > 0.0 {
-            q.push(("duration", &dur));
-        }
-        let r = c
-            .get("https://lrclib.net/api/get")
-            .query(&q)
-            .send()
-            .await
-            .map_err(|_| ())?;
-        if r.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !r.status().is_success() {
-            return Err(());
-        }
-        r.json::<Rec>().await.map(Some).map_err(|_| ())
+    pub const BASE: &str = "https://lrclib.net";
+
+    /// How hard to try before giving up on a lookup.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Policy {
+        /// Retries after the first attempt (so `3` = up to 4 requests per step).
+        pub retries: u32,
+        /// First backoff; doubles each retry (500 ms, 1 s, 2 s …).
+        pub backoff: std::time::Duration,
     }
 
-    async fn search(c: &reqwest::Client, artist: &str, title: &str) -> Result<Vec<Rec>, ()> {
-        let r = c
-            .get("https://lrclib.net/api/search")
-            .query(&[("artist_name", artist), ("track_name", title)])
-            .send()
-            .await
-            .map_err(|_| ())?;
-        if !r.status().is_success() {
-            return Err(());
+    impl Default for Policy {
+        fn default() -> Self {
+            Policy {
+                retries: 3,
+                backoff: std::time::Duration::from_millis(500),
+            }
         }
-        r.json::<Vec<Rec>>().await.map_err(|_| ())
+    }
+
+    enum Reply {
+        Body(String),
+        /// HTTP 404: the server answered and has nothing.
+        NotFound,
+        /// Retries exhausted (timeout, disconnect, 429, 5xx …); the text says what.
+        Failed(&'static str),
+    }
+
+    /// GET with retry + exponential backoff. 404 is a real answer (no retry). Timeouts,
+    /// connection errors, 429 (honouring `Retry-After`) and 5xx are retried.
+    async fn request(
+        c: &reqwest::Client,
+        url: &str,
+        query: &[(&str, &str)],
+        retries: u32,
+        backoff: std::time::Duration,
+    ) -> Reply {
+        let mut why = "network error";
+        for attempt in 0..=retries {
+            let mut wait = backoff * 2u32.pow(attempt);
+            match c.get(url).query(query).send().await {
+                Ok(r) => {
+                    let st = r.status();
+                    if st == reqwest::StatusCode::NOT_FOUND {
+                        return Reply::NotFound;
+                    }
+                    if st.is_success() {
+                        match r.text().await {
+                            Ok(t) => return Reply::Body(t),
+                            Err(_) => why = "network error", // dropped mid-body
+                        }
+                    } else if st == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        why = "rate limited";
+                        if let Some(s) = r
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.trim().parse::<u64>().ok())
+                        {
+                            wait = std::time::Duration::from_secs(s.min(10));
+                        }
+                    } else if st.is_server_error() {
+                        why = "server error";
+                    } else {
+                        return Reply::Failed("unexpected reply"); // other 4xx: retrying won't help
+                    }
+                }
+                Err(_) => why = "network error",
+            }
+            if attempt < retries {
+                tokio::time::sleep(wait).await;
+            }
+        }
+        Reply::Failed(why)
+    }
+
+    /// Result of one step of the fallback chain.
+    enum Step<T> {
+        Hit(T),
+        Nothing,
+        Failed(&'static str),
+    }
+
+    async fn get(
+        c: &reqwest::Client,
+        base: &str,
+        q: &[(&str, &str)],
+        retries: u32,
+        p: &Policy,
+    ) -> Step<Rec> {
+        match request(c, &format!("{base}/api/get"), q, retries, p.backoff).await {
+            Reply::Body(t) => match serde_json::from_str::<Rec>(&t) {
+                Ok(r) => Step::Hit(r),
+                Err(_) => Step::Failed("unreadable reply"),
+            },
+            Reply::NotFound => Step::Nothing,
+            Reply::Failed(w) => Step::Failed(w),
+        }
+    }
+
+    async fn search(
+        c: &reqwest::Client,
+        base: &str,
+        artist: &str,
+        title: &str,
+        retries: u32,
+        p: &Policy,
+    ) -> Step<Vec<Rec>> {
+        let q = [("artist_name", artist), ("track_name", title)];
+        match request(c, &format!("{base}/api/search"), &q, retries, p.backoff).await {
+            Reply::Body(t) => match serde_json::from_str::<Vec<Rec>>(&t) {
+                Ok(v) => Step::Hit(v),
+                Err(_) => Step::Failed("unreadable reply"),
+            },
+            Reply::NotFound => Step::Nothing,
+            Reply::Failed(w) => Step::Failed(w),
+        }
     }
 
     pub async fn fetch(
@@ -1085,46 +1446,97 @@ mod lyrics {
         title: String,
         album: String,
         length: f64,
+        policy: Policy,
+    ) -> Lyrics {
+        fetch_with(&c, BASE, &artist, &title, &album, length, policy, true).await
+    }
+
+    /// Fallback chain: (a) exact artist+title+album+duration, (b) first artist + cleaned
+    /// title without album/duration, (c) search by (cleaned) title. Each step retries with
+    /// backoff; once a step has exhausted its retries the rest try once each instead of
+    /// multiplying the wait. "Not found" is only reported — and cached — when every step got
+    /// a real answer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_with(
+        c: &reqwest::Client,
+        base: &str,
+        artist: &str,
+        title: &str,
+        album: &str,
+        length: f64,
+        policy: Policy,
+        use_cache: bool,
     ) -> Lyrics {
         let key = fnv1a(&format!(
             "{artist}\0{title}\0{album}\0{}",
             length.round() as i64
         ));
         let path = cache_dir().join(format!("lyrics-{key:016x}.json"));
-        if let Ok(txt) = tokio::fs::read_to_string(&path).await {
-            if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
-                if e.kind != "none" || now_secs().saturating_sub(e.saved) < NEG_TTL {
-                    return to_lyrics(&e.kind, &e.text);
+        if use_cache {
+            if let Ok(txt) = tokio::fs::read_to_string(&path).await {
+                if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
+                    if e.kind != "none" || now_secs().saturating_sub(e.saved) < NEG_TTL {
+                        return to_lyrics(&e.kind, &e.text);
+                    }
                 }
             }
         }
 
-        let mut errored = false;
+        let cleaned = crate::year::clean(title);
+        let first = artist.split(", ").next().unwrap_or(artist).to_string();
+        let mut failure: Option<&'static str> = None;
         let mut result: Option<(&'static str, String)> = None;
+        let mut retries = policy.retries;
+        let mut note = |w: &'static str, retries: &mut u32| {
+            failure = Some(w);
+            *retries = 0; // network is struggling: one try per remaining step
+        };
 
-        // 1. exact signature match
-        match get(&c, &artist, &title, &album, length).await {
-            Ok(Some(r)) => result = classify(&r),
-            Ok(None) => {}
-            Err(_) => errored = true,
+        // (a) exact signature
+        let dur = format!("{}", length.round() as i64);
+        let mut q = vec![("artist_name", artist), ("track_name", title)];
+        if !album.is_empty() {
+            q.push(("album_name", album));
         }
-        // 2. search (raw title, then cleaned title, then first artist only)
+        if length > 0.0 {
+            q.push(("duration", &dur));
+        }
+        match get(c, base, &q, retries, &policy).await {
+            Step::Hit(r) => result = classify(&r),
+            Step::Nothing => {}
+            Step::Failed(w) => note(w, &mut retries),
+        }
+
+        // (b) first artist + cleaned title, no album / duration
         if result.as_ref().is_none_or(|r| r.0 != "synced") {
-            let cleaned = crate::year::clean(&title);
-            let first = artist.split(", ").next().unwrap_or(&artist).to_string();
-            let mut tries = vec![(artist.clone(), title.clone())];
+            let q = [("artist_name", first.as_str()), ("track_name", cleaned.as_str())];
+            match get(c, base, &q, retries, &policy).await {
+                Step::Hit(r) => {
+                    if let Some(hit) = classify(&r) {
+                        if result.as_ref().is_none_or(|x| x.0 != "synced" && hit.0 == "synced") {
+                            result = Some(hit);
+                        }
+                    }
+                }
+                Step::Nothing => {}
+                Step::Failed(w) => note(w, &mut retries),
+            }
+        }
+
+        // (c) search: cleaned title, then the raw title, then the first artist alone
+        if result.as_ref().is_none_or(|r| r.0 != "synced") {
+            let mut tries = vec![(artist.to_string(), cleaned.clone())];
             if cleaned != title {
-                tries.push((artist.clone(), cleaned.clone()));
+                tries.push((artist.to_string(), title.to_string()));
             }
             if first != artist {
-                tries.push((first, cleaned));
+                tries.push((first.clone(), cleaned.clone()));
             }
             for (a, t) in tries {
-                match search(&c, &a, &t).await {
-                    Ok(recs) => {
+                match search(c, base, &a, &t, retries, &policy).await {
+                    Step::Hit(recs) => {
                         if let Some(hit) = pick(recs, length) {
-                            let better = result.as_ref().is_none_or(|r| r.0 != "synced");
-                            if better {
+                            if result.as_ref().is_none_or(|r| r.0 != "synced") {
                                 result = Some(hit);
                             }
                             if result.as_ref().is_some_and(|r| r.0 == "synced") {
@@ -1132,32 +1544,38 @@ mod lyrics {
                             }
                         }
                     }
-                    Err(_) => errored = true,
+                    Step::Nothing => {}
+                    Step::Failed(w) => note(w, &mut retries),
                 }
             }
         }
 
+        let save = |kind: &str, text: &str| {
+            let e = CacheEntry {
+                kind: kind.into(),
+                text: text.into(),
+                saved: now_secs(),
+            };
+            serde_json::to_string(&e).ok()
+        };
         match result {
             Some((kind, text)) => {
-                let e = CacheEntry {
-                    kind: kind.into(),
-                    text: text.clone(),
-                    saved: now_secs(),
-                };
-                if let Ok(s) = serde_json::to_string(&e) {
-                    let _ = tokio::fs::write(&path, s).await;
+                if use_cache {
+                    if let Some(s) = save(kind, &text) {
+                        let _ = tokio::fs::write(&path, s).await;
+                    }
                 }
                 to_lyrics(kind, &text)
             }
-            None if errored => Lyrics::Error("lyrics unavailable (network error)".into()),
+            None if failure.is_some() => Lyrics::Error(format!(
+                "lyrics unavailable ({})",
+                failure.unwrap_or("network error")
+            )),
             None => {
-                let e = CacheEntry {
-                    kind: "none".into(),
-                    text: String::new(),
-                    saved: now_secs(),
-                };
-                if let Ok(s) = serde_json::to_string(&e) {
-                    let _ = tokio::fs::write(&path, s).await;
+                if use_cache {
+                    if let Some(s) = save("none", "") {
+                        let _ = tokio::fs::write(&path, s).await;
+                    }
                 }
                 Lyrics::NotFound
             }
@@ -1500,6 +1918,11 @@ mod chords {
         /// Where it came from (file name), for the footer.
         pub source: String,
         pub capo: u8,
+        /// Key of the chords *as written* (the shapes), e.g. "Am". From `{key: Am}`, a
+        /// `Key: Am` line, or Ultimate Guitar's `tonality_name`.
+        pub key: Option<String>,
+        /// From `{tempo: 83}` / `BPM: 83` / the page metadata when the source has it.
+        pub bpm: Option<u32>,
         pub lines: Vec<SheetLine>,
     }
 
@@ -1607,6 +2030,89 @@ mod chords {
         out
     }
 
+    /// Semitones to shift the sheet's chord shapes: a higher capo means lower shapes.
+    /// `transpose` is the manual `t`/`T` shift on top.
+    pub fn capo_shift(sheet_capo: u8, effective: u8, transpose: i32) -> i32 {
+        sheet_capo as i32 - effective as i32 + transpose
+    }
+
+    // ── keys, Camelot wheel ────────────────────────────────────────────────
+    /// A musical key: pitch class of the tonic (0 = C) and mode.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct KeyInfo {
+        pub root: u8,
+        pub minor: bool,
+    }
+
+    const MAJOR_NAMES: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+    const MINOR_NAMES: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
+
+    fn pitch_class(note: &str) -> Option<u8> {
+        let b = note.as_bytes();
+        let base: i32 = match b.first()? {
+            b'C' => 0,
+            b'D' => 2,
+            b'E' => 4,
+            b'F' => 5,
+            b'G' => 7,
+            b'A' => 9,
+            b'B' => 11,
+            _ => return None,
+        };
+        let acc = match b.get(1) {
+            Some(b'#') => 1,
+            Some(b'b') => -1,
+            _ => 0,
+        };
+        Some((base + acc).rem_euclid(12) as u8)
+    }
+
+    /// "Am", "F#", "Bbm", "E minor", "D Major" → key.
+    pub fn parse_key(s: &str) -> Option<KeyInfo> {
+        let s = s.trim();
+        let n = root_len(s)?;
+        let root = pitch_class(&s[..n])?;
+        let rest = s[n..].trim().to_lowercase();
+        let minor = match rest.as_str() {
+            "" | "maj" | "major" => false,
+            "m" | "min" | "minor" => true,
+            r if r.starts_with('m') && !r.starts_with("maj") => true, // Am7 etc.
+            _ => return None,
+        };
+        Some(KeyInfo { root, minor })
+    }
+
+    impl KeyInfo {
+        pub fn shift(self, n: i32) -> KeyInfo {
+            KeyInfo {
+                root: (self.root as i32 + n).rem_euclid(12) as u8,
+                ..self
+            }
+        }
+        /// "Am", "Bb".
+        pub fn short(self) -> String {
+            let names = if self.minor { &MINOR_NAMES } else { &MAJOR_NAMES };
+            format!("{}{}", names[self.root as usize], if self.minor { "m" } else { "" })
+        }
+        /// "E Minor".
+        pub fn long(self) -> String {
+            let names = if self.minor { &MINOR_NAMES } else { &MAJOR_NAMES };
+            format!("{} {}", names[self.root as usize], if self.minor { "Minor" } else { "Major" })
+        }
+        /// Camelot wheel code: "9A" = E minor, "8B" = C major.
+        pub fn camelot(self) -> String {
+            // minor keys share the number of their relative major
+            let major_pc = if self.minor { (self.root + 3) % 12 } else { self.root } as u32;
+            let n = (major_pc * 7 + 7) % 12 + 1;
+            format!("{n}{}", if self.minor { 'A' } else { 'B' })
+        }
+        /// Flat names (Bb, Eb …) read better in F, Bb, Eb, Ab, Db major and their relatives.
+        pub fn prefers_flats(self) -> bool {
+            let major_pc = if self.minor { (self.root + 3) % 12 } else { self.root };
+            matches!(major_pc, 5 | 10 | 3 | 8 | 1)
+        }
+    }
+
     // ── parsing ────────────────────────────────────────────────────────────
     fn strip_tags(s: &str) -> String {
         s.replace("[ch]", "")
@@ -1661,6 +2167,24 @@ mod chords {
         it.all(|w| {
             w.chars().any(|c| c.is_ascii_digit()) || w == "x" || w.starts_with('(') || w == "play"
         })
+    }
+
+    /// `key` / `tonality` / `bpm` / `tempo` metadata; `true` if it was one.
+    fn apply_meta(sheet: &mut Sheet, k: &str, v: &str) -> bool {
+        match k.to_lowercase().as_str() {
+            "key" | "tonality" if parse_key(v).is_some() => {
+                sheet.key = Some(v.to_string());
+                true
+            }
+            "bpm" | "tempo" => match v.split_whitespace().next().and_then(|n| n.parse::<u32>().ok()) {
+                Some(n) if (30..=300).contains(&n) => {
+                    sheet.bpm = Some(n);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn is_tab_line(line: &str) -> bool {
@@ -1719,6 +2243,11 @@ mod chords {
                 sheet.capo = c;
                 continue;
             }
+            if let Some((k, v)) = line.split_once(':') {
+                if apply_meta(&mut sheet, k.trim(), v.trim()) {
+                    continue;
+                }
+            }
             if let Some(chords) = chord_tokens(line) {
                 let next = lines.get(i).copied().unwrap_or("");
                 let usable = !next.trim().is_empty()
@@ -1761,6 +2290,8 @@ mod chords {
                 if let Some((k, v)) = d.split_once(':') {
                     if k.trim().eq_ignore_ascii_case("capo") {
                         sheet.capo = v.trim().parse().ok().filter(|n| *n <= 12).unwrap_or(0);
+                    } else {
+                        apply_meta(&mut sheet, k.trim(), v.trim());
                     }
                 }
                 continue;
@@ -1894,6 +2425,12 @@ mod chords {
         if s.capo > 0 {
             out.push_str(&format!("{{capo: {}}}\n", s.capo));
         }
+        if let Some(k) = &s.key {
+            out.push_str(&format!("{{key: {k}}}\n"));
+        }
+        if let Some(b) = s.bpm {
+            out.push_str(&format!("{{tempo: {b}}}\n"));
+        }
         for l in &s.lines {
             let mut cs = l.chords.clone();
             cs.sort_by_key(|c| c.0);
@@ -1999,6 +2536,9 @@ mod chords {
         pub matched: usize,
         pub total: usize,
         pub flats: bool,
+        /// Chord-only sheet lines before the first matched lyric line (the intro), one
+        /// `Vec` of chord names per sheet line.
+        pub intro: Vec<Vec<String>>,
     }
 
     impl Aligned {
@@ -2027,6 +2567,7 @@ mod chords {
             ..Default::default()
         };
         let mut j = 0usize;
+        let mut first_hit: Option<usize> = None;
         for (li, (_, text)) in lyrics.iter().enumerate() {
             let n = norm(text);
             if n.is_empty() {
@@ -2054,6 +2595,9 @@ mod chords {
                 advance = false;
             }
             let Some((k, _)) = best else { continue };
+            if first_hit.is_none() {
+                first_hit = Some(sung[k].0);
+            }
             if advance {
                 j = k + 1;
             }
@@ -2068,10 +2612,18 @@ mod chords {
             cs.sort_by_key(|c| c.0);
             out.per_line[li] = cs;
         }
+        out.intro = sheet
+            .lines
+            .iter()
+            .take(first_hit.unwrap_or(0))
+            .filter(|l| norm(&l.text).is_empty() && !l.chords.is_empty())
+            .map(|l| l.chords.iter().map(|c| c.1.clone()).collect())
+            .collect();
         if !out.usable() {
             for l in &mut out.per_line {
                 l.clear();
             }
+            out.intro.clear();
         }
         out
     }
@@ -2234,6 +2786,18 @@ mod ug {
                 .and_then(Value::as_u64)
                 .filter(|c| (1..=12).contains(c))
                 .unwrap_or(0) as u8;
+        }
+        if sheet.key.is_none() {
+            sheet.key = find_key(store, "tonality_name")
+                .and_then(Value::as_str)
+                .filter(|k| chords::parse_key(k).is_some())
+                .map(str::to_string);
+        }
+        if sheet.bpm.is_none() {
+            sheet.bpm = find_key(store, "bpm")
+                .and_then(|b| b.as_u64().or_else(|| b.as_str().and_then(|s| s.parse().ok())))
+                .filter(|b| (30..=300).contains(b))
+                .map(|b| b as u32);
         }
         (sheet.chord_count() >= MIN_CHORDS).then(|| {
             sheet.source = "ultimate-guitar".into();
@@ -2433,6 +2997,188 @@ mod ug {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Guitar chord diagrams (standard tuning, strings low E → high e)
+// ════════════════════════════════════════════════════════════════════════════
+mod diagram {
+    /// Absolute frets per string (-1 = muted, 0 = open) and finger numbers (0 = none).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Shape {
+        pub frets: [i8; 6],
+        pub fingers: [u8; 6],
+    }
+
+    /// Open-position shapes that beat the barre version.
+    const OPEN: &[(&str, &str, &str)] = &[
+        ("C", "x32010", "032010"),
+        ("D", "xx0232", "000132"),
+        ("G", "320003", "210004"),
+        ("Dm", "xx0231", "000231"),
+        ("C7", "x32310", "032410"),
+        ("D7", "xx0212", "000213"),
+        ("G7", "320001", "320001"),
+        ("B7", "x21202", "021304"),
+        ("Cmaj7", "x32000", "032000"),
+        ("Dmaj7", "xx0222", "000111"),
+        ("Gmaj7", "320002", "210003"),
+        ("Dm7", "xx0211", "000211"),
+        ("Dsus2", "xx0230", "000230"),
+        ("Dsus4", "xx0233", "000123"),
+        ("Gsus4", "330013", "340012"),
+        ("Csus4", "x33011", "034011"),
+    ];
+
+    /// Movable shapes: (quality, E-shape relative frets, E fingers, A-shape frets, A fingers).
+    #[allow(clippy::type_complexity)]
+    const MOVABLE: &[(&str, [i8; 6], [u8; 6], [i8; 6], [u8; 6])] = &[
+        ("", [0, 2, 2, 1, 0, 0], [1, 3, 4, 2, 1, 1], [-1, 0, 2, 2, 2, 0], [0, 1, 2, 3, 4, 1]),
+        ("m", [0, 2, 2, 0, 0, 0], [1, 3, 4, 1, 1, 1], [-1, 0, 2, 2, 1, 0], [0, 1, 3, 4, 2, 1]),
+        ("7", [0, 2, 0, 1, 0, 0], [1, 3, 1, 2, 1, 1], [-1, 0, 2, 0, 2, 0], [0, 1, 3, 1, 4, 1]),
+        ("m7", [0, 2, 0, 0, 0, 0], [1, 3, 1, 1, 1, 1], [-1, 0, 2, 0, 1, 0], [0, 1, 3, 1, 2, 1]),
+        ("maj7", [0, 2, 1, 1, 0, 0], [1, 4, 2, 3, 1, 1], [-1, 0, 2, 1, 2, 0], [0, 1, 3, 2, 4, 1]),
+        ("sus4", [0, 2, 2, 2, 0, 0], [1, 2, 3, 4, 1, 1], [-1, 0, 2, 2, 3, 0], [0, 1, 2, 3, 4, 1]),
+        ("sus2", [-1, -1, -1, -1, -1, -1], [0; 6], [-1, 0, 2, 2, 0, 0], [0, 1, 3, 4, 1, 1]),
+        ("5", [0, 2, 2, -1, -1, -1], [1, 3, 4, 0, 0, 0], [-1, 0, 2, 2, -1, -1], [0, 1, 3, 4, 0, 0]),
+    ];
+
+    const SHARP: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    /// `(pitch class, quality)` for plain chords; `None` for slash chords, dim/aug/9ths…
+    fn split(name: &str) -> Option<(u8, &'static str)> {
+        if name.contains('/') {
+            return None;
+        }
+        let b = name.as_bytes();
+        let base: i32 = match b.first()? {
+            b'C' => 0,
+            b'D' => 2,
+            b'E' => 4,
+            b'F' => 5,
+            b'G' => 7,
+            b'A' => 9,
+            b'B' => 11,
+            _ => return None,
+        };
+        let (acc, rest) = match b.get(1) {
+            Some(b'#') => (1, &name[2..]),
+            Some(b'b') => (-1, &name[2..]),
+            _ => (0, &name[1..]),
+        };
+        let q = match rest {
+            "" | "maj" | "M" => "",
+            "m" | "min" | "-" => "m",
+            "7" => "7",
+            "m7" | "min7" | "-7" => "m7",
+            "maj7" | "M7" | "Maj7" => "maj7",
+            "sus4" | "sus" => "sus4",
+            "sus2" => "sus2",
+            "5" => "5",
+            _ => return None,
+        };
+        Some(((base + acc).rem_euclid(12) as u8, q))
+    }
+
+    pub fn lookup(name: &str) -> Option<Shape> {
+        let (pc, q) = split(name)?;
+        let key = format!("{}{q}", SHARP[pc as usize]);
+        if let Some((_, f, fi)) = OPEN.iter().find(|(n, _, _)| *n == key) {
+            let frets = f
+                .chars()
+                .map(|c| if c == 'x' { -1 } else { c.to_digit(10).unwrap() as i8 })
+                .collect::<Vec<_>>();
+            let fingers = fi.chars().map(|c| c.to_digit(10).unwrap() as u8).collect::<Vec<_>>();
+            return Some(Shape {
+                frets: frets.try_into().ok()?,
+                fingers: fingers.try_into().ok()?,
+            });
+        }
+        let (_, e_f, e_fi, a_f, a_fi) = MOVABLE.iter().find(|m| m.0 == q)?;
+        let f6 = (pc as i32 - 4).rem_euclid(12);
+        let f5 = (pc as i32 - 9).rem_euclid(12);
+        // lowest position wins; E-shape on ties (and sus2 only exists as an A-shape)
+        let use_a = *e_f == [-1; 6] || f5 < f6;
+        let (rel, fin, base) = if use_a { (a_f, a_fi, f5) } else { (e_f, e_fi, f6) };
+        let mut frets = [-1i8; 6];
+        let mut fingers = *fin;
+        for i in 0..6 {
+            if rel[i] >= 0 {
+                frets[i] = rel[i] + base as i8;
+            }
+            // open-position version of a barre shape: the barre finger drops out
+            if base == 0 && fingers[i] > 1 {
+                fingers[i] -= 1;
+            } else if base == 0 && fingers[i] == 1 && rel[i] == 0 {
+                fingers[i] = 0;
+            }
+        }
+        // a shape that would need frets above the 12th isn't a sensible diagram
+        if frets.iter().any(|f| *f > 12) {
+            return None;
+        }
+        Some(Shape { frets, fingers })
+    }
+
+    /// 8 lines, 11 columns wide: name, mute/open markers, nut, four fret rows.
+    pub fn render(name: &str, s: &Shape) -> Vec<String> {
+        let fretted: Vec<i8> = s.frets.iter().copied().filter(|f| *f > 0).collect();
+        let max = fretted.iter().copied().max().unwrap_or(0);
+        let base = if max > 4 { fretted.iter().copied().min().unwrap_or(1) } else { 1 };
+        let mut out = vec![format!("{name:^11}")];
+        out.push(
+            s.frets
+                .iter()
+                .map(|f| match f {
+                    -1 => 'x',
+                    0 => 'o',
+                    _ => ' ',
+                })
+                .map(String::from)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        out.push(if base == 1 { "╒═╤═╤═╤═╤═╕".into() } else { "┌─┬─┬─┬─┬─┐".into() });
+        for r in 0..4 {
+            let fret = base + r;
+            let row = (0..6)
+                .map(|i| {
+                    if s.frets[i] == fret {
+                        match s.fingers[i] {
+                            0 => "●".to_string(),
+                            n => n.to_string(),
+                        }
+                    } else {
+                        "│".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push(if r == 0 && base > 1 { format!("{row} {base}fr") } else { row });
+        }
+        out
+    }
+
+    /// A little tab: one column per chord, strings e B G D A E from the top.
+    pub fn tab(shapes: &[Option<Shape>]) -> Vec<String> {
+        const NAMES: [char; 6] = ['e', 'B', 'G', 'D', 'A', 'E'];
+        (0..6)
+            .map(|row| {
+                let s = 5 - row;
+                let mut line = format!("{}|", NAMES[row]);
+                for sh in shapes {
+                    let cell = match sh {
+                        None => "?".to_string(),
+                        Some(sh) if sh.frets[s] < 0 => "x".to_string(),
+                        Some(sh) => sh.frets[s].to_string(),
+                    };
+                    line.push_str(&format!("-{cell:-<2}-"));
+                }
+                line.push('|');
+                line
+            })
+            .collect()
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Application state + event handling
 // ════════════════════════════════════════════════════════════════════════════
 pub enum AppEvent {
@@ -2452,6 +3198,8 @@ pub enum AppEvent {
     Chords {
         key: u64,
         sheet: Result<Option<chords::Sheet>, String>,
+        /// Saved per-track capo override, if any.
+        capo: Option<u8>,
     },
     Cava(Vec<u16>),
     /// Informational status while cava has produced nothing yet.
@@ -2474,6 +3222,96 @@ mod app {
     use ratatui_image::protocol::Protocol;
     use tokio::sync::mpsc::UnboundedSender;
     use tokio::task::JoinHandle;
+
+    /// Everything a key can do. The input handler and the `?` help overlay both read
+    /// [`BINDS`], so the two can't drift apart.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Action {
+        Quit,
+        PlayPause,
+        Next,
+        Prev,
+        SeekBack,
+        SeekFwd,
+        SyncEarlier,
+        SyncLater,
+        VolUp,
+        VolDown,
+        Mute,
+        ToggleLyrics,
+        ToggleBig,
+        ToggleCava,
+        ToggleChords,
+        TransposeUp,
+        TransposeDown,
+        CapoDown,
+        CapoUp,
+        CapoReset,
+        Diagrams,
+        Minimal,
+        Help,
+    }
+
+    pub struct Bind {
+        pub group: &'static str,
+        /// How the key is written in the help overlay.
+        pub keys: &'static str,
+        pub desc: &'static str,
+        pub codes: &'static [KeyCode],
+        pub action: Action,
+    }
+
+    macro_rules! bind {
+        ($g:literal, $k:literal, $d:literal, [$($c:expr),+], $a:ident) => {
+            Bind { group: $g, keys: $k, desc: $d, codes: &[$($c),+], action: Action::$a }
+        };
+    }
+
+    pub const GROUPS: [&str; 4] = ["Playback", "Lyrics", "Chords", "View"];
+
+    pub const BINDS: &[Bind] = &[
+        bind!("Playback", "space", "play / pause", [KeyCode::Char(' ')], PlayPause),
+        bind!("Playback", "n", "next track", [KeyCode::Char('n')], Next),
+        bind!("Playback", "p", "previous track", [KeyCode::Char('p')], Prev),
+        bind!("Playback", "←", "seek back 5 s", [KeyCode::Left], SeekBack),
+        bind!("Playback", "→", "seek forward 5 s", [KeyCode::Right], SeekFwd),
+        bind!("Playback", "+", "volume up", [KeyCode::Char('+'), KeyCode::Char('=')], VolUp),
+        bind!("Playback", "-", "volume down", [KeyCode::Char('-')], VolDown),
+        bind!("Playback", "m", "mute / unmute", [KeyCode::Char('m')], Mute),
+        bind!("Lyrics", ",", "lyrics 0.1 s later", [KeyCode::Char(',')], SyncEarlier),
+        bind!("Lyrics", ".", "lyrics 0.1 s earlier", [KeyCode::Char('.')], SyncLater),
+        bind!("Lyrics", "l", "show / hide lyrics", [KeyCode::Char('l')], ToggleLyrics),
+        bind!("Lyrics", "b", "big-font active line", [KeyCode::Char('b')], ToggleBig),
+        bind!("Chords", "g", "chords on / off", [KeyCode::Char('g')], ToggleChords),
+        bind!("Chords", "t", "transpose up", [KeyCode::Char('t')], TransposeUp),
+        bind!("Chords", "T", "transpose down", [KeyCode::Char('T')], TransposeDown),
+        bind!("Chords", "]", "capo up", [KeyCode::Char(']')], CapoUp),
+        bind!("Chords", "[", "capo down", [KeyCode::Char('[')], CapoDown),
+        bind!("Chords", "0", "sheet's own capo", [KeyCode::Char('0')], CapoReset),
+        bind!("Chords", "D", "chord diagrams", [KeyCode::Char('D')], Diagrams),
+        bind!("View", "M", "minimal view", [KeyCode::Char('M')], Minimal),
+        bind!("View", "c", "cava visualiser", [KeyCode::Char('c')], ToggleCava),
+        bind!("View", "?", "this help", [KeyCode::Char('?')], Help),
+        bind!("View", "q / Esc", "quit", [KeyCode::Char('q'), KeyCode::Esc], Quit),
+    ];
+
+    /// Mouse gestures (they are hit-tested where they are drawn, so this is documentation
+    /// kept next to the table): (group, gesture, what it does).
+    pub const MOUSE: &[(&str, &str, &str)] = &[
+        ("Playback", "click bar", "seek there"),
+        ("Playback", "click buttons", "prev / play / next"),
+        ("Playback", "click - / +", "volume down / up"),
+        ("Playback", "click vol %", "mute / restore"),
+        ("Playback", "wheel: volume", "volume up / down"),
+        ("Lyrics", "click a line", "seek to that line"),
+    ];
+
+    pub fn action_for(code: KeyCode) -> Option<Action> {
+        BINDS
+            .iter()
+            .find(|b| b.codes.contains(&code))
+            .map(|b| b.action)
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum CavaPlacement {
@@ -2538,6 +3376,22 @@ mod app {
         pub prev: Rect,
         pub play: Rect,
         pub next: Rect,
+        pub vol_minus: Rect,
+        pub vol_pct: Rect,
+        pub vol_plus: Rect,
+        /// The whole volume control (mouse-wheel target).
+        pub vol_area: Rect,
+    }
+
+    /// Where each visible lyrics row came from, recorded during the last render so a click
+    /// can be mapped back to a lyric line (accounting for scroll and wrapped lines).
+    #[derive(Default)]
+    pub struct LyricHits {
+        pub area: Rect,
+        /// Row index shown at the top of `area`.
+        pub top: i64,
+        /// Per row: the lyric line it belongs to, or `None` if not clickable.
+        pub rows: Vec<Option<usize>>,
     }
 
     pub struct App {
@@ -2568,6 +3422,8 @@ mod app {
         pub aligned: Option<chords::Aligned>,
         /// Semitones the displayed chords are shifted by.
         pub transpose: i32,
+        /// Per-track capo chosen with `[` / `]`; `None` = the sheet's own capo.
+        pub capo_override: Option<u8>,
 
         pub show_lyrics: bool,
         pub show_cava: bool,
@@ -2578,12 +3434,30 @@ mod app {
         tasks: Vec<JoinHandle<()>>,
 
         pub hits: Hits,
+        pub lyric_hits: LyricHits,
+        /// Player volume, 0..=1 (`None` until the player reports one).
+        pub volume: Option<f64>,
+        /// Last non-zero volume, restored when un-muting.
+        vol_last: f64,
+        /// Ignore volume reported by the poller until this long after our own change.
+        vol_hold: Instant,
         /// Smoothly animated lyric scroll position (in wrapped rows).
         pub lyric_scroll: f64,
         pub lyric_scroll_target: f64,
         pub snap_scroll: bool,
         pub last_anim: Instant,
         pub dirty: bool,
+        /// Volume change per `+` / `-` / wheel notch, in percent.
+        pub vol_step: u32,
+        /// `M`: teleprompter view (title, lyrics, thin progress bar only).
+        pub minimal: bool,
+        /// Cava was showing when minimal view hid it; restored on leaving.
+        cava_before_minimal: bool,
+        /// `D`: chord diagram panel.
+        pub show_diagrams: bool,
+        /// `?`: help overlay, and how far it is scrolled.
+        pub show_help: bool,
+        pub help_scroll: u16,
     }
 
     impl App {
@@ -2617,6 +3491,7 @@ mod app {
                 sheet: None,
                 aligned: None,
                 transpose: 0,
+                capo_override: None,
                 placement,
                 big_lyrics: args.big_lyrics,
                 base_primary: theme.primary,
@@ -2637,14 +3512,28 @@ mod app {
                 cava_task: None,
                 tasks: Vec::new(),
                 hits: Hits::default(),
+                lyric_hits: LyricHits::default(),
+                volume: None,
+                vol_last: 0.5,
+                vol_hold: Instant::now() - Duration::from_secs(5),
                 lyric_scroll: 0.0,
                 lyric_scroll_target: 0.0,
                 snap_scroll: true,
                 last_anim: Instant::now(),
                 dirty: true,
+                vol_step: 0, // set from args below
+                minimal: false,
+                cava_before_minimal: false,
+                show_diagrams: false,
+                show_help: false,
+                help_scroll: 0,
             };
+            app.vol_step = app.args.volume_step;
             if app.args.cava || app.args.thirdpanel || app.args.underlyrics {
                 app.set_cava(true);
+            }
+            if app.args.minimal {
+                app.set_minimal(true);
             }
             app
         }
@@ -2691,7 +3580,8 @@ mod app {
                     self.realign();
                     self.dirty = true;
                 }
-                AppEvent::Chords { key, sheet } if key == self.track_key => {
+                AppEvent::Chords { key, sheet, capo } if key == self.track_key => {
+                    self.capo_override = capo.filter(|c| *c <= 12);
                     match sheet {
                         Ok(Some(s)) => {
                             self.sheet = Some(s);
@@ -2775,6 +3665,7 @@ mod app {
                 self.sheet = None;
                 self.aligned = None;
                 self.transpose = 0;
+                self.capo_override = None;
                 self.chords_state = ChordsState::Idle;
 
                 // Year: metadata first, network fallback in background.
@@ -2795,10 +3686,14 @@ mod app {
                 // (fetched even while the panel is hidden, so `l` shows them instantly)
                 self.lyrics = LyricsState::Fetching;
                 let (c, tx) = (self.client.clone(), self.tx.clone());
+                let policy = lyrics::Policy {
+                    retries: self.args.lyrics_retries,
+                    ..Default::default()
+                };
                 let (a, t, al, len) =
                     (s.artist.clone(), s.title.clone(), s.album.clone(), s.length);
                 self.tasks.push(tokio::spawn(async move {
-                    let lyrics = lyrics::fetch(c, a, t, al, len).await;
+                    let lyrics = lyrics::fetch(c, a, t, al, len, policy).await;
                     let _ = tx.send(AppEvent::Lyrics { key, lyrics });
                 }));
             }
@@ -2828,6 +3723,23 @@ mod app {
                 }
             }
 
+            if let Some(v) = s.volume {
+                // External changes (keyboard media keys, the Spotify app) show up here; our
+                // own changes win for a moment so the poller doesn't flicker them back.
+                if self.vol_hold.elapsed() > Duration::from_millis(1500)
+                    && self.volume.is_none_or(|o| (o - v).abs() > 0.004)
+                {
+                    self.volume = Some(v);
+                    self.dirty = true;
+                }
+                if v > 0.004 && self.vol_hold.elapsed() > Duration::from_millis(1500) {
+                    self.vol_last = v;
+                }
+            } else if self.volume.is_some() {
+                self.volume = None;
+                self.dirty = true;
+            }
+
             let changed = new_track
                 || new_art
                 || self
@@ -2838,6 +3750,47 @@ mod app {
             if changed {
                 self.dirty = true;
             }
+        }
+
+        fn capo_path(key: u64) -> std::path::PathBuf {
+            crate::util::cache_dir().join(format!("capo-{key:016x}.txt"))
+        }
+
+        /// Capo chosen for this track in an earlier session (a one-number file).
+        async fn load_capo(key: u64) -> Option<u8> {
+            tokio::fs::read_to_string(Self::capo_path(key))
+                .await
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        }
+
+        /// `[` / `]`: capo ±1 (0..=12) as a per-track override, remembered across restarts.
+        /// Landing on the sheet's own capo clears the override.
+        fn change_capo(&mut self, d: i32) {
+            let Some(sheet_capo) = self.sheet.as_ref().map(|s| s.capo) else {
+                return;
+            };
+            let n = (self.effective_capo() as i32 + d).clamp(0, 12) as u8;
+            self.set_capo_override((n != sheet_capo).then_some(n));
+        }
+
+        fn set_capo_override(&mut self, o: Option<u8>) {
+            self.capo_override = o;
+            self.snap_scroll = true;
+            let path = Self::capo_path(self.track_key);
+            self.tasks.retain(|t| !t.is_finished());
+            tokio::spawn(async move {
+                match o {
+                    Some(n) => {
+                        let _ = tokio::fs::write(path, n.to_string()).await;
+                    }
+                    None => {
+                        let _ = tokio::fs::remove_file(path).await;
+                    }
+                }
+            });
         }
 
         fn fetch_chords(&mut self, key: u64, artist: &str, title: &str) {
@@ -2851,7 +3804,8 @@ mod app {
             let (c, use_ug) = (self.client.clone(), self.args.chords_ug);
             self.tasks.push(tokio::spawn(async move {
                 let sheet = ug::resolve(c, dir, use_ug, a, t).await;
-                let _ = tx.send(AppEvent::Chords { key, sheet });
+                let capo = App::load_capo(key).await;
+                let _ = tx.send(AppEvent::Chords { key, sheet, capo });
             }));
         }
 
@@ -2865,6 +3819,61 @@ mod app {
 
         pub fn sheet_info(&self) -> Option<(&str, u8)> {
             self.sheet.as_ref().map(|s| (s.source.as_str(), s.capo))
+        }
+
+        /// The capo in effect: the per-track override, else the sheet's own.
+        pub fn effective_capo(&self) -> u8 {
+            self.capo_override
+                .unwrap_or_else(|| self.sheet.as_ref().map_or(0, |s| s.capo))
+        }
+
+        /// Semitones to shift the sheet's chord shapes by: a higher capo means lower shapes,
+        /// plus the manual `t`/`T` transpose.
+        pub fn chord_shift(&self) -> i32 {
+            let sheet_capo = self.sheet.as_ref().map_or(0, |s| s.capo);
+            chords::capo_shift(sheet_capo, self.effective_capo(), self.transpose)
+        }
+
+        /// (sounding key, key of the shapes being shown), from the sheet's written key.
+        /// The sheet's key is taken to be the key of its chord shapes, so it sounds
+        /// `sheet capo` semitones higher.
+        pub fn keys(&self) -> Option<(chords::KeyInfo, chords::KeyInfo)> {
+            let sh = self.sheet.as_ref()?;
+            let k = chords::parse_key(sh.key.as_deref()?)?;
+            Some((
+                k.shift(sh.capo as i32 + self.transpose),
+                k.shift(self.chord_shift()),
+            ))
+        }
+
+        pub fn bpm(&self) -> Option<u32> {
+            self.sheet.as_ref().and_then(|s| s.bpm)
+        }
+
+        /// Flat or sharp spelling for the chords shown.
+        pub fn use_flats(&self) -> bool {
+            match self.keys() {
+                Some((_, shapes)) => shapes.prefers_flats(),
+                None => self.aligned.as_ref().is_some_and(|a| a.flats),
+            }
+        }
+
+        pub fn set_minimal(&mut self, on: bool) {
+            if on == self.minimal {
+                return;
+            }
+            self.minimal = on;
+            self.snap_scroll = true;
+            self.hits = Hits::default();
+            if on {
+                // The visualiser isn't shown, so stop its process too.
+                self.cava_before_minimal = self.show_cava;
+                if self.show_cava {
+                    self.set_cava(false);
+                }
+            } else if self.cava_before_minimal {
+                self.set_cava(true);
+            }
         }
 
         fn toggle_chords(&mut self) {
@@ -2909,33 +3918,29 @@ mod app {
         pub fn handle(&mut self, ev: Event) -> bool {
             self.dirty = true;
             match ev {
-                Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return true,
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                         return true;
                     }
-                    KeyCode::Char(' ') => self.play_pause(),
-                    KeyCode::Char('n') => self.ctl.send(&["next"]),
-                    KeyCode::Char('p') => self.ctl.send(&["previous"]),
-                    KeyCode::Left => self.seek_rel(-5.0),
-                    KeyCode::Right => self.seek_rel(5.0),
-                    KeyCode::Char(',') => self.nudge(-0.1),
-                    KeyCode::Char('.') => self.nudge(0.1),
-                    KeyCode::Char('l') => {
-                        self.show_lyrics = !self.show_lyrics;
-                        self.snap_scroll = true;
+                    if self.show_help {
+                        // Help is open: arrows / paging scroll it, any other key closes it.
+                        match k.code {
+                            KeyCode::Up | KeyCode::Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
+                            KeyCode::Down | KeyCode::Char('j') => self.help_scroll += 1,
+                            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                            KeyCode::PageDown => self.help_scroll += 10,
+                            KeyCode::Home => self.help_scroll = 0,
+                            _ => self.show_help = false,
+                        }
+                        return false;
                     }
-                    KeyCode::Char('c') => {
-                        let on = !self.show_cava;
-                        self.set_cava(on);
+                    if let Some(a) = action_for(k.code) {
+                        return self.run(a);
                     }
-                    KeyCode::Char('b') => {
-                        self.big_lyrics = !self.big_lyrics;
-                        self.snap_scroll = true;
-                    }
-                    KeyCode::Char('g') => self.toggle_chords(),
-                    KeyCode::Char('t') => self.transpose = (self.transpose + 1).rem_euclid(12),
-                    KeyCode::Char('T') => self.transpose = (self.transpose - 1).rem_euclid(12),
+                }
+                Event::Mouse(m) if self.show_help => match m.kind {
+                    MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(2),
+                    MouseEventKind::ScrollDown => self.help_scroll += 2,
                     _ => {}
                 },
                 Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) => {
@@ -2956,11 +3961,131 @@ mod app {
                         self.play_pause();
                     } else if self.hits.next.contains(pos) {
                         self.ctl.send(&["next"]);
+                    } else if self.hits.vol_minus.contains(pos) {
+                        self.volume_step(-1);
+                    } else if self.hits.vol_plus.contains(pos) {
+                        self.volume_step(1);
+                    } else if self.hits.vol_pct.contains(pos) {
+                        self.toggle_mute();
+                    } else if self.lyric_hits.area.contains(pos) {
+                        self.click_lyric(pos.y);
                     }
+                }
+                Event::Mouse(m)
+                    if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                        && self.hits.vol_area.contains(Position::new(m.column, m.row)) =>
+                {
+                    self.volume_step(if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 });
                 }
                 _ => {}
             }
             false
+        }
+
+        /// Carry out a key action. Returns `true` to quit.
+        pub fn run(&mut self, a: Action) -> bool {
+            match a {
+                Action::Quit => return true,
+                Action::PlayPause => self.play_pause(),
+                Action::Next => self.ctl.send(&["next"]),
+                Action::Prev => self.ctl.send(&["previous"]),
+                Action::SeekBack => self.seek_rel(-5.0),
+                Action::SeekFwd => self.seek_rel(5.0),
+                Action::SyncEarlier => self.nudge(-0.1),
+                Action::SyncLater => self.nudge(0.1),
+                Action::VolUp => self.volume_step(1),
+                Action::VolDown => self.volume_step(-1),
+                Action::Mute => self.toggle_mute(),
+                Action::ToggleLyrics => {
+                    self.show_lyrics = !self.show_lyrics;
+                    self.snap_scroll = true;
+                }
+                Action::ToggleBig => {
+                    self.big_lyrics = !self.big_lyrics;
+                    self.snap_scroll = true;
+                }
+                Action::ToggleCava if self.minimal => {
+                    // hidden for now; remember the choice for when minimal view ends
+                    self.cava_before_minimal = !self.cava_before_minimal;
+                }
+                Action::ToggleCava => {
+                    let on = !self.show_cava;
+                    self.set_cava(on);
+                }
+                Action::ToggleChords => self.toggle_chords(),
+                Action::TransposeUp => self.transpose = (self.transpose + 1).rem_euclid(12),
+                Action::TransposeDown => self.transpose = (self.transpose - 1).rem_euclid(12),
+                Action::CapoDown => self.change_capo(-1),
+                Action::CapoUp => self.change_capo(1),
+                Action::CapoReset => self.set_capo_override(None),
+                Action::Diagrams => {
+                    self.show_diagrams = !self.show_diagrams;
+                    self.snap_scroll = true;
+                }
+                Action::Minimal => self.set_minimal(!self.minimal),
+                Action::Help => {
+                    self.show_help = true;
+                    self.help_scroll = 0;
+                }
+            }
+            false
+        }
+
+        /// Percent steps; clamped to 0..=100.
+        pub fn volume_pct(&self) -> Option<u32> {
+            self.volume.map(|v| (v * 100.0).round() as u32)
+        }
+
+        fn set_volume(&mut self, v: f64) {
+            let v = v.clamp(0.0, 1.0);
+            self.volume = Some(v);
+            if v > 0.004 {
+                self.vol_last = v;
+            }
+            self.vol_hold = Instant::now();
+            self.ctl.send(&["volume", &format!("{v:.3}")]);
+        }
+
+        pub fn volume_step(&mut self, dir: i32) {
+            let Some(pct) = self.volume_pct() else { return };
+            let step = self.vol_step as i32;
+            let new = (pct as i32 + dir * step).clamp(0, 100);
+            self.set_volume(new as f64 / 100.0);
+        }
+
+        pub fn toggle_mute(&mut self) {
+            let Some(v) = self.volume else { return };
+            if v > 0.004 {
+                self.vol_last = v;
+                self.set_volume(0.0);
+            } else {
+                self.set_volume(self.vol_last.max(0.05));
+            }
+        }
+
+        pub fn muted(&self) -> bool {
+            self.volume.is_some_and(|v| v <= 0.004)
+        }
+
+        /// Seek to the lyric line drawn at terminal row `y` (synced lyrics only).
+        fn click_lyric(&mut self, y: u16) {
+            let h = &self.lyric_hits;
+            if y < h.area.y {
+                return;
+            }
+            let idx = h.top + (y - h.area.y) as i64;
+            let Some(Some(li)) = usize::try_from(idx).ok().and_then(|i| h.rows.get(i)).copied()
+            else {
+                return;
+            };
+            let LyricsState::Ready(Lyrics::Synced(l)) = &self.lyrics else {
+                return;
+            };
+            let Some((ts, _)) = l.get(li) else { return };
+            // The active line is the last one with ts <= position + offset.
+            let target = (ts - self.offset).max(0.0);
+            self.set_position(target);
+            self.ctl.seek_to(target);
         }
 
         fn play_pause(&mut self) {
@@ -3269,7 +4394,7 @@ mod ui {
     use crate::player::Status;
     use crate::theme::Theme;
     use crate::util::fmt_time;
-    use crate::{bigfont, chords, cover};
+    use crate::{bigfont, chords, cover, diagram};
     use image::imageops::FilterType;
     use ratatui::Frame;
     use ratatui::buffer::Buffer;
@@ -3294,6 +4419,116 @@ mod ui {
     }
 
     pub fn draw(f: &mut Frame, app: &mut App) {
+        draw_main(f, app);
+        if app.show_help {
+            draw_help(f, app);
+        }
+    }
+
+    /// Lines of the help overlay, generated from the key table the input handler uses.
+    /// Returns the groups as separate blocks so they can be laid out in columns.
+    pub fn help_blocks(th: &Theme) -> Vec<Vec<Line<'static>>> {
+        use crate::app::{BINDS, GROUPS, MOUSE};
+        let head = |g: &str| {
+            Line::styled(
+                g.to_uppercase(),
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+            )
+        };
+        let row = |k: &str, d: &str| {
+            Line::from(vec![
+                Span::styled(format!("{k:<14}"), Style::new().fg(th.primary())),
+                Span::styled(d.to_string(), Style::new().fg(th.text())),
+            ])
+        };
+        GROUPS
+            .iter()
+            .map(|g| {
+                let mut v = vec![head(g)];
+                v.extend(BINDS.iter().filter(|b| b.group == *g).map(|b| row(b.keys, b.desc)));
+                v.extend(MOUSE.iter().filter(|m| m.0 == *g).map(|m| row(m.1, m.2)));
+                v
+            })
+            .collect()
+    }
+
+    fn draw_help(f: &mut Frame, app: &mut App) {
+        use ratatui::widgets::Clear;
+        let area = f.area();
+        let th = app.theme.clone();
+        let blocks = help_blocks(&th);
+        // Two columns (Playback+Lyrics | Chords+View) when there is room, else one list.
+        let two = area.width >= 78;
+        let cols: Vec<Vec<Line>> = if two {
+            let join = |a: &[Vec<Line<'static>>]| {
+                let mut out: Vec<Line> = Vec::new();
+                for (i, b) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(Line::raw(""));
+                    }
+                    out.extend(b.iter().cloned());
+                }
+                out
+            };
+            vec![join(&blocks[..2]), join(&blocks[2..])]
+        } else {
+            let mut all: Vec<Line> = Vec::new();
+            for (i, b) in blocks.iter().enumerate() {
+                if i > 0 {
+                    all.push(Line::raw(""));
+                }
+                all.extend(b.iter().cloned());
+            }
+            vec![all]
+        };
+        let content_h = cols.iter().map(Vec::len).max().unwrap_or(0) as u16;
+        let w = area.width.min(if two { 80 } else { 44 });
+        let h = area.height.min(content_h + 4); // borders + footer line
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, r);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(th.primary()))
+            .title(Span::styled(
+                " help ",
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::new().bg(th.surface()).fg(th.text()));
+        let inner = block.inner(r).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+        f.render_widget(block, r);
+        let view_h = inner.height.saturating_sub(1);
+        let max_scroll = content_h.saturating_sub(view_h);
+        app.help_scroll = app.help_scroll.min(max_scroll);
+        let n = cols.len() as u16;
+        let col_w = inner.width / n;
+        for (i, lines) in cols.into_iter().enumerate() {
+            f.render_widget(
+                Paragraph::new(lines).scroll((app.help_scroll, 0)),
+                Rect {
+                    x: inner.x + i as u16 * col_w,
+                    y: inner.y,
+                    width: col_w.saturating_sub(1),
+                    height: view_h,
+                },
+            );
+        }
+        let hint = if max_scroll > 0 {
+            "↑/↓ scroll · any other key closes"
+        } else {
+            "any key closes"
+        };
+        f.render_widget(
+            Paragraph::new(Line::styled(hint, Style::new().fg(th.fade(0.45)))).alignment(Alignment::Center),
+            Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
+        );
+    }
+
+    fn draw_main(f: &mut Frame, app: &mut App) {
         let area = f.area();
         let th = app.theme.clone();
         // Only paint a background when we actually know the surface colour; otherwise the
@@ -3307,6 +4542,13 @@ mod ui {
 
         let [main, footer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        app.lyric_hits = Default::default();
+
+        if app.minimal {
+            draw_minimal(f, app, main);
+            draw_footer(f, app, footer);
+            return;
+        }
 
         // ── column layout ──
         let (left, lyr, cav) = match (app.show_lyrics, app.show_cava, app.placement) {
@@ -3347,12 +4589,228 @@ mod ui {
 
         draw_left(f, app, left);
         if let Some(r) = lyr {
-            draw_lyrics(f, app, r);
+            draw_lyrics_and_diagrams(f, app, r);
         }
         if let Some(r) = cav {
             draw_cava(f, app, r);
         }
         draw_footer(f, app, footer);
+    }
+
+    /// One-row progress bar: ━ filled, ─ remaining, ● knob.
+    fn progress_bar(f: &mut Frame, th: &Theme, r: Rect, frac: f64) {
+        let w = r.width as usize;
+        if w == 0 {
+            return;
+        }
+        let filled = ((frac * w as f64).round() as usize).min(w);
+        let knob = filled.saturating_sub(1).min(w - 1);
+        let buf = f.buffer_mut();
+        for i in 0..w {
+            let (sym, fg) = if i == knob && filled > 0 {
+                ("●", th.primary())
+            } else if i < filled {
+                ("━", th.primary())
+            } else {
+                ("─", th.fade(0.7))
+            };
+            if let Some(c) = buf.cell_mut((r.x + i as u16, r.y)) {
+                c.set_symbol(sym).set_fg(fg);
+            }
+        }
+    }
+
+    /// `M`: title, lyrics across the whole area, and a thin progress bar. No cover,
+    /// metadata, buttons or visualiser.
+    fn draw_minimal(f: &mut Frame, app: &mut App, main: Rect) {
+        app.hits = Default::default();
+        let th = app.theme.clone();
+        let [title, body, prog] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(main);
+        if let Some(s) = app.snap.clone() {
+            let text = if s.artist.is_empty() {
+                s.title.clone()
+            } else {
+                format!("{} — {}", s.artist, s.title)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("◆ ", Style::new().fg(th.primary())),
+                    Span::styled(text, Style::new().fg(th.text()).add_modifier(Modifier::BOLD)),
+                ]))
+                .alignment(Alignment::Center),
+                title,
+            );
+            // time │ bar │ time, with the bar clickable like the normal one
+            let pos = app.position();
+            let (l, r) = (fmt_time(pos), fmt_time(s.length));
+            let side = (l.chars().count().max(r.chars().count()) + 1) as u16;
+            if prog.width > side * 2 + 4 {
+                let bar = Rect {
+                    x: prog.x + side,
+                    width: prog.width - side * 2,
+                    ..prog
+                };
+                f.render_widget(
+                    Paragraph::new(Span::styled(l, Style::new().fg(th.fade(0.4)))),
+                    Rect { width: side, ..prog },
+                );
+                f.render_widget(
+                    Paragraph::new(Span::styled(r, Style::new().fg(th.fade(0.4))))
+                        .alignment(Alignment::Right),
+                    Rect { x: prog.right() - side, width: side, ..prog },
+                );
+                let frac = if s.length > 0.0 { (pos / s.length).clamp(0.0, 1.0) } else { 0.0 };
+                progress_bar(f, &th, bar, frac);
+                app.hits.progress = bar;
+            }
+        }
+        draw_lyrics_and_diagrams(f, app, body);
+    }
+
+    /// Minimum width of the lyrics column for the diagram panel to be worth showing.
+    const DIAGRAM_MIN_WIDTH: u16 = 56;
+    const DIAGRAM_PANEL_WIDTH: u16 = 28;
+
+    fn draw_lyrics_and_diagrams(f: &mut Frame, app: &mut App, area: Rect) {
+        if app.show_diagrams && area.width >= DIAGRAM_MIN_WIDTH {
+            let [l, d] = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(DIAGRAM_PANEL_WIDTH),
+            ])
+            .areas(area);
+            draw_lyrics(f, app, l);
+            draw_diagrams(f, app, d);
+        } else {
+            draw_lyrics(f, app, area);
+        }
+    }
+
+    /// Chords of the current stretch of the song, in order of first appearance (max 6), plus
+    /// which one is being played. The active chord is estimated from how far through the
+    /// line we are, since the sheet carries no timing of its own.
+    fn section_chords(app: &App) -> (Vec<String>, Option<usize>) {
+        let Some(a) = app.aligned.as_ref().filter(|a| a.usable()) else {
+            return (vec![], None);
+        };
+        let LyricsState::Ready(Lyrics::Synced(l)) = &app.lyrics else {
+            return (vec![], None);
+        };
+        let (tr, flats) = (app.chord_shift(), app.use_flats());
+        let show = |n: &str| chords::transpose(n, tr, flats);
+        let t = app.position() + app.offset;
+        let cur = l.partition_point(|(ts, _)| *ts <= t).checked_sub(1);
+        let mut names: Vec<String> = Vec::new();
+        let push = |n: String, names: &mut Vec<String>| {
+            if !names.contains(&n) && names.len() < 6 {
+                names.push(n);
+            }
+        };
+        match cur {
+            None => {
+                for n in a.intro.iter().flatten() {
+                    push(show(n), &mut names);
+                }
+                for cs in a.per_line.iter().take(2) {
+                    for (_, n) in cs {
+                        push(show(n), &mut names);
+                    }
+                }
+                let act = names.first().map(|_| 0);
+                (names, act)
+            }
+            Some(c) => {
+                for cs in a.per_line.iter().skip(c).take(4) {
+                    for (_, n) in cs {
+                        push(show(n), &mut names);
+                    }
+                }
+                // which chord of the active line are we on?
+                let cs = a.per_line.get(c).filter(|v| !v.is_empty());
+                let active = cs.and_then(|cs| {
+                    let next = l.get(c + 1).map_or(l[c].0 + 6.0, |x| x.0);
+                    let dur = (next - l[c].0).min(est_sung(&l[c].1)).max(1.0);
+                    let f = ((t - l[c].0) / dur).clamp(0.0, 0.999);
+                    let len = l[c].1.split_whitespace().collect::<Vec<_>>().join(" ").chars().count().max(1);
+                    let k = cs
+                        .iter()
+                        .rposition(|(col, _)| *col as f64 / len as f64 <= f)
+                        .unwrap_or(0);
+                    names.iter().position(|n| *n == show(&cs[k].1))
+                });
+                (names, active)
+            }
+        }
+    }
+
+    fn draw_diagrams(f: &mut Frame, app: &mut App, area: Rect) {
+        let block = panel(app, "chords");
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let th = app.theme.clone();
+        let dim = Style::new().fg(th.fade(0.5));
+        if !app.chords_on {
+            return centered_msg(f, inner, &[("chords are off", dim), ("press g", dim)]);
+        }
+        let (names, active) = section_chords(app);
+        if names.is_empty() {
+            return centered_msg(f, inner, &[("no chords here", dim)]);
+        }
+        const CELL_W: u16 = 13;
+        const CELL_H: u16 = 8;
+        let cols = (inner.width / CELL_W).max(1) as usize;
+        let shapes: Vec<Option<diagram::Shape>> = names.iter().map(|n| diagram::lookup(n)).collect();
+        // leave room for the tab underneath when there is any
+        let tab_h = 7u16;
+        let grid_rows_fit = (inner.height / CELL_H).max(1) as usize;
+        let want_rows = names.len().div_ceil(cols);
+        let rows = want_rows.min(grid_rows_fit);
+        let show_tab = inner.height >= rows as u16 * CELL_H + tab_h;
+        for (i, (name, shape)) in names.iter().zip(&shapes).enumerate() {
+            if i / cols >= rows {
+                break;
+            }
+            let r = Rect {
+                x: inner.x + (i % cols) as u16 * CELL_W + 1,
+                y: inner.y + (i / cols) as u16 * CELL_H,
+                width: CELL_W - 1,
+                height: CELL_H - 1,
+            };
+            let is_active = active == Some(i);
+            let body = if is_active { th.primary() } else { th.fade(0.35) };
+            let name_style = if is_active {
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(th.text())
+            };
+            let lines: Vec<Line> = match shape {
+                Some(sh) => diagram::render(name, sh)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, l)| Line::styled(l, if k == 0 { name_style } else { Style::new().fg(body) }))
+                    .collect(),
+                None => vec![
+                    Line::styled(format!("{name:^11}"), name_style),
+                    Line::styled(" diagram", dim),
+                    Line::styled(" unavailable", dim),
+                ],
+            };
+            f.render_widget(Paragraph::new(lines), r);
+        }
+        if show_tab {
+            let max_cols = ((inner.width.saturating_sub(3)) / 4).max(1) as usize;
+            let tab = diagram::tab(&shapes[..shapes.len().min(max_cols)]);
+            let y0 = inner.y + rows as u16 * CELL_H;
+            let lines: Vec<Line> = tab.into_iter().map(|l| Line::styled(l, Style::new().fg(th.fade(0.2)))).collect();
+            f.render_widget(
+                Paragraph::new(lines),
+                Rect { x: inner.x + 1, y: y0, width: inner.width.saturating_sub(1), height: 6 },
+            );
+        }
     }
 
     fn panel<'a>(app: &App, title: &'a str) -> Block<'a> {
@@ -3368,6 +4826,105 @@ mod ui {
     }
 
     // ── left column ─────────────────────────────────────────────────────────
+    /// The metadata block. Release Date + BPM share a row, Time + Key/Camelot share a row
+    /// (each falls back to two rows when the panel is too narrow); a Capo row appears only
+    /// when there is a capo. Key / BPM / Capo are hidden when no source provides them.
+    fn meta_lines(app: &App, snap: &crate::player::Snapshot, avail: usize) -> Vec<Line<'static>> {
+        let th = &app.theme;
+        let label = |s: &str| {
+            Span::styled(
+                format!("{s:<13}"),
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+            )
+        };
+        let val = |s: String| Span::styled(s, Style::new().fg(th.text()));
+        let dash = |s: &str| {
+            if s.is_empty() {
+                "—".to_string()
+            } else {
+                s.to_string()
+            }
+        };
+        let track_no = format!(
+            "{:02}-{}",
+            snap.disc_no.unwrap_or(1),
+            snap.track_no
+                .map(|t| format!("{t:02}"))
+                .unwrap_or_else(|| "--".into())
+        );
+        let date = crate::year::full_date(&snap.content_created).unwrap_or_else(|| match &app.year {
+            YearState::Loading => "...".to_string(),
+            YearState::Known(y) => y.clone(),
+            YearState::NotFound => "N/A".to_string(),
+        });
+        let pos = app.position();
+
+        // `left` and an optional `right` (label, value) on one row, or two rows if too wide.
+        let pair = |out: &mut Vec<Line<'static>>, left: Vec<Span<'static>>, right: Option<Vec<Span<'static>>>| {
+            let w = |v: &[Span]| v.iter().map(|s| s.width()).sum::<usize>();
+            match right {
+                Some(r) if w(&left) + 2 + w(&r) <= avail => {
+                    let pad = avail - w(&left) - w(&r);
+                    let mut row = left;
+                    row.push(Span::raw(" ".repeat(pad)));
+                    row.extend(r);
+                    out.push(Line::from(row));
+                }
+                Some(r) => {
+                    out.push(Line::from(left));
+                    let mut row = vec![Span::raw(" ".repeat(13))];
+                    row.extend(r);
+                    out.push(Line::from(row));
+                }
+                None => out.push(Line::from(left)),
+            }
+        };
+        let tag = |name: &str, v: String| {
+            vec![
+                Span::styled(
+                    format!("{name} "),
+                    Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
+                ),
+                val(v),
+            ]
+        };
+
+        let mut out = vec![
+            Line::from(vec![label("Track"), val(dash(&snap.title))]),
+            Line::from(vec![label("Artist"), val(dash(&snap.artist))]),
+            Line::from(vec![label("Album"), val(dash(&snap.album))]),
+            Line::from(vec![label("Track No"), val(track_no)]),
+        ];
+        pair(
+            &mut out,
+            vec![label("Release Date"), val(date)],
+            app.bpm().map(|b| tag("BPM:", b.to_string())),
+        );
+        let keytxt = app
+            .keys()
+            .map(|(sounding, _)| tag("Key:", format!("{} / {}", sounding.long(), sounding.camelot())));
+        pair(
+            &mut out,
+            vec![label("Time"), val(format!("{} / {}", fmt_time(pos), fmt_time(snap.length)))],
+            keytxt,
+        );
+        let capo = app.effective_capo();
+        if app.chords_on && capo > 0 {
+            let mut v = format!("{capo}");
+            if let Some((_, shapes)) = app.keys() {
+                v.push_str(&format!("  (shapes in {})", shapes.short()));
+            }
+            if app.capo_override.is_some() {
+                let sheet_capo = app.sheet_info().map_or(0, |i| i.1);
+                v.push_str(&format!("  [sheet: {sheet_capo}]"));
+            }
+            pair(&mut out, vec![label("Capo"), val(v)], None);
+        } else if app.chords_on && app.capo_override == Some(0) {
+            pair(&mut out, vec![label("Capo"), val("none".into())], None);
+        }
+        out
+    }
+
     fn draw_left(f: &mut Frame, app: &mut App, area: Rect) {
         let block = panel(app, "now playing");
         let inner = block.inner(area);
@@ -3390,14 +4947,30 @@ mod ui {
             return;
         };
 
-        let [cover_a, _, meta_a, _, prog_a, _, btn_a] = Layout::vertical([
+        let pos = app.position();
+        let meta_lines = meta_lines(app, &snap, inner.width.saturating_sub(2) as usize);
+
+        // Volume sits beside the transport buttons when it fits, else on its own row below.
+        let width = inner.width.saturating_sub(2);
+        let vol_shown = app.volume.is_some();
+        let pct_txt = if app.muted() {
+            "[ MUTE ]".to_string()
+        } else {
+            format!("[ {}% ]", app.volume_pct().unwrap_or(0))
+        };
+        let vol_w = 5 + 1 + 8 + 1 + 5; // "[ - ] [ 100% ] [ + ]"
+        let transport_w = 8 + 2 + 9 + 2 + 8;
+        let vol_inline = vol_shown && transport_w + 3 + vol_w <= width as usize;
+        let vol_row = vol_shown && !vol_inline;
+        let [cover_a, _, meta_a, _, prog_a, _, btn_a, vol_a] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
-            Constraint::Length(6),
+            Constraint::Length(meta_lines.len() as u16),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(vol_row as u16),
         ])
         .areas(inner.inner(ratatui::layout::Margin {
             horizontal: 1,
@@ -3410,71 +4983,16 @@ mod ui {
         }
 
         // Metadata
-        let label = |s: &str| {
-            Span::styled(
-                format!("{s:<10}"),
-                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD),
-            )
-        };
-        let val = |s: String| Span::styled(s, Style::new().fg(th.text()));
-        let dash = |s: &str| {
-            if s.is_empty() {
-                "—".to_string()
-            } else {
-                s.to_string()
-            }
-        };
-        let track_no = format!(
-            "{:02}-{}",
-            snap.disc_no.unwrap_or(1),
-            snap.track_no
-                .map(|t| format!("{t:02}"))
-                .unwrap_or_else(|| "--".into())
-        );
-        let year = match &app.year {
-            YearState::Loading => "...".to_string(),
-            YearState::Known(y) => y.clone(),
-            YearState::NotFound => "N/A".to_string(),
-        };
-        let pos = app.position();
-        let lines = vec![
-            Line::from(vec![label("Track"), val(dash(&snap.title))]),
-            Line::from(vec![label("Artist"), val(dash(&snap.artist))]),
-            Line::from(vec![label("Album"), val(dash(&snap.album))]),
-            Line::from(vec![label("Track No"), val(track_no)]),
-            Line::from(vec![label("Released"), val(year)]),
-            Line::from(vec![
-                label("Time"),
-                val(format!("{} / {}", fmt_time(pos), fmt_time(snap.length))),
-            ]),
-        ];
-        f.render_widget(Paragraph::new(lines), meta_a);
+        f.render_widget(Paragraph::new(meta_lines), meta_a);
 
         // Progress bar
         app.hits.progress = prog_a;
-        let w = prog_a.width as usize;
-        if w > 0 {
-            let frac = if snap.length > 0.0 {
-                (pos / snap.length).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let filled = ((frac * w as f64).round() as usize).min(w);
-            let knob = filled.saturating_sub(1).min(w - 1);
-            let buf = f.buffer_mut();
-            for i in 0..w {
-                let (sym, fg) = if i == knob && filled > 0 {
-                    ("●", th.primary())
-                } else if i < filled {
-                    ("━", th.primary())
-                } else {
-                    ("─", th.fade(0.7))
-                };
-                if let Some(c) = buf.cell_mut((prog_a.x + i as u16, prog_a.y)) {
-                    c.set_symbol(sym).set_fg(fg);
-                }
-            }
-        }
+        let frac = if snap.length > 0.0 {
+            (pos / snap.length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        progress_bar(f, &th, prog_a, frac);
 
         // Buttons
         let play_lbl = if snap.status == Status::Playing {
@@ -3485,7 +5003,9 @@ mod ui {
         let labels = ["[ prev ]", play_lbl, "[ next ]"];
         let gap = 2u16;
         let total: u16 = labels.iter().map(|l| l.chars().count() as u16).sum::<u16>() + gap * 2;
-        let mut x = btn_a.x + btn_a.width.saturating_sub(total) / 2;
+        let full = if vol_inline { total + 3 + vol_w as u16 } else { total };
+        let mut x = btn_a.x + btn_a.width.saturating_sub(full) / 2;
+        let transport_start = x;
         let mut rects = [Rect::default(); 3];
         for (i, l) in labels.iter().enumerate() {
             let w = l.chars().count() as u16;
@@ -3507,6 +5027,49 @@ mod ui {
         app.hits.prev = rects[0];
         app.hits.play = rects[1];
         app.hits.next = rects[2];
+
+        // Volume: [ - ] [ 100% ] [ + ]   (click the percentage to mute)
+        app.hits.vol_minus = Rect::default();
+        app.hits.vol_pct = Rect::default();
+        app.hits.vol_plus = Rect::default();
+        app.hits.vol_area = Rect::default();
+        if vol_shown && (vol_inline || vol_a.height > 0) {
+            let (row, x0) = if vol_inline {
+                (btn_a, transport_start + total + 3)
+            } else {
+                (vol_a, vol_a.x + vol_a.width.saturating_sub(vol_w as u16) / 2)
+            };
+            let muted = app.muted();
+            let pct_w = 8u16;
+            let cell = |x: u16, w: u16| Rect {
+                x,
+                y: row.y,
+                width: w.min(row.right().saturating_sub(x)),
+                height: 1,
+            };
+            let (minus, pct, plus) = (cell(x0, 5), cell(x0 + 6, pct_w), cell(x0 + 6 + pct_w + 1, 5));
+            let btn = Style::new().fg(th.text());
+            let pct_style = if muted {
+                Style::new().fg(th.primary()).add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
+            } else {
+                Style::new().fg(th.primary())
+            };
+            f.render_widget(Paragraph::new(Span::styled("[ - ]", btn)), minus);
+            f.render_widget(
+                Paragraph::new(Span::styled(format!("{pct_txt:^8}"), pct_style)),
+                pct,
+            );
+            f.render_widget(Paragraph::new(Span::styled("[ + ]", btn)), plus);
+            app.hits.vol_minus = minus;
+            app.hits.vol_pct = pct;
+            app.hits.vol_plus = plus;
+            app.hits.vol_area = Rect {
+                x: minus.x,
+                y: row.y,
+                width: plus.right().saturating_sub(minus.x),
+                height: 1,
+            };
+        }
     }
 
     fn draw_cover(f: &mut Frame, app: &mut App, area: Rect) {
@@ -3707,6 +5270,12 @@ mod ui {
         }
     }
 
+    /// Rough time a line takes to sing, so the marker appears once the words are over
+    /// rather than the moment the line starts.
+    fn est_sung(text: &str) -> f64 {
+        (text.chars().count() as f64 * 0.08).clamp(2.0, 6.0)
+    }
+
     /// Style for a non-active lyric line `dist` lines away from the active one:
     /// fades with distance, and past lines fade a little faster than upcoming ones.
     fn fade_style(th: &Theme, dist: usize, past: bool) -> Style {
@@ -3840,6 +5409,10 @@ mod ui {
             LyricsState::Ready(Lyrics::Plain(l)) => (l.clone(), None),
         };
         let plain = matches!(app.lyrics, LyricsState::Ready(Lyrics::Plain(_)));
+        let stamps: Vec<f64> = match &app.lyrics {
+            LyricsState::Ready(Lyrics::Synced(l)) => l.iter().map(|x| x.0).collect(),
+            _ => Vec::new(),
+        };
 
         // Blank rows between lines — dropped on short panels where they'd waste the space.
         let gap = if inner.height >= 10 {
@@ -3852,7 +5425,8 @@ mod ui {
             .then(|| app.aligned.clone())
             .flatten()
             .filter(|a| a.usable());
-        let tr = app.transpose;
+        let tr = app.chord_shift();
+        let flats = app.use_flats();
 
         // Big-font mode uses the fixed "focus" layout instead of the scrolling one.
         if app.big_lyrics && !plain {
@@ -3862,7 +5436,7 @@ mod ui {
                     (!cs.is_empty()).then(|| {
                         let mut names: Vec<String> = cs
                             .iter()
-                            .map(|(_, n)| chords::transpose(n, tr, aligned.as_ref().is_some_and(|a| a.flats)))
+                            .map(|(_, n)| chords::transpose(n, tr, flats))
                             .collect();
                         names.dedup();
                         names.join("   ")
@@ -3882,10 +5456,46 @@ mod ui {
             li: usize,
             text: String,
             chord_x: Option<usize>,
+            /// A chord row of the pre-lyrics intro section.
+            intro: bool,
+            /// `[ Instrumental / Solo ]` placeholder; only drawn while it is active.
+            marker: Option<Mk>,
+        }
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mk {
+            Lead,
+            After(usize),
+            Tail,
         }
         let width = inner.width as usize;
-        let flats = aligned.as_ref().is_some_and(|a| a.flats);
         let mut rows: Vec<Row> = Vec::new();
+        let threshold = app.args.interlude_secs;
+        let marker_row = |li: usize, m: Mk| Row {
+            li,
+            text: "[ Instrumental / Solo ]".into(),
+            chord_x: None,
+            intro: false,
+            marker: Some(m),
+        };
+        // Time before the first lyric: an instrumental marker, then the intro chords.
+        if !plain && stamps.first().is_some_and(|t| *t > threshold) {
+            rows.push(marker_row(0, Mk::Lead));
+        }
+        // Intro chords (before the first lyric timestamp) come first.
+        if let Some(a) = &aligned {
+            for names in &a.intro {
+                let names: Vec<String> = names.iter().map(|n| chords::transpose(n, tr, flats)).collect();
+                let text = names.join("   ");
+                let x = width.saturating_sub(Span::raw(&text).width()) / 2;
+                rows.push(Row { li: 0, text, chord_x: Some(x), intro: true, marker: None });
+            }
+            if !a.intro.is_empty() {
+                for _ in 0..gap.max(1) {
+                    rows.push(Row { li: 0, text: String::new(), chord_x: None, intro: true, marker: None });
+                }
+            }
+        }
+        let intro_rows = rows.len();
         let mut starts = Vec::with_capacity(lines.len());
         let mut ends = Vec::with_capacity(lines.len());
         for (i, l) in lines.iter().enumerate() {
@@ -3897,7 +5507,7 @@ mod ui {
             match line_chords {
                 None => {
                     for r in wrap(l, width) {
-                        rows.push(Row { li: i, text: r, chord_x: None });
+                        rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None });
                     }
                 }
                 Some(cs) => {
@@ -3917,15 +5527,28 @@ mod ui {
                                 li: i,
                                 text: chord_line(&here, tr, flats),
                                 chord_x: Some(x),
+                                intro: false,
+                                marker: None,
                             });
                         }
-                        rows.push(Row { li: i, text, chord_x: None });
+                        rows.push(Row { li: i, text, chord_x: None, intro: false, marker: None });
                     }
                 }
             }
             ends.push(rows.len());
+            // A long silence after this line (solo / instrumental break).
+            if !plain && l.trim() != "♪" {
+                let next = stamps.get(i + 1).copied();
+                match next {
+                    Some(n) if n - stamps[i] > threshold => rows.push(marker_row(i, Mk::After(i))),
+                    None if length > 0.0 && length - stamps[i] > threshold + est_sung(l) => {
+                        rows.push(marker_row(i, Mk::Tail))
+                    }
+                    _ => {}
+                }
+            }
             for _ in 0..gap {
-                rows.push(Row { li: i, text: String::new(), chord_x: None });
+                rows.push(Row { li: i, text: String::new(), chord_x: None, intro: false, marker: None });
             }
         }
         if rows.is_empty() {
@@ -3942,6 +5565,8 @@ mod ui {
         } else {
             match current {
                 Some(c) => (starts[c] + ends[c]) as f64 / 2.0 - 0.5,
+                // before the first line: centre the intro chords if there are any
+                None if intro_rows > 0 => intro_rows as f64 / 2.0 - 0.5,
                 None => -1.0,
             }
         };
@@ -3964,6 +5589,18 @@ mod ui {
 
         let half = inner.height as i64 / 2;
         let top = app.lyric_scroll.round() as i64 - half;
+        // Remember which lyric line each visible row belongs to, so a click can seek to it.
+        // (Spacing rows, markers and the intro belong to no line; plain lyrics aren't clickable.)
+        app.lyric_hits = crate::app::LyricHits {
+            area: inner,
+            top,
+            rows: rows
+                .iter()
+                .map(|r| {
+                    (!plain && !r.intro && r.marker.is_none() && !r.text.is_empty()).then_some(r.li)
+                })
+                .collect(),
+        };
         if plain {
             f.render_widget(
                 Paragraph::new(Line::styled(
@@ -3985,18 +5622,57 @@ mod ui {
             if idx < 0 || idx as usize >= rows.len() {
                 continue;
             }
-            let Row { li, text, chord_x } = &rows[idx as usize];
+            let Row { li, text, chord_x, intro, marker } = &rows[idx as usize];
             if text.is_empty() {
+                continue;
+            }
+            if let Some(m) = marker {
+                // Shown only while the break is actually happening, with a countdown.
+                let t = pos + app.offset;
+                let last = stamps.len().saturating_sub(1);
+                let (active, remain) = match *m {
+                    Mk::Lead => (current.is_none(), stamps[0] - t),
+                    Mk::After(i) => (
+                        current == Some(i) && t >= stamps[i] + est_sung(&lines[i]),
+                        stamps[i] + (stamps[i + 1] - stamps[i]) - t,
+                    ),
+                    Mk::Tail => (
+                        current == Some(last) && t >= stamps[last] + est_sung(&lines[last]),
+                        0.0,
+                    ),
+                };
+                if !active {
+                    continue;
+                }
+                let label = if remain > 0.5 && *m != Mk::Tail {
+                    format!("{text}  · {}s", remain.ceil() as u32)
+                } else {
+                    text.clone()
+                };
+                f.render_widget(
+                    Paragraph::new(Line::styled(
+                        label,
+                        Style::new().fg(th.primary()).add_modifier(Modifier::ITALIC),
+                    ))
+                    .alignment(Alignment::Center),
+                    Rect { y: inner.y + y, height: 1, ..inner },
+                );
                 continue;
             }
             if let Some(x) = chord_x {
                 let cur_i = current.map_or(-1, |c| c as i64);
                 let d = *li as i64 - cur_i;
-                if d < 0 || d > app.args.chords_context as i64 {
+                // Default context (99) = every line; a smaller number limits chords to the
+                // active line and the next N.
+                let ctx = app.args.chords_context as i64;
+                if !*intro && ctx < 99 && (d < 0 || d > ctx) {
                     continue;
                 }
-                let style = if d == 0 && current.is_some() {
+                let active = if *intro { current.is_none() } else { d == 0 && current.is_some() };
+                let style = if active {
                     Style::new().fg(th.primary()).add_modifier(Modifier::BOLD)
+                } else if d < 0 && !*intro {
+                    Style::new().fg(th.accent_fade(0.55))
                 } else {
                     Style::new().fg(th.accent_fade(0.35))
                 };
@@ -4143,14 +5819,18 @@ mod ui {
             spans.push(Span::styled(c, Style::new().fg(th.accent_fade(0.2))));
         }
         let left = Line::from(spans);
-        let hints = "space ⏯  n/p  ←/→ seek  ,/. sync  l lyrics  b big  g chords  t/T key  c cava  q quit ";
+        let long = "space ⏯  n/p  ←/→ seek  +/- vol  g chords  M min  D diagrams  ? help  q quit ";
+        let short = "? help  q quit ";
         let left_w = left.width() as u16;
         f.render_widget(Paragraph::new(left), area);
-        if left_w + hints.chars().count() as u16 + 2 <= area.width {
-            f.render_widget(
-                Paragraph::new(Line::styled(hints, dim)).alignment(Alignment::Right),
-                area,
-            );
+        for hints in [long, short] {
+            if left_w + hints.chars().count() as u16 + 2 <= area.width {
+                f.render_widget(
+                    Paragraph::new(Line::styled(hints, dim)).alignment(Alignment::Right),
+                    area,
+                );
+                break;
+            }
         }
     }
 }
@@ -4160,7 +5840,18 @@ mod ui {
 // ════════════════════════════════════════════════════════════════════════════
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = cli::Args::parse();
+    // flags > config file > built-in defaults
+    let matches = <cli::Args as clap::CommandFactory>::command().get_matches();
+    let mut args = <cli::Args as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    let cfg_path = args.config.clone().unwrap_or_else(config::default_path);
+    let explicit = args.config.is_some();
+    let found = config::apply(&mut args, &matches, &cfg_path, explicit, &mut |w| {
+        eprintln!("music_display: {w}")
+    });
+    if args.print_config {
+        print!("{}", config::render(&args, &cfg_path, found));
+        return Ok(());
+    }
     if let Some(p) = &args.chords_probe {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
         ug::probe(&client, &p[0], &p[1], args.probe_save.clone()).await;
@@ -4170,7 +5861,9 @@ async fn main() -> Result<()> {
 
     // ratatui::init = raw mode + alternate screen + a panic hook that restores both.
     let mut terminal = ratatui::init();
-    execute!(stdout(), EnableMouseCapture)?;
+    if !args.no_mouse {
+        execute!(stdout(), EnableMouseCapture)?;
+    }
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(stdout(), DisableMouseCapture);
@@ -4245,6 +5938,7 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn lrc_parsing() {
@@ -4708,6 +6402,390 @@ mod tests {
         for (a, b) in s.lines.iter().zip(&back.lines) {
             assert_eq!(a.text.trim(), b.text.trim());
             assert_eq!(a.chords.iter().map(|c| &c.1).collect::<Vec<_>>(), b.chords.iter().map(|c| &c.1).collect::<Vec<_>>());
+        }
+    }
+
+    fn snap(artist: &str, title: &str, album: &str) -> player::Snapshot {
+        player::Snapshot {
+            status: player::Status::Playing,
+            position: 0.0,
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            length: 100.0,
+            art_url: String::new(),
+            track_no: None,
+            disc_no: None,
+            content_created: String::new(),
+            volume: None,
+        }
+    }
+
+    #[test]
+    fn track_key_ignores_editions_and_case() {
+        let k = |a, t, al| snap(a, t, al).key();
+        let base = k("Metallica", "Enter Sandman", "Metallica");
+        assert_eq!(base, k("Metallica", "Enter Sandman", "Metallica (Remastered Deluxe Box Set)"));
+        assert_eq!(base, k("metallica ", "Enter  Sandman - Remastered 2021", "METALLICA (Anniversary Box Set)"));
+        assert_eq!(base, k("Metallica", "Enter Sandman (Remastered)", "Metallica [Deluxe Edition]"));
+        // different songs / artists stay different
+        assert_ne!(base, k("Metallica", "Sad But True", "Metallica"));
+        assert_ne!(base, k("Megadeth", "Enter Sandman", "Metallica"));
+    }
+
+    enum R {
+        Http(u16, &'static str, String),
+        Drop,
+    }
+
+    /// Scripted server: each route plays its responses in order, repeating the last one.
+    fn scripted_site(routes: Vec<(&'static str, Vec<R>)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        let counts = std::sync::Mutex::new(vec![0usize; routes.len()]);
+        std::thread::spawn(move || {
+            for mut st in l.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = st.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first = req.lines().next().unwrap_or("").to_string();
+                log2.lock().unwrap().push(first.clone());
+                let Some(ri) = routes.iter().position(|(f, _)| first.contains(f)) else {
+                    let _ = write!(st, "HTTP/1.1 404 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                };
+                let mut c = counts.lock().unwrap();
+                let i = c[ri].min(routes[ri].1.len() - 1);
+                c[ri] += 1;
+                match &routes[ri].1[i] {
+                    R::Drop => drop(st), // socket disconnect
+                    R::Http(code, hdr, body) => {
+                        let _ = write!(st, "HTTP/1.1 {code} X\r\n{hdr}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
+                }
+            }
+        });
+        (base, log)
+    }
+
+    fn fast() -> lyrics::Policy {
+        lyrics::Policy { retries: 3, backoff: Duration::from_millis(1) }
+    }
+
+    fn run_lyrics(base: &str, policy: lyrics::Policy) -> lyrics::Lyrics {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let c = reqwest::Client::builder().timeout(Duration::from_millis(400)).build().unwrap();
+        rt.block_on(lyrics::fetch_with(&c, base, "Metallica", "Enter Sandman - Remastered", "Metallica (Deluxe)", 331.0, policy, false))
+    }
+
+    const LRC_JSON: &str = r#"{"syncedLyrics":"[00:01.00]hello\n[00:02.00]world","plainLyrics":"hello\nworld","duration":331}"#;
+
+    #[test]
+    fn lyrics_recover_from_429_disconnect_and_5xx() {
+        let (base, log) = scripted_site(vec![(
+            "api/get",
+            vec![
+                R::Http(429, "Retry-After: 0\r\n", String::new()),
+                R::Drop,
+                R::Http(503, "", String::new()),
+                R::Http(200, "", LRC_JSON.into()),
+            ],
+        )]);
+        let l = run_lyrics(&base, fast());
+        assert!(matches!(l, lyrics::Lyrics::Synced(ref v) if v.len() == 2), "{l:?}");
+        assert_eq!(log.lock().unwrap().len(), 4, "3 failures then success on the 4th attempt");
+    }
+
+    #[test]
+    fn lyrics_timeout_is_retried() {
+        // first reply never arrives within the client timeout (server just sits on the socket)
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (i, st) in l.incoming().flatten().enumerate() {
+                let mut st = st;
+                let mut b = [0u8; 4096];
+                let _ = st.read(&mut b);
+                if i == 0 {
+                    std::thread::sleep(Duration::from_millis(900)); // > client timeout
+                } else {
+                    let _ = write!(st, "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LRC_JSON}", LRC_JSON.len());
+                }
+            }
+        });
+        let l = run_lyrics(&base, fast());
+        assert!(matches!(l, lyrics::Lyrics::Synced(_)), "{l:?}");
+    }
+
+    #[test]
+    fn lyrics_fallback_chain_and_not_found_vs_error() {
+        // (a) exact (has album_name) → 404; (b) without album → hit
+        let (base, log) = scripted_site(vec![
+            ("album_name", vec![R::Http(404, "", String::new())]),
+            ("api/get", vec![R::Http(200, "", LRC_JSON.into())]),
+        ]);
+        assert!(matches!(run_lyrics(&base, fast()), lyrics::Lyrics::Synced(_)));
+        let calls = log.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[1].contains("track_name=Enter+Sandman") && !calls[1].contains("Remastered"), "{calls:?}");
+
+        // (c) both gets 404 → search finds it
+        let (base, _) = scripted_site(vec![
+            ("api/get", vec![R::Http(404, "", String::new())]),
+            ("api/search", vec![R::Http(200, "", format!("[{LRC_JSON}]"))]),
+        ]);
+        assert!(matches!(run_lyrics(&base, fast()), lyrics::Lyrics::Synced(_)));
+
+        // 404 everywhere = "no lyrics exist", not a network error
+        let (base, log) = scripted_site(vec![
+            ("api/get", vec![R::Http(404, "", String::new())]),
+            ("api/search", vec![R::Http(200, "", "[]".into())]),
+        ]);
+        assert!(matches!(run_lyrics(&base, fast()), lyrics::Lyrics::NotFound));
+        assert!(log.lock().unwrap().len() <= 6, "404 is never retried");
+
+        // everything fails → network error, after bounded effort (4 + 1 + 1…)
+        let (base, log) = scripted_site(vec![("api/", vec![R::Http(500, "", String::new())])]);
+        let l = run_lyrics(&base, fast());
+        assert!(matches!(&l, lyrics::Lyrics::Error(e) if e.contains("server error")), "{l:?}");
+        let n = log.lock().unwrap().len();
+        assert!((6..=9).contains(&n), "first step retried 3x, later steps once each: {n}");
+
+        // rate limited for good → says so
+        let (base, _) = scripted_site(vec![("api/", vec![R::Http(429, "Retry-After: 0\r\n", String::new())])]);
+        let l = run_lyrics(&base, fast());
+        assert!(matches!(&l, lyrics::Lyrics::Error(e) if e.contains("rate limited")), "{l:?}");
+    }
+
+    #[test]
+    fn keys_and_camelot() {
+        let k = |x: &str| chords::parse_key(x).unwrap();
+        // the full wheel, checked against the standard Camelot table
+        let major = [("C", "8B"), ("Db", "3B"), ("D", "10B"), ("Eb", "5B"), ("E", "12B"), ("F", "7B"), ("F#", "2B"), ("G", "9B"), ("Ab", "4B"), ("A", "11B"), ("Bb", "6B"), ("B", "1B")];
+        let minor = [("Am", "8A"), ("Bbm", "3A"), ("Bm", "10A"), ("Cm", "5A"), ("C#m", "12A"), ("Dm", "7A"), ("Ebm", "2A"), ("Em", "9A"), ("Fm", "4A"), ("F#m", "11A"), ("Gm", "6A"), ("G#m", "1A")];
+        for (n, c) in major.iter().chain(minor.iter()) {
+            assert_eq!(k(n).camelot(), *c, "{n}");
+        }
+        assert_eq!(k("Em").long(), "E Minor");
+        assert_eq!(k("E minor").camelot(), "9A");
+        assert_eq!(k("D#m").short(), "Ebm");
+        assert_eq!(k("Am").shift(3).short(), "Cm");
+        assert_eq!(k("Am").shift(-12).short(), "Am");
+        assert_eq!(k("C#").shift(-3).short(), "Bb");
+        assert!(chords::parse_key("Hello").is_none() && chords::parse_key("Asus4").is_none());
+        assert!(k("Dm").prefers_flats() && k("F").prefers_flats() && !k("A").prefers_flats() && !k("Em").prefers_flats());
+    }
+
+    #[test]
+    fn sheet_metadata_and_dates() {
+        let s = chords::parse_text("Key: Em\nBPM: 120\nCapo 3\n   Am   G\nhello world\n");
+        assert_eq!((s.key.as_deref(), s.bpm, s.capo), (Some("Em"), Some(120), 3));
+        let c = chords::parse_chordpro("{key: F#m}\n{tempo: 83}\n[Am]x [G]y");
+        assert_eq!((c.key.as_deref(), c.bpm), (Some("F#m"), Some(83)));
+        let back = chords::parse_chordpro(&chords::to_chordpro(&c));
+        assert_eq!((back.key.as_deref(), back.bpm), (Some("F#m"), Some(83)));
+        // a lyric that happens to contain a colon is untouched
+        let l = chords::parse_text("   Am\nKey to my heart: you\n");
+        assert_eq!(l.lines[0].text, "Key to my heart: you");
+        assert_eq!(year::full_date("1969-09-26T00:00:00Z").as_deref(), Some("1969-09-26"));
+        assert_eq!(year::full_date("1969-09-26").as_deref(), Some("1969-09-26"));
+        assert_eq!(year::full_date("1969"), None);
+        assert_eq!(year::full_date("1969-00-00"), None);
+        assert_eq!(year::full_date(""), None);
+    }
+
+    #[test]
+    fn intro_chords_before_first_lyric() {
+        let sheet = chords::parse_chordpro("[Am] [G] [C] [F]\n[Am] [G]\n[Am]Hello darkness my old [G]friend\n[C]I've come to talk with [F]you again\n[Am]Because a vision [G]softly creeping\n[C]Left its seeds while I was [F]sleeping\n");
+        let a = chords::align(&sheet, &lrc(&["Hello darkness my old friend", "I've come to talk with you again", "Because a vision softly creeping", "Left its seeds while I was sleeping"]));
+        assert_eq!(a.intro, vec![vec!["Am", "G", "C", "F"], vec!["Am", "G"]]);
+        assert!(a.usable());
+        // no chord-only lines before the first lyric → no intro
+        let b = chords::parse_chordpro("[Am]Hello darkness my old [G]friend\n[C]I've come to talk with [F]you again\n");
+        let ab = chords::align(&b, &lrc(&["Hello darkness my old friend", "I've come to talk with you again"]));
+        assert!(ab.intro.is_empty());
+    }
+
+    #[test]
+    fn chord_diagrams() {
+        let f = |n: &str| diagram::lookup(n).map(|s| s.frets);
+        assert_eq!(f("C"), Some([-1, 3, 2, 0, 1, 0]));
+        assert_eq!(f("Am"), Some([-1, 0, 2, 2, 1, 0]));
+        assert_eq!(f("E"), Some([0, 2, 2, 1, 0, 0]));
+        assert_eq!(f("F"), Some([1, 3, 3, 2, 1, 1]));
+        assert_eq!(f("Bb"), Some([-1, 1, 3, 3, 3, 1]));
+        assert_eq!(f("F#m"), Some([2, 4, 4, 2, 2, 2]));
+        assert_eq!(f("G"), Some([3, 2, 0, 0, 0, 3]));
+        assert_eq!(f("A7"), Some([-1, 0, 2, 0, 2, 0]));
+        assert_eq!(f("Em7"), Some([0, 2, 0, 0, 0, 0]));
+        assert_eq!(f("A5"), Some([-1, 0, 2, 2, -1, -1]));
+        assert_eq!(f("Dsus4"), Some([-1, -1, 0, 2, 3, 3]));
+        assert_eq!(f("Asus2"), Some([-1, 0, 2, 2, 0, 0]));
+        // enharmonics resolve to the same shape
+        assert_eq!(f("A#"), f("Bb"));
+        assert_eq!(f("Db"), f("C#"));
+        // everything we claim to know is playable: within a 4-fret span and at least 3 strings
+        for root in ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"] {
+            for q in ["", "m", "7", "m7", "maj7", "sus4", "sus2", "5"] {
+                let name = format!("{root}{q}");
+                let Some(sh) = diagram::lookup(&name) else {
+                    assert_eq!(q, "sus2", "only the high sus2 shapes are left out: {name}");
+                    continue;
+                };
+                let fr: Vec<i8> = sh.frets.iter().copied().filter(|x| *x > 0).collect();
+                if let (Some(lo), Some(hi)) = (fr.iter().min(), fr.iter().max()) {
+                    assert!(hi - lo <= 3, "{name} {sh:?}");
+                }
+                assert!(sh.frets.iter().filter(|x| **x >= 0).count() >= 3, "{name}");
+                assert!(sh.frets.iter().all(|x| *x <= 12), "{name}");
+            }
+        }
+        // unknown / slash chords: no diagram rather than a wrong one
+        for n in ["Cdim", "D/F#", "Gadd9", "Em9", "Hello", ""] {
+            assert!(diagram::lookup(n).is_none(), "{n}");
+        }
+        let c = diagram::render("C", &diagram::lookup("C").unwrap());
+        assert_eq!(c[0].trim(), "C");
+        assert_eq!(c[1], "x     o   o");
+        assert_eq!(c[2], "╒═╤═╤═╤═╤═╕");
+        assert_eq!(c.len(), 7);
+        let tab = diagram::tab(&[diagram::lookup("C"), diagram::lookup("Am"), diagram::lookup("Cdim")]);
+        assert_eq!(tab[0], "e|-0---0---?--|");
+        assert_eq!(tab[5], "E|-x---x---?--|");
+    }
+
+    #[test]
+    fn capo_and_transposition_math() {
+        // higher capo → lower shapes; wrap-around both ways
+        assert_eq!(chords::capo_shift(2, 5, 0), -3);
+        assert_eq!(chords::capo_shift(0, 0, 0), 0);
+        assert_eq!(chords::capo_shift(3, 0, 1), 4);
+        let t = |c: &str, n: i32, flats: bool| chords::transpose(c, n, flats);
+        assert_eq!(t("Dm", -3, false), "Bm");
+        assert_eq!(t("B", 1, false), "C");
+        assert_eq!(t("C", -1, false), "B");
+        assert_eq!(t("C", -13, false), "B");
+        assert_eq!(t("A", 25, false), "A#");
+        assert_eq!(t("A", 25, true), "Bb");
+        // slash chords move both notes, spelling follows the key
+        assert_eq!(t("D/F#", 1, false), "D#/G");
+        assert_eq!(t("D/F#", 1, true), "Eb/G");
+        assert_eq!(t("D/F#", -2, true), "C/E");
+        assert_eq!(t("C#m7/G#", 2, true), "Ebm7/Bb");
+        assert_eq!(t("Bb/D", 12, true), "Bb/D");
+        // sounding key stays put when only the capo changes; the shapes' key moves
+        let k = chords::parse_key("Dm").unwrap();
+        let (sheet_capo, new_capo) = (2u8, 4u8);
+        let sounding = k.shift(sheet_capo as i32);
+        let shapes = k.shift(chords::capo_shift(sheet_capo, new_capo, 0));
+        assert_eq!(sounding.short(), "Em");
+        assert_eq!(shapes.short(), "Cm"); // capo 4 → play Cm shapes → sounds Em
+        assert_eq!(shapes.shift(new_capo as i32).short(), sounding.short());
+        assert!(shapes.prefers_flats()); // Cm → flat spelling
+    }
+
+    fn cfg_run(file: &str, argv: &[&str]) -> (cli::Args, Vec<String>) {
+        let path = tmp("cfg").join(format!("{}.toml", util::fnv1a(file)));
+        std::fs::write(&path, file).unwrap();
+        let mut full = vec!["x", "--config", path.to_str().unwrap()];
+        full.extend_from_slice(argv);
+        let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(full);
+        let mut args = <cli::Args as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+        let mut warns = Vec::new();
+        config::apply(&mut args, &m, &path, true, &mut |w| warns.push(w));
+        (args, warns)
+    }
+
+    #[test]
+    fn config_precedence_and_validation() {
+        let file = "player = \"spotifyd\"\noffset = -0.5\ntint = 0.25\ncava = true\ncava_bars = 32\nvolume_step = 10\ninterlude_threshold_secs = 12\nlyrics_retries = 5\nminimal_view = true\nmouse = false\nchords = true\nchords_ug = true\nthirdpanel = true\n";
+        // file beats built-in defaults
+        let (a, w) = cfg_run(file, &[]);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((a.player.as_str(), a.offset, a.tint, a.cava, a.cava_bars), ("spotifyd", -0.5, 0.25, true, 32));
+        assert_eq!((a.volume_step, a.interlude_secs, a.lyrics_retries), (10, 12.0, 5));
+        assert!(a.minimal && a.no_mouse && a.chords && a.chords_ug && a.thirdpanel);
+        // flags beat the file
+        let (a, _) = cfg_run(file, &["--player", "vlc", "--tint", "0.9", "--volume-step", "2", "--lyrics-retries", "0"]);
+        assert_eq!((a.player.as_str(), a.tint, a.volume_step, a.lyrics_retries), ("vlc", 0.9, 2, 0));
+        assert_eq!(a.cava_bars, 32, "settings not given as flags still come from the file");
+        // defaults when nothing is set
+        let (a, w) = cfg_run("", &[]);
+        assert!(w.is_empty());
+        assert_eq!((a.player.as_str(), a.volume_step, a.interlude_secs, a.lyrics_retries, a.minimal, a.no_mouse), ("spotify", 5, 8.0, 3, false, false));
+        // unknown key warns (with its line), valid keys still apply
+        let (a, w) = cfg_run("tint = 0.3\nfoo = 1\n", &[]);
+        assert_eq!(a.tint, 0.3);
+        assert!(w.len() == 1 && w[0].contains(":2:") && w[0].contains("unknown key 'foo'"), "{w:?}");
+        // invalid values: key + line reported, default kept, the rest unaffected
+        let (a, w) = cfg_run("# c\ntint = 7\nvolume_step = \"loud\"\nlyrics_retries = -1\ncava = 1\nplayer = \"\"\noffset = 1.5\n", &[]);
+        assert_eq!((a.tint, a.volume_step, a.lyrics_retries, a.cava, a.player.as_str(), a.offset), (1.0, 5, 3, false, "spotify", 1.5));
+        assert_eq!(w.len(), 5, "{w:?}");
+        assert!(w[0].contains(":2:") && w[0].contains("'tint'"));
+        assert!(w[1].contains(":3:") && w[1].contains("'volume_step'"));
+        // broken TOML: warns, everything stays default
+        let (a, w) = cfg_run("tint = = 3\n", &[]);
+        assert_eq!(a.tint, 1.0);
+        assert!(w.len() == 1 && w[0].contains("ignoring the file"), "{w:?}");
+        // a missing default file is silent, a missing explicit one is not
+        let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x"]);
+        let mut a = <cli::Args as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+        let mut w = Vec::new();
+        let nowhere = tmp("cfg").join("nope.toml");
+        assert!(!config::apply(&mut a, &m, &nowhere, false, &mut |x| w.push(x)));
+        assert!(w.is_empty());
+        config::apply(&mut a, &m, &nowhere, true, &mut |x| w.push(x));
+        assert_eq!(w.len(), 1);
+        // print-config round-trips through the parser
+        let text = config::render(&a, &nowhere, false);
+        let table: toml::Table = text.parse().unwrap();
+        assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir"), "{text}");
+        assert!(text.contains("# chords_dir"));
+    }
+
+    #[test]
+    fn keymap_has_no_conflicts_and_help_is_generated_from_it() {
+        use app::{Action as A, BINDS, GROUPS, MOUSE};
+        use crossterm::event::KeyCode;
+        // no key is bound twice (m / M, t / T are different keys)
+        let mut seen = std::collections::HashSet::new();
+        for b in BINDS {
+            for c in b.codes {
+                assert!(seen.insert(format!("{c:?}")), "{c:?} bound twice");
+            }
+        }
+        assert_eq!(app::action_for(KeyCode::Char('m')), Some(A::Mute));
+        assert_eq!(app::action_for(KeyCode::Char('M')), Some(A::Minimal));
+        assert_eq!(app::action_for(KeyCode::Char('?')), Some(A::Help));
+        assert_eq!(app::action_for(KeyCode::Esc), Some(A::Quit));
+        assert_eq!(app::action_for(KeyCode::Char('z')), None);
+        // every action can be triggered by some key
+        for a in [
+            A::Quit, A::PlayPause, A::Next, A::Prev, A::SeekBack, A::SeekFwd, A::SyncEarlier,
+            A::SyncLater, A::VolUp, A::VolDown, A::Mute, A::ToggleLyrics, A::ToggleBig,
+            A::ToggleCava, A::ToggleChords, A::TransposeUp, A::TransposeDown, A::CapoDown,
+            A::CapoUp, A::CapoReset, A::Diagrams, A::Minimal, A::Help,
+        ] {
+            assert!(BINDS.iter().any(|b| b.action == a), "{a:?} has no key");
+        }
+        assert!(BINDS.iter().all(|b| GROUPS.contains(&b.group)));
+        assert!(MOUSE.iter().all(|m| GROUPS.contains(&m.0)));
+        // the overlay lists every row of both tables
+        let th = theme_from(&["--terminal-colors"], None);
+        let text: String = ui::help_blocks(&th)
+            .iter()
+            .flatten()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>() + "\n")
+            .collect();
+        for b in BINDS {
+            assert!(text.contains(b.keys) && text.contains(b.desc), "{} missing from help", b.keys);
+        }
+        for m in MOUSE {
+            assert!(text.contains(m.1) && text.contains(m.2));
         }
     }
 

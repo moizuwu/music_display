@@ -1,6 +1,6 @@
 # music_display
 
-cover art, metadata, clickable controls, synced lyrics and cava in one zero-flicker TUI.
+Rust port of `music_display_2.fish`: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
 
 ## Build
 
@@ -18,13 +18,43 @@ No OpenSSL or libchafa needed (rustls + pure-Rust image decoding).
 music_display                          # Metadata | Lyrics
 music_display --nolyrics               # metadata only (toggle lyrics with `l`)
 music_display --cava --thirdpanel      # Metadata | Lyrics | Cava
-music_display --cava --underlyrics     # cava under the lyrics (also the default for plain --cava)
-music_display -c ~/some/colors.json    # explicit colour file
-music_display --surface '#1e1e2e' --primary '#cba6f7'
+music_display --chords --chords-ug     # chords above the lyrics (local sheets, then Ultimate Guitar)
+music_display --minimal                # teleprompter: title + lyrics + thin progress bar
 music_display --terminal-colors        # use the terminal's own theme
-music_display --ascii-cover --cover-theme --tint 0
-music_display --big-lyrics             # active lyric line in a big block font
+music_display --print-config           # show the effective configuration and exit
 ```
+
+Press `?` inside the app for the full list of keys and mouse actions (it is generated from the same table the key handler uses).
+
+## Configuration
+
+`~/.config/music_display/config.toml` (or `$XDG_CONFIG_HOME/music_display/config.toml`, or `--config FILE`). Nothing is created for you. **Command-line flags override the file, the file overrides the built-in defaults.** A missing file is fine; unknown keys and invalid values print a warning with the line number to stderr and fall back to the default.
+
+```toml
+player = "spotify"             # MPRIS player for playerctl ("any" = playerctl's pick)
+offset = 0.0                   # default lyric offset, seconds
+tint = 1.0                     # cover duotone strength 0..1
+transparent = false
+terminal_colors = false
+ascii_cover = false
+cover_theme = false
+cava = false
+cava_bars = 64
+thirdpanel = false
+big_lyrics = false
+lyric_spacing = 1              # 0..3
+chords = false
+chords_ug = false
+# chords_dir = "~/.local/share/music_display/chords"
+chords_context = 99            # 99 = chords on every line; N = active line + N upcoming
+volume_step = 5                # percent per + / - / wheel notch
+interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
+lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
+minimal_view = false           # start in the minimal view
+mouse = true                   # false = don't capture the mouse
+```
+
+`music_display --help` lists every flag with its config key.
 
 ### Colours
 
@@ -32,9 +62,9 @@ music_display --big-lyrics             # active lyric line in a big block font
 | --- | --- |
 | *(none)* | first usable colour file wins (see Notes). If none is usable — missing, invalid, or `{}` — the app falls back to the terminal's colours, never to built-in hex values. |
 | `--terminal-colors` | skip every colour file; default background/foreground, ANSI cyan accent, grays for fading. No hex colours are used. |
-| `--surface HEX` / `--primary HEX` | override just that slot; combine freely with `--terminal-colors` (e.g. `--terminal-colors --primary '#ff8800'` keeps your terminal background). |
-| `--cover-theme` | accent (borders, labels, active lyric, progress, cava) follows the dominant vivid colour of the current cover; updates every track. Works with `--terminal-colors`. |
-| `--tint 0..1` | duotone strength on the cover itself. `0` = original artwork. Needs a known surface and accent to apply; with `--cover-theme` the duotone's highlight is the cover accent. |
+| `--surface HEX` / `--primary HEX` | override just that slot; combine freely with `--terminal-colors`. |
+| `--cover-theme` | accent follows the dominant vivid colour of the current cover; updates every track. |
+| `--tint 0..1` | duotone strength on the cover itself. `0` = original artwork. |
 | `--transparent` | don't paint the surface colour as the background. |
 
 ### Layout, lyrics, cover
@@ -44,15 +74,12 @@ music_display --big-lyrics             # active lyric line in a big block font
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
-| `--big-lyrics` | render the active line in a 5×7 half-block font (also toggled with `b`). Lines with unsupported characters, or too long for the panel, fall back to bold text. |
-
-| `--chords` | show guitar chords above the lyrics (toggle with `g`; off by default). |
-| `--chords-dir DIR` | folder with your chord sheets (default `~/.local/share/music_display/chords`). |
-| `--chords-ug` | when there is no local sheet, look the song up on Ultimate Guitar (unofficial, opt-in). |
-| `--chords-probe ARTIST TITLE` | diagnose the Ultimate Guitar lookup for one song, print each step, exit. `--probe-save DIR` keeps the raw pages. |
-| `--chords-context N` | how many upcoming lines show chords besides the active one (default 1). |
-
-Other flags: `--player NAME` (default `spotify`, `any` = playerctl's pick), `--offset SECS` (default lyric offset per track), `--cava-bars N`. `music_display --help` lists everything.
+| `--big-lyrics` | render the active line in a 5×7 half-block font (also `b`). |
+| `--minimal` | start in the minimal teleprompter view (also `M`). |
+| `--interlude-secs N` | a silence between two lyric lines longer than N seconds shows `[ Instrumental / Solo ]` (with a countdown) while it lasts; also before the first and after the last line. |
+| `--lyrics-retries N` | retries after a failed lyrics request (timeouts, 429 with `Retry-After`, disconnects, 5xx), 0.5 s / 1 s / 2 s backoff. |
+| `--volume-step N` | percent per volume change. |
+| `--no-mouse` | don't capture the mouse. |
 
 ## Keys
 
@@ -61,52 +88,40 @@ Other flags: `--player NAME` (default `spotify`, `any` = playerctl's pick), `--o
 | `space` | play / pause |
 | `n` / `p` | next / previous |
 | `←` / `→` | seek −5 s / +5 s |
+| `+` / `-` | volume up / down (`volume_step`, default 5 %) |
+| `m` | mute / restore |
 | `,` / `.` | lyric offset −0.1 s / +0.1 s |
-| `l` | toggle lyrics panel |
-| `b` | toggle big-font lyrics |
-| `g` | toggle chords |
-| `t` / `T` | transpose chords up / down one semitone (resets on track change) |
+| `l` | show / hide the lyrics |
+| `b` | big-font active line |
+| `g` | chords on / off |
+| `t` / `T` | transpose chords up / down one semitone |
+| `]` / `[` | capo up / down (0–12), remembered per track |
+| `0` | back to the sheet's own capo |
+| `D` | chord diagram panel |
+| `M` | minimal teleprompter view |
 | `c` | toggle cava (process is killed while hidden) |
+| `?` | help overlay (↑/↓ scroll, any other key closes) |
 | `q` / `Esc` | quit |
 
-Mouse: click the progress bar to seek, click `[ prev ] [ pause ] [ next ]`. Hold Shift to select text.
+Mouse: click the progress bar to seek; click `[ prev ] [ pause ] [ next ]`; `[ - ] [ 65% ] [ + ]` change the volume, clicking the percentage mutes (`[ MUTE ]`) and restores, the wheel over the control changes it too; **click a lyric line to seek to it** (synced lyrics only; works through wrapped lines and chord rows). Hold Shift to select text.
+
+The volume control follows the player: changes made elsewhere (media keys, the Spotify app) show up within a poll. It is hidden when the player doesn't report a volume.
+
+## Metadata panel
+
+`Release Date` shows the full `YYYY-MM-DD` when the player reports it (otherwise the year from MusicBrainz/iTunes). `BPM`, `Key: E Minor / 9A` (key + Camelot code) and `Capo` come from the **chord sheet** when it carries them (`{key: …}`, `{tempo: …}`, `Key:` / `BPM:` lines, Ultimate Guitar's page metadata). MPRIS carries no key or BPM, so with chords off — or a sheet without them — these fields are simply hidden. *TODO: a real audio-analysis source (the Spotify audio-features endpoint is closed to new apps).*
+
+The sheet's key is taken to be the key of its chord *shapes*. Key and Camelot show the **sounding** key (shapes + capo); the Capo row says which shapes you finger, e.g. `Capo 3  (shapes in C#m)`. Changing the capo with `[` / `]` re-spells the shapes (and the diagrams) but leaves the sounding key alone.
 
 ## Chords
 
-Put your own sheets in the chords folder, named `Artist - Title.ext` (case, punctuation, a
-`- Remastered` suffix and extra artists are ignored; `Title.ext` also works):
-
-- `.cho` / `.chopro` / `.pro` / `.crd` / `.chordpro` — ChordPro: `[Am]Hello [G]darkness`, `{capo: 2}`
-- `.txt` — chords written above the words (what most sites copy-paste to); `[ch]…[/ch]` tags,
-  `[Verse]` headers and tab lines are stripped automatically
-
-Chords are placed on the **synced lyrics** by matching lines (tolerates wording differences,
-and a chorus the sheet writes once but the song repeats). The footer shows the file, the match
-percentage and the capo; if fewer than 40 % of the lyric lines match, chords are hidden rather
-than shown in the wrong place. Chords only appear on the active line and the next one (see
-`--chords-context`); in `--big-lyrics` mode they are listed above the big line. `t`/`T` shift
-every chord; the sheet's capo is shown, never applied.
-
-### Ultimate Guitar (`--chords-ug`)
-
-Order: your folder → cache → Ultimate Guitar. UG has no public API, so this reads the JSON
-embedded in its pages and may break whenever the site changes; it is built to fail softly:
-
-- at most 1 search + 3 page requests per song, and only for songs not already cached
-- found sheets are cached for good (`~/.cache/music_display/chords-ug-*.json`, editable ChordPro);
-  "no sheet" is cached for 7 days; errors are never cached
-- three failures in a row (blocked, captcha, changed page) switch UG off until restart;
-  the footer says why. Local sheets and already-cached songs keep working
-- pages with fewer than 8 recognisable chords are rejected; candidates are ranked by rating × votes
-- it sends a browser-like User-Agent (UG rejects unknown ones), so you are using it at your own
-  risk with respect to their terms of service
-
-If a song doesn't come up, run `music_display --chords-probe "Artist" "Title"` to see which step fails.
+See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_display/chords/` (`Artist - Title.cho` / `.txt`), optionally Ultimate Guitar with `--chords-ug`; chords are shown on every lyric line (the active one in bold), intro chords appear before the first lyric, and `D` opens chord diagrams with a small tab.
 
 ## Notes
 
 - Colour files are checked in order: `~/.config/noctalia/colors.json`, `~/.cache/noctalia/colors.json`, `~/.config/matugen/colors.json`, `~/.cache/matugen/colors.json`, `~/.config/noctalia/theme.json`.
-- Cover art uses Kitty graphics when available, then Sixel / iTerm2, then unicode half-blocks. The bitmap is scaled to exactly fill its cell box so there is no padding sliver at the edge.
+- Cover art uses Kitty graphics when available, then Sixel / iTerm2, then unicode half-blocks. The bitmap is scaled to exactly fill its cell box.
 - If cava can't start or dies, the cava panel shows why (cava's own error message); press `c` twice to retry.
-- The cover's own pixels are always true-colour, even with `--terminal-colors`; everything else uses the terminal palette.
-- Caches: `~/.cache/music_display/` (years, lyrics; misses re-checked after a few days, network errors never cached), cover downloads in `/tmp/music_display/`.
+- Two editions of the same track ("Metallica" vs "Metallica (Remastered Deluxe Box Set)", different casing) are the same track: no flicker, no refetch.
+- Lyrics: "lyrics unavailable (network error / rate limited / server error)" only appears after every attempt of every fallback (exact match → artist + cleaned title → search) has failed; a real "no lyrics" answer is reported as such, and cached for a few days.
+- Caches: `~/.cache/music_display/` (years, lyrics, chords, per-track capo; errors are never cached), cover downloads in `/tmp/music_display/`.
