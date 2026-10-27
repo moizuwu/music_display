@@ -27,7 +27,7 @@ pub fn running() -> bool {
 /// running (it is left alone, so it is never killed either) or the binary cannot be started.
 pub fn start() -> Option<Child> {
     // tests flip `use_spotifyd` and must not start a real daemon
-    if cfg!(test) || running() {
+    if crate::util::testing() || running() {
         return None;
     }
     Command::new("spotifyd")

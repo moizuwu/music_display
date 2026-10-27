@@ -211,12 +211,12 @@ fn accent_from_cover() {
 
     // readable() lifts a dark accent on a dark surface and keeps unknown-bg accents bright
     let dark_bg = Some((16, 16, 16));
-    let r = theme::readable((30, 20, 90), dark_bg);
+    let r = color::readable((30, 20, 90), dark_bg);
     assert!(
         theme::luminance(r) - theme::luminance((16, 16, 16)) >= 0.4 - 1e-3,
         "{r:?}"
     );
-    assert!(theme::luminance(theme::readable((10, 10, 40), None)) >= 0.35);
+    assert!(theme::luminance(color::readable((10, 10, 40), None)) >= 0.35);
 }
 
 #[test]
@@ -1094,6 +1094,7 @@ fn solo_chords_are_kept_for_the_break() {
 }
 
 fn test_app() -> app::App {
+    util::enter_test_mode();
     use clap::Parser;
     let args = cli::Args::parse_from(["music_display"]);
     let theme = theme::load(&args);
@@ -1775,7 +1776,7 @@ fn genius_lines_are_attributed_to_synced_lines_in_order() {
     assert_eq!(m[4], ["Jungkook", "V"]);
     assert_eq!(m[5], ["RM", "SUGA"]);
     // stable colour per name, whatever the case
-    assert_eq!(genius::color("Jimin"), genius::color("jimin"));
+    assert_eq!(ui::member_color("Jimin"), ui::member_color("jimin"));
 }
 
 #[test]
@@ -2552,6 +2553,7 @@ async fn the_client_searches_lists_devices_and_reports_limits() {
 
 /// An app with Spotify on that talks to a fake server, and the channel its answers come back on.
 fn spotify_app(base: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
     let args = cli::Args::parse_from(["music_display"]);
     let theme = theme::load(&args);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

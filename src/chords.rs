@@ -692,7 +692,7 @@ impl Aligned {
         (self.matched * 100).checked_div(self.total).unwrap_or(0) as u32
     }
     /// Below this the chords would more often be wrong than right, so none are shown.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn usable(&self) -> bool {
         self.usable_at(DEFAULT_MATCH)
     }
@@ -705,7 +705,7 @@ impl Aligned {
 /// The share of lyric lines (percent) that must match the sheet for its chords to be shown.
 pub const DEFAULT_MATCH: u32 = 40;
 
-#[cfg(test)]
+#[doc(hidden)]
 pub fn align(sheet: &Sheet, lyrics: &[(f64, String)]) -> Aligned {
     align_with(sheet, lyrics, DEFAULT_MATCH)
 }

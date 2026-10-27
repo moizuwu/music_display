@@ -31,20 +31,12 @@ use crossterm::execute;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-// ════════════════════════════════════════════════════════════════════════════
-// CLI
-// ════════════════════════════════════════════════════════════════════════════
-mod cli;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Config file: ~/.config/music_display/config.toml (flags > file > built-in defaults)
-// ════════════════════════════════════════════════════════════════════════════
-mod config;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Small shared helpers
-// ════════════════════════════════════════════════════════════════════════════
-mod util;
+// The core (players, lyrics, chords, Spotify, translation, config…) lives in the library crate
+// and has no terminal code; re-imported here so the TUI modules keep addressing it as `crate::x`.
+use music_display::{
+    AppEvent, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
+    spotifyd, tags, translate, ug, util, year,
+};
 
 // ════════════════════════════════════════════════════════════════════════════
 // Theme detection
@@ -52,125 +44,13 @@ mod util;
 mod theme;
 
 // ════════════════════════════════════════════════════════════════════════════
-// Player (playerctl / MPRIS)
-// ════════════════════════════════════════════════════════════════════════════
-mod player;
-
-// Windows replacement for playerctl: the system media session (SMTC)
-#[cfg(any(windows, test))]
-mod smtc;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Spotify Web API (--spotify): PKCE login, library, playback on any device
-// ════════════════════════════════════════════════════════════════════════════
-mod spotify;
-
-// ════════════════════════════════════════════════════════════════════════════
 // Library browser / settings widgets (text input, lists, device picker)
 // ════════════════════════════════════════════════════════════════════════════
 mod browser;
 
 // ════════════════════════════════════════════════════════════════════════════
-// Release-year resolution: contentCreated → cache → MusicBrainz → iTunes
-// ════════════════════════════════════════════════════════════════════════════
-mod tags;
-
-// ════════════════════════════════════════════════════════════════════════════
-mod year;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Synced lyrics (lrclib.net)
-// ════════════════════════════════════════════════════════════════════════════
-mod lyrics;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Cover art: fetch (file:// or http), cache in /tmp, downscale + duotone tint
-// ════════════════════════════════════════════════════════════════════════════
-mod translate;
-
-// ════════════════════════════════════════════════════════════════════════════
-mod cover;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Cava: headless raw ASCII output
-// ════════════════════════════════════════════════════════════════════════════
-mod cava;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Guitar chords: sheet model, parsers, transpose, matching onto synced lyrics
-// ════════════════════════════════════════════════════════════════════════════
-mod chords;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Ultimate Guitar lookup (opt-in: --chords-ug). Unofficial: the site has no public API, so
-// this reads the JSON blob embedded in its pages and is written to fail soft.
-// ════════════════════════════════════════════════════════════════════════════
-mod ug;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Member parts (experimental, opt-in: --member-parts). Genius has no open API for this, so
-// the song page is scraped for section headers like `[Verse 1: Jimin]` and everything
-// is written to fail soft and silent.
-// ════════════════════════════════════════════════════════════════════════════
-mod genius;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Guitar chord diagrams (standard tuning, strings low E → high e)
-// ════════════════════════════════════════════════════════════════════════════
-mod diagram;
-
-// ════════════════════════════════════════════════════════════════════════════
 // Application state + event handling
 // ════════════════════════════════════════════════════════════════════════════
-pub enum AppEvent {
-    Player(Option<player::Snapshot>),
-    Year {
-        key: u64,
-        year: Option<String>,
-    },
-    Lyrics {
-        key: u64,
-        lyrics: lyrics::Lyrics,
-    },
-    /// Every lyrics version lrclib has for the song (kind, text), best first.
-    LyricVersions {
-        key: u64,
-        list: Vec<(String, String)>,
-    },
-    Cover {
-        url: String,
-        loaded: Option<cover::Loaded>,
-    },
-    Chords {
-        key: u64,
-        sheet: Result<Option<chords::Sheet>, String>,
-        /// Saved per-track capo override, if any.
-        capo: Option<u8>,
-    },
-    /// Tags read from a local file (`None` = unreadable).
-    Tags {
-        url: String,
-        tags: Option<tags::Tags>,
-    },
-    Translated {
-        key: u64,
-        lang: String,
-        lines: Result<(Vec<String>, &'static str), String>,
-    },
-    /// Lines with the members singing them, from Genius (empty = nothing usable).
-    Members {
-        key: u64,
-        parts: Vec<genius::Part>,
-    },
-    Cava(Vec<u16>),
-    /// Informational status while cava has produced nothing yet.
-    CavaNote(String),
-    /// cava failed or exited; the task is gone and `c` twice restarts it.
-    CavaError(String),
-    /// Spotify Web API results (`--spotify`).
-    Spotify(spotify::Reply),
-}
-
 mod app;
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -187,21 +67,6 @@ mod bigfont;
 // Rendering
 // ════════════════════════════════════════════════════════════════════════════
 mod ui;
-
-// ════════════════════════════════════════════════════════════════════════════
-// --setup: guided spotifyd + Spotify login
-// ════════════════════════════════════════════════════════════════════════════
-mod setup;
-
-// ════════════════════════════════════════════════════════════════════════════
-// spotifyd: started with the app when use_spotifyd is on
-// ════════════════════════════════════════════════════════════════════════════
-mod spotifyd;
-
-// ════════════════════════════════════════════════════════════════════════════
-// Termination signals (Unix signals / Windows console events)
-// ════════════════════════════════════════════════════════════════════════════
-mod shutdown;
 
 // ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown

@@ -206,7 +206,7 @@ pub fn sheet_from_store(store: &Value) -> Option<Sheet> {
 async fn get(c: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<String, String> {
     match get_once(c, url, query).await {
         Err((true, _)) => {
-            tokio::time::sleep(std::time::Duration::from_millis(if cfg!(test) { 20 } else { 800 })).await;
+            tokio::time::sleep(std::time::Duration::from_millis(if crate::util::testing() { 20 } else { 800 })).await;
             get_once(c, url, query).await.map_err(|e| e.1)
         }
         r => r.map_err(|e| e.1),
@@ -266,13 +266,13 @@ pub fn disabled() -> bool {
     true
 }
 
-#[cfg(test)]
+#[doc(hidden)] // test hook, used by the binary's tests too
 pub fn reset_breaker() {
     FAILS.store(0, Ordering::Relaxed);
     LAST_FAIL.store(0, Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 pub fn set_last_fail(secs: u64) {
     LAST_FAIL.store(secs, Ordering::Relaxed);
 }

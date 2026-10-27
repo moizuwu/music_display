@@ -1,6 +1,5 @@
 use crate::chords;
 use crate::util::{cache_dir, fnv1a, now_secs};
-use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,21 +20,6 @@ struct CacheEntry {
     kind: String, // found | none
     parts: Vec<Part>,
     saved: u64,
-}
-
-/// A stable colour per member name, from the terminal's own ANSI palette.
-pub fn color(name: &str) -> Color {
-    const PALETTE: [Color; 8] = [
-        Color::LightMagenta,
-        Color::LightCyan,
-        Color::LightYellow,
-        Color::LightGreen,
-        Color::LightBlue,
-        Color::LightRed,
-        Color::Magenta,
-        Color::Green,
-    ];
-    PALETTE[(fnv1a(&name.to_lowercase()) % PALETTE.len() as u64) as usize]
 }
 
 // ── page parsing ───────────────────────────────────────────────────────
