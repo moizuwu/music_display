@@ -3541,3 +3541,15 @@ fn file_urls_round_trip_on_both_systems() {
     assert_eq!(path_from_url("file:///C:/Music/a.flac"), Some(PathBuf::from("C:/Music/a.flac")));
     assert_eq!(path_from_url("https://x/y"), None);
 }
+
+#[test]
+fn changelog_keeps_an_unreleased_section_and_the_release_links() {
+    let log = include_str!("../CHANGELOG.md");
+    assert!(log.contains("\n## [Unreleased]\n"));
+    assert!(log.contains("\n[Unreleased]: https://github.com/"));
+    // the newest release heading is never older than the version in Cargo.toml
+    let head = log.lines().find(|l| l.starts_with("## [") && !l.contains("Unreleased")).unwrap();
+    let newest = head.trim_start_matches("## [").split(']').next().unwrap();
+    let ver = |s: &str| s.split('.').map(|n| n.parse::<u32>().unwrap()).collect::<Vec<_>>();
+    assert!(ver(newest) >= ver(env!("CARGO_PKG_VERSION")), "{newest} vs {}", env!("CARGO_PKG_VERSION"));
+}
