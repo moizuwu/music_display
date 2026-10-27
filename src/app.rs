@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::TranslateMode;
 use crate::lyrics::Lyrics;
 use crate::player::{Snapshot, Status};
 use crate::theme::Rgb;
@@ -243,6 +244,7 @@ pub enum Setting {
     ChordsMatch,
     MemberParts,
     Translate,
+    TranslateMode,
     TranslateLang,
     TranslateSkip,
     TranslateFallback,
@@ -319,6 +321,7 @@ impl Setting {
         Setting::ChordsMatch,
         Setting::MemberParts,
         Setting::Translate,
+        Setting::TranslateMode,
         Setting::TranslateLang,
         Setting::TranslateSkip,
         Setting::TranslateFallback,
@@ -357,6 +360,7 @@ impl Setting {
             Setting::ChordsMatch => "Chord match threshold (%)",
             Setting::MemberParts => "Member parts (experimental)",
             Setting::Translate => "Translate lyrics",
+            Setting::TranslateMode => "Translation shown as",
             Setting::TranslateLang => "Translate into",
             Setting::TranslateSkip => "Never translate",
             Setting::TranslateFallback => "LibreTranslate fallback",
@@ -396,7 +400,7 @@ impl Setting {
             Setting::ChordsUg => &["chords_ug"],
             Setting::ChordsMatch => &["chords_match"],
             Setting::MemberParts => &["member_parts"],
-            Setting::Translate => &["translate"],
+            Setting::Translate | Setting::TranslateMode => &["translate", "translate_mode"],
             Setting::TranslateLang => &["translate_lang"],
             Setting::TranslateSkip => &["translate_skip"],
             Setting::TranslateFallback => &["translate_fallback"],
@@ -729,7 +733,9 @@ impl App {
             preload_at: None,
         };
         app.sync_queue_tab();
-        app.translate_on = app.args.translate;
+        let start = app.args.start_translate_mode();
+        app.translate_on = start != TranslateMode::Off;
+        app.translate_both = start == TranslateMode::Both;
         app.vol_step = app.args.volume_step;
         if app.args.cava || app.args.thirdpanel || app.args.underlyrics {
             app.set_cava(true);
@@ -1418,6 +1424,25 @@ impl App {
         self.ensure_translation();
     }
 
+    pub fn translate_mode(&self) -> TranslateMode {
+        match (self.translate_on, self.translate_both) {
+            (false, _) => TranslateMode::Off,
+            (true, true) => TranslateMode::Both,
+            (true, false) => TranslateMode::Translated,
+        }
+    }
+
+    pub fn set_translate_mode(&mut self, mode: TranslateMode) {
+        self.translate_on = mode != TranslateMode::Off;
+        self.translate_both = mode == TranslateMode::Both;
+        self.snap_scroll = true;
+        if self.translate_on {
+            self.show_lyrics = true;
+            self.translate_state = TranslateState::Idle;
+            self.ensure_translation();
+        }
+    }
+
     fn toggle_translate(&mut self) {
         self.translate_on = !self.translate_on;
         self.translate_both = false;
@@ -1455,6 +1480,7 @@ impl App {
             },
             Setting::MemberParts => onoff(self.args.member_parts),
             Setting::Translate => onoff(self.translate_on),
+            Setting::TranslateMode => format!("< {} >", self.translate_mode().name()),
             Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
             Setting::TranslateSkip => {
                 // `< sv [x] >`: ←/→ pick a language, space adds or removes it
@@ -1550,6 +1576,7 @@ impl App {
             }
             Setting::MemberParts => self.toggle_member_parts(),
             Setting::Translate => self.toggle_translate(),
+            Setting::TranslateMode => self.set_translate_mode(self.translate_mode().step(dir)),
             Setting::TranslateLang => {
                 let cur = LANGS.iter().position(|l| *l == self.args.translate_lang);
                 let n = LANGS.len() as i32;
@@ -1696,6 +1723,7 @@ impl App {
             ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
             ("translate", B(self.translate_on)),
+            ("translate_mode", S(self.translate_mode().name().to_string())),
             ("translate_lang", S(self.args.translate_lang.clone())),
             ("translate_skip", S(self.args.translate_skip.clone())),
             ("translate_fallback", B(self.args.translate_fallback)),

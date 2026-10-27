@@ -1526,6 +1526,47 @@ fn cfg_run(file: &str, argv: &[&str]) -> (cli::Args, Vec<String>) {
 }
 
 #[test]
+fn translate_mode_config_flag_and_menu() {
+    use cli::TranslateMode::{Both, Off, Translated};
+    // default off; the old `translate` switch still means "translated"
+    assert_eq!(cfg_run("", &[]).0.start_translate_mode(), Off);
+    assert_eq!(cfg_run("translate = true\n", &[]).0.start_translate_mode(), Translated);
+    // the file's mode, then the flag beating the file
+    assert_eq!(cfg_run("translate_mode = \"both\"\n", &[]).0.start_translate_mode(), Both);
+    let (a, w) = cfg_run("translate_mode = \"both\"\n", &["--translate-mode", "off"]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(a.start_translate_mode(), Off);
+    // --translate on the command line beats a mode from the file
+    assert_eq!(cfg_run("translate_mode = \"both\"\n", &["--translate"]).0.start_translate_mode(), Translated);
+    // a bad word is reported and ignored
+    let (a, w) = cfg_run("translate_mode = \"sideways\"\n", &[]);
+    assert_eq!(a.start_translate_mode(), Off);
+    assert!(w.iter().any(|x| x.contains("translate_mode") && x.contains("off, both, translated")), "{w:?}");
+    // the settings row cycles all three and wraps
+    assert_eq!(Off.step(1), Both);
+    assert_eq!(Both.step(1), Translated);
+    assert_eq!(Translated.step(1), Off);
+    assert_eq!(Off.step(-1), Translated);
+}
+
+#[tokio::test]
+async fn translate_mode_row_drives_the_lyrics_panel() {
+    use cli::TranslateMode::{Both, Off, Translated};
+    let mut app = test_app();
+    assert_eq!(app.translate_mode(), Off);
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!((app.translate_mode(), app.translate_both), (Both, true));
+    assert_eq!(app.setting_value(app::Setting::TranslateMode), "< both >");
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!((app.translate_mode(), app.translate_both), (Translated, false));
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!(app.translate_mode(), Off);
+    // both keys are written, so the file never contradicts itself
+    let saved: Vec<_> = app.settings_values().into_iter().map(|(k, _)| k).collect();
+    assert!(saved.contains(&"translate") && saved.contains(&"translate_mode"));
+}
+
+#[test]
 fn config_precedence_and_validation() {
     let file = "player = \"spotifyd\"\noffset = -0.5\ntint = 0.25\ncava = true\ncava_bars = 32\nvolume_step = 10\ninterlude_threshold_secs = 12\nlyrics_retries = 5\nminimal_view = true\nmouse = false\nchords = true\nchords_ug = true\nthirdpanel = true\n";
     // file beats built-in defaults

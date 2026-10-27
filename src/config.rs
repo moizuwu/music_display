@@ -8,6 +8,8 @@ pub enum Kind {
     Int(i64, i64),
     Float(f64, f64),
     Str,
+    /// One of these words.
+    Choice(&'static [&'static str]),
     /// A string that may be empty.
     Text,
 }
@@ -55,6 +57,7 @@ pub const KEYS: &[Key] = &[
     k!("interlude_threshold_secs", Kind::Float(1.0, 120.0), "interlude_secs"),
     k!("lyrics_retries", Kind::Int(0, 10), "lyrics_retries"),
     k!("translate", Kind::Bool, "translate"),
+    k!("translate_mode", Kind::Choice(crate::cli::TranslateMode::NAMES), "translate_mode"),
     k!("translate_lang", Kind::Str, "translate_lang"),
     k!("translate_skip", Kind::Text, "translate_skip"),
     k!("translate_fallback", Kind::Bool, "translate_fallback"),
@@ -86,6 +89,10 @@ fn check(kind: &Kind, v: &toml::Value) -> Result<(), String> {
         Kind::Str => match v.as_str() {
             Some(s) if !s.trim().is_empty() => Ok(()),
             _ => Err("expected a non-empty string".into()),
+        },
+        Kind::Choice(words) => match v.as_str() {
+            Some(s) if words.contains(&s.trim().to_ascii_lowercase().as_str()) => Ok(()),
+            _ => Err(format!("expected one of {}", words.join(", "))),
         },
         Kind::Int(lo, hi) => match v.as_integer() {
             Some(n) if (*lo..=*hi).contains(&n) => Ok(()),
@@ -148,6 +155,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "interlude_threshold_secs" => args.interlude_secs = f(),
         "lyrics_retries" => args.lyrics_retries = i() as u32,
         "translate" => args.translate = b(),
+        "translate_mode" => args.translate_mode = crate::cli::TranslateMode::parse(&st()),
         "translate_lang" => args.translate_lang = st(),
         "translate_skip" => args.translate_skip = st(),
         "translate_fallback" => args.translate_fallback = b(),
@@ -215,6 +223,12 @@ pub fn apply(
             continue; // an explicit flag beats the file
         }
         set(args, name, v);
+    }
+    // `--translate` on the command line beats a mode from the file (only --translate-mode beats it)
+    if m.value_source("translate") == Some(ValueSource::CommandLine)
+        && m.value_source("translate_mode") != Some(ValueSource::CommandLine)
+    {
+        args.translate_mode = None;
     }
     problems.sort();
     for (_, p) in problems {
@@ -309,6 +323,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("interlude_threshold_secs", format!("{:?}", args.interlude_secs));
     line("lyrics_retries", args.lyrics_retries.to_string());
     line("translate", args.translate.to_string());
+    line("translate_mode", q(args.start_translate_mode().name()));
     line("translate_lang", q(&args.translate_lang));
     line("translate_skip", q(&args.translate_skip));
     line("translate_fallback", args.translate_fallback.to_string());

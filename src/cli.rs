@@ -1,6 +1,50 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// What the lyrics panel shows when a translation exists.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TranslateMode {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // The original line only.
+    #[default]
+    Off,
+    // The original line with its translation underneath.
+    Both,
+    // The translation replaces the original line.
+    Translated,
+}
+
+impl TranslateMode {
+    pub const NAMES: &'static [&'static str] = &["off", "both", "translated"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "both" => Some(Self::Both),
+            "translated" => Some(Self::Translated),
+            _ => None,
+        }
+    }
+
+    /// Next / previous mode, wrapping.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
+    }
+}
+
+impl Args {
+    /// The mode the app starts in: `--translate-mode` / `translate_mode`, else `--translate`.
+    pub fn start_translate_mode(&self) -> TranslateMode {
+        self.translate_mode
+            .unwrap_or(if self.translate { TranslateMode::Translated } else { TranslateMode::Off })
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "music_display",
@@ -159,6 +203,11 @@ pub struct Args {
     /// Show lyrics translated (Google Translate, unofficial; toggle with `K`) [config: translate]
     #[arg(long)]
     pub translate: bool,
+
+    /// How translated lyrics are shown: off, both (original, then the translation underneath)
+    /// or translated (the translation replaces the line). Wins over --translate [config: translate_mode]
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub translate_mode: Option<TranslateMode>,
 
     /// Language code lyrics are translated into, e.g. en, sv, de [config: translate_lang]
     #[arg(long, default_value = "en")]
