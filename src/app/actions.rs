@@ -141,6 +141,11 @@ pub const MOUSE: &[(&str, &str, &str)] = &[
     ("Playback", "click vol %", "mute / restore"),
     ("Playback", "wheel: volume", "volume up / down"),
     ("Lyrics", "click a line's text", "seek to that line"),
+    ("View", "click [ settings ] / [ ? ]", "open the settings menu / this help"),
+    ("View", "click Key / BPM / Capo / Tuning", "open the chord diagrams"),
+    ("View", "right-click a metadata field", "menu: Hide, Move up, Move down"),
+    ("View", "drag a metadata field", "drop it on another to reorder"),
+    ("View", "drag a column border", "resize the columns (saved)"),
 ];
 
 /// The action of `code` in the default table (tests; the program uses `App::keys`).

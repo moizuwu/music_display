@@ -198,6 +198,8 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | flag | effect |
 | --- | --- |
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
+| `--layout-preset NAME` | start from a named layout: `default`, `no-lyrics`, `cava`, `under-lyrics`, `minimal`. The four flags above are shortcuts for these; a flag always beats the file. Config: `preset` in `[layout]`. |
+| `--reset-layout` | forget the saved `[layout]` (panel order, sizes, hidden fields and buttons) and start from the default. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
 | `--chords-match PERCENT` | how many percent of the lyric lines must match a chord sheet before its chords are shown (default 40). Lower it to see chords from sheets that match poorly, 0 shows every sheet; the lyrics title says `chords: weak match (N%) — hidden` when a sheet is below the limit. Also a typed row in the settings menu. |
@@ -302,7 +304,45 @@ big_scale = "2"                # unshifted keys work on any layout
 - The `?` overlay and the key hints in the footer show the keys you configured. `music_display --print-config` ends with a `[keys]` block of the effective bindings, every action with its keys, which is valid config to paste back.
 - The settings menu writes the file again when you change a setting: your `[keys]` lines are kept (as the same values, in alphabetical order), but comments in the file are not, as for every other setting.
 
+## Customizing the layout
+
+Open the settings menu (`s`, or click `[ settings ]` in the top row) and pick **Customize layout**. The page lists three groups, each in the order it is shown: **panels** (Metadata, Cover, Controls, Lyrics, Chord diagrams, Cava, Annotations, Library), **metadata fields** (title, artist, album, track_no, release, genre, tuning, capo, bpm, key) and **control buttons** (shuffle, repeat, prev, play, next, volume).
+
+| key (on the page) | effect |
+| --- | --- |
+| `↑` / `↓` | select a line |
+| `space` / `Enter` | show / hide it |
+| `u` / `d` | move it up / down in its group (the selection follows) |
+| `+` / `-` (or `→` / `←`) | give a panel 5 % more / less of the screen |
+| `a` | back to automatic sizes |
+| `r` | reset the whole layout |
+| `Esc` | back to the settings menu |
+
+With the mouse: **right-click a metadata field** for a small menu (Hide, Move up, Move down); **drag a field** onto another to reorder; **drag the border between two columns** to resize; **click Key, BPM, Capo or Tuning** to open the chord diagrams. `[ settings ]` and `[ ? ]` in the top row open the settings menu and this help.
+
+Every change is saved at once to the `[layout]` table of `config.toml` (the rest of the file, including `[keys]`, is kept; comments are not):
+
+```toml
+[layout]
+direction = "horizontal"          # or "vertical": stack the columns
+order  = ["metadata", "cover", "controls", "lyrics", "chords", "cava", "annotations", "library"]
+hidden = ["chords", "cava", "annotations", "library"]
+cava_under_lyrics = false
+[layout.size]                     # percent of the screen; a panel not listed gets the automatic size
+metadata = 40
+[layout.fields]
+order  = ["title", "artist", "album", "track_no", "release", "genre", "tuning", "capo", "bpm", "key"]
+hidden = []
+[layout.buttons]
+order  = ["shuffle", "repeat", "prev", "play", "next", "volume"]
+hidden = []
+```
+
+`order` lists everything in order and `hidden` the entries that are off, so hiding something keeps its place; an entry missing from `order` (a field added in a later version) is appended and shown. Bad names or sizes are reported on start and skipped. The column order is the order of `metadata` (the Metadata, Cover and Controls panels form the left column, stacked cover-and-metadata first or metadata first as listed), `lyrics`, `cava` and `annotations`; the chord diagrams dock beside the lyrics and the library is always the side panel on the left. Without any `[layout]` the screen is laid out exactly as before. Precedence is the usual one: flag > file > default.
+
 ## Metadata panel
+
+The fields below can be hidden and reordered (see above). `Genre` appears once a source knows it.
 
 Track, Artist and Album take a full row each. Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
 

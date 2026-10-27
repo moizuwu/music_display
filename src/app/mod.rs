@@ -13,10 +13,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 mod actions;
+mod customize;
 mod remote;
 mod settings;
 
 pub use actions::*;
+pub use customize::*;
 pub use crate::browser::{Level, Library, TABS};
 use crate::browser::{DevicePicker, Edit, TextInput};
 
@@ -116,6 +118,25 @@ pub struct Hits {
     pub vol_plus: Rect,
     /// The whole volume control (mouse-wheel target).
     pub vol_area: Rect,
+    /// The `[ settings ]` and `[ ? ]` buttons of the top row.
+    pub settings_btn: Rect,
+    pub help_btn: Rect,
+    /// Where each metadata field was drawn (click, right-click, drag).
+    pub fields: Vec<(crate::layout::MetaField, Rect)>,
+    /// The borders between columns that can be dragged.
+    pub borders: Vec<Border>,
+    /// The rows of the open field menu.
+    pub menu_items: Vec<Rect>,
+}
+
+/// A draggable border between two columns.
+#[derive(Clone, Copy)]
+pub struct Border {
+    pub rect: Rect,
+    pub left: crate::layout::PanelId,
+    /// Where the left column starts and the width both columns share, in cells.
+    pub start: u16,
+    pub total: u16,
 }
 
 /// Where each visible lyrics row came from, recorded during the last render so a click
@@ -252,6 +273,15 @@ pub struct App {
     pub lib: Library,
     /// The key table with the `[keys]` overrides of config.toml.
     pub keys: crate::keymap::Keymap,
+    /// Which panels, fields and buttons are shown, in which order (the `[layout]` table).
+    pub layout: crate::layout::Layout,
+    /// Genre of the playing track, when a source knows it.
+    pub genre: Option<String>,
+    /// The customize page of the settings menu is open, and its selected line.
+    pub customizing: bool,
+    pub cust_sel: usize,
+    pub field_menu: Option<FieldMenu>,
+    pub drag: Option<Drag>,
     /// The task polling `/me/player` while Spotify is on.
     spot_task: Option<JoinHandle<()>>,
     /// The browser login started from the settings menu, and what it says.
@@ -368,6 +398,12 @@ impl App {
             note: None,
             lib: Library::new(),
             keys: Default::default(),
+            layout: Default::default(),
+            genre: None,
+            customizing: false,
+            cust_sel: 0,
+            field_menu: None,
+            drag: None,
             spot_task: None,
             login_task: None,
             login_msg: None,
@@ -1116,6 +1152,7 @@ impl App {
             Setting::TranslateFallback => onoff(self.args.translate_fallback),
             Setting::CacheTranslations => onoff(!self.args.no_cache_translations),
             Setting::Minimal => onoff(self.minimal),
+            Setting::Customize => "enter →".to_string(),
             Setting::BigLyrics => onoff(self.big_lyrics),
             Setting::Karaoke => onoff(self.args.karaoke),
             Setting::WindowTitle => format!("< {} >", self.args.window_title),
@@ -1224,6 +1261,10 @@ impl App {
             Setting::TranslateFallback => self.args.translate_fallback = !self.args.translate_fallback,
             Setting::CacheTranslations => self.args.no_cache_translations = !self.args.no_cache_translations,
             Setting::Minimal => self.set_minimal(!self.minimal),
+            Setting::Customize => {
+                self.open_customize();
+                return;
+            }
             Setting::BigScale => {
                 self.args.big_scale = (self.args.big_scale as i32 + dir).clamp(1, 3) as u16;
                 self.snap_scroll = true;
@@ -1470,6 +1511,14 @@ impl App {
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     return true;
                 }
+                if self.field_menu.is_some() {
+                    self.handle_field_menu_key(k.code);
+                    return false;
+                }
+                if self.show_settings && self.customizing {
+                    self.handle_customize_key(k.code);
+                    return false;
+                }
                 if self.show_settings {
                     self.handle_settings_key(k.code);
                     return false;
@@ -1509,6 +1558,7 @@ impl App {
                     return self.run(a);
                 }
             }
+            Event::Mouse(m) if self.field_menu.is_some() => self.field_menu_mouse(m),
             Event::Mouse(_) if self.show_settings => {}
             Event::Mouse(m) if self.devices.is_some() => self.devices_mouse(m),
             // the toggle button works whether the browser is open or not
@@ -1524,9 +1574,25 @@ impl App {
                 MouseEventKind::ScrollDown => self.help_scroll += 2,
                 _ => {}
             },
+            // right-click a metadata field: Hide / Move up / Move down
+            Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(MouseButton::Right)) => {
+                if let Some(f) = self.field_at(m.column, m.row) {
+                    self.open_field_menu(f, m.column, m.row);
+                }
+            }
+            Event::Mouse(m) if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left)) && self.drag.is_some() => {
+                self.mouse_drag(m.column, m.row);
+            }
+            Event::Mouse(m) if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)) && self.drag.is_some() => {
+                self.mouse_up(m.column, m.row);
+            }
             Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) => {
                 let pos = Position::new(m.column, m.row);
-                if self.hits.progress.contains(pos) {
+                if self.hits.settings_btn.contains(pos) {
+                    self.run(Action::Settings);
+                } else if self.hits.help_btn.contains(pos) {
+                    self.run(Action::Help);
+                } else if self.hits.progress.contains(pos) {
                     if let Some(len) = self.snap.as_ref().map(|s| s.length).filter(|l| *l > 0.0)
                     {
                         let r = self.hits.progress;
@@ -1552,8 +1618,11 @@ impl App {
                     self.volume_step(1);
                 } else if self.hits.vol_pct.contains(pos) {
                     self.toggle_mute();
-                } else if self.lyric_hits.area.contains(pos) {
-                    self.click_lyric(pos.x, pos.y);
+                } else if crate::ui::Panel::click(&*crate::ui::panel_for(crate::layout::PanelId::Lyrics), self, pos.x, pos.y) {
+                } else {
+                    // a metadata field (click: Key / BPM / Capo / Tuning open the diagrams;
+                    // drag: reorder) or a column border (drag: resize)
+                    self.mouse_down(pos.x, pos.y);
                 }
             }
             Event::Mouse(m)
@@ -1700,7 +1769,7 @@ impl App {
     }
 
     /// Seek to the lyric line drawn at terminal row `y` (synced lyrics only).
-    fn click_lyric(&mut self, x: u16, y: u16) {
+    pub fn click_lyric(&mut self, x: u16, y: u16) {
         let h = &self.lyric_hits;
         if y < h.area.y {
             return;

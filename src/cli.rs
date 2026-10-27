@@ -36,6 +36,16 @@ pub struct Args {
     #[arg(long)]
     pub underlyrics: bool,
 
+    /// Start from a named layout: default, no-lyrics, cava, under-lyrics, minimal. The flags
+    /// above are shortcuts for these [config: [layout] preset]
+    #[arg(long, value_name = "NAME")]
+    pub layout_preset: Option<String>,
+
+    /// Forget the saved `[layout]` (panel order, sizes, hidden fields and buttons) and start
+    /// from the default [no config key]
+    #[arg(long)]
+    pub reset_layout: bool,
+
     /// MPRIS player name passed to `playerctl -p` ("any" = playerctl's default choice) [config: player]
     #[arg(long, default_value = "spotify")]
     pub player: String,

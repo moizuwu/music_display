@@ -3087,7 +3087,7 @@ async fn the_library_is_a_side_panel_when_wide_and_an_overlay_when_narrow() {
     app.args.no_spotify_button = true;
     render(&mut app, 120, 30);
     assert!(app.lib.hits.button.width == 0 && app.lib.hits.panel);
-    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 0, width: ui::PANEL_WIDTH, height: 29 }, "the panel gets the strip's row");
+    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 1, width: ui::PANEL_WIDTH, height: 28 }, "the strip stays: it holds [ settings ] and [ ? ]");
     app.args.no_spotify_button = false;
     render(&mut app, 120, 9);
     assert_eq!(app.lib.hits.button.width, 0);
@@ -3552,4 +3552,295 @@ fn changelog_keeps_an_unreleased_section_and_the_release_links() {
     let newest = head.trim_start_matches("## [").split(']').next().unwrap();
     let ver = |s: &str| s.split('.').map(|n| n.parse::<u32>().unwrap()).collect::<Vec<_>>();
     assert!(ver(newest) >= ver(env!("CARGO_PKG_VERSION")), "{newest} vs {}", env!("CARGO_PKG_VERSION"));
+}
+
+// ── Phase 2: layout, customize page, mouse editing ──────────────────────────
+
+fn playing_app() -> app::App {
+    let mut app = test_app();
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    app
+}
+
+fn row_of(screen: &[String], needle: &str) -> Option<usize> {
+    screen.iter().position(|r| r.contains(needle))
+}
+
+#[tokio::test]
+async fn metadata_fields_follow_the_layout() {
+    use layout::{Item, MetaField};
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let (t, a) = (row_of(&s, "Track ").unwrap(), row_of(&s, "Album ").unwrap());
+    assert!(t < a, "Track above Album by default");
+    // Album above Title
+    app.layout.fields.shift(MetaField::Album, -2);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Album ").unwrap() < row_of(&s, "Track ").unwrap());
+    // hidden fields vanish, the rest keeps its place
+    app.layout.fields.set(MetaField::Artist, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Artist ").is_none() && row_of(&s, "Album ").is_some());
+    assert!(app.hits.fields.iter().all(|(f, _)| *f != MetaField::Artist));
+    // a field on the right-hand side can move above the first one: one row each, in order
+    app.layout.fields.set(MetaField::Bpm, true);
+    app.layout.fields.move_to(MetaField::Release, MetaField::Album);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Release ").unwrap() < row_of(&s, "Album ").unwrap());
+    let _ = MetaField::ALL;
+}
+
+#[tokio::test]
+async fn cover_and_controls_can_be_switched_off() {
+    use layout::{Button, PanelId};
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_some() && app.hits.play.width > 0);
+    app.layout.buttons.set(Button::Shuffle, false);
+    app.layout.buttons.set(Button::Next, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_some() && row_of(&s, "[ next ]").is_none());
+    assert_eq!(app.hits.next.width, 0, "a hidden button is not clickable either");
+    app.layout.panels.set(PanelId::Controls, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_none() && app.hits.progress.width == 0);
+    app.layout.panels.set(PanelId::Metadata, false);
+    app.layout.panels.set(PanelId::Cover, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Roygbiv").is_none(), "{s:#?}");
+}
+
+#[tokio::test]
+async fn panels_follow_their_order_and_size() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    render(&mut app, 100, 30);
+    let classic = app.hits.progress;
+    assert!(classic.x < 50, "the player column is on the left");
+    app.layout.panels.shift(PanelId::Lyrics, -3); // lyrics first
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.x >= 50, "now the player column is on the right: {:?}", app.hits.progress);
+    // an explicit size
+    app.layout = layout::Layout::default();
+    app.layout.set_size(PanelId::Metadata, 70);
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.right() > 55, "{:?}", app.hits.progress);
+    // vertical stack: the player column sits above the lyrics
+    app.layout = layout::Layout::default();
+    app.layout.direction = layout::Split::Vertical;
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.x < 50);
+    assert!(app.hits.borders.is_empty(), "vertical splits are resized from the customize page");
+}
+
+#[tokio::test]
+async fn top_buttons_open_settings_and_help() {
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let (sb, hb) = (app.hits.settings_btn, app.hits.help_btn);
+    assert_eq!(text_at(&s, sb), "[ settings ]");
+    assert_eq!(text_at(&s, hb), "[ ? ]");
+    assert_eq!((sb.y, hb.y), (0, 0));
+    click(&mut app, sb.x + 1, sb.y);
+    assert!(app.show_settings);
+    app.show_settings = false;
+    click(&mut app, hb.x, hb.y);
+    assert!(app.show_help);
+    // no room: no buttons, no hit areas
+    app.show_help = false;
+    render(&mut app, 100, 8);
+    assert_eq!(app.hits.settings_btn.width, 0);
+}
+
+#[tokio::test]
+async fn clicking_bpm_key_capo_or_tuning_opens_the_chord_diagrams() {
+    use layout::MetaField;
+    let mut app = playing_app();
+    assert!(!app.show_diagrams);
+    assert!(!app.open_diagrams_for(MetaField::Album), "other fields do nothing");
+    assert!(app.open_diagrams_for(MetaField::Bpm));
+    assert!(app.show_diagrams && app.show_lyrics && app.layout.panels.shown(layout::PanelId::Chords));
+    // through the mouse: a click on a drawn Release field does not
+    app.show_diagrams = false;
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Release).unwrap();
+    click(&mut app, r.x, r.y);
+    app.handle(mouse(Mk::Up(MouseButton::Left), r.x, r.y));
+    assert!(!app.show_diagrams);
+}
+
+#[tokio::test]
+async fn right_click_menu_hides_and_moves_a_field() {
+    use layout::{Item, MetaField};
+    let (mut app, cfg) = settings_app("fieldmenu");
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Artist).unwrap();
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x + 1, r.y));
+    assert_eq!(app.field_menu.map(|m| m.field), Some(MetaField::Artist));
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Move up").is_some() && row_of(&s, "Hide").is_some());
+    // "Move down" by mouse: Artist swaps with Album
+    let down = app.hits.menu_items[2];
+    click(&mut app, down.x + 1, down.y);
+    assert!(app.field_menu.is_none());
+    assert!(app.layout.fields.position(MetaField::Artist) > app.layout.fields.position(MetaField::Album));
+    // "Hide" by keyboard
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Album).unwrap();
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x, r.y));
+    app.handle(key(crossterm::event::KeyCode::Enter));
+    assert!(!app.layout.fields.shown(MetaField::Album));
+    // everything was saved as [layout]
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[layout.fields]") && saved.contains("album"), "{saved}");
+    // a click elsewhere just closes the menu
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x, r.y));
+    app.handle(mouse(Mk::Down(MouseButton::Left), 0, 29));
+    assert!(app.field_menu.is_none());
+    let _ = MetaField::ALL;
+}
+
+#[tokio::test]
+async fn dragging_a_field_reorders_and_dragging_a_border_resizes() {
+    use layout::{MetaField, PanelId};
+    let (mut app, cfg) = settings_app("dragging");
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    render(&mut app, 100, 30);
+    let find = |app: &app::App, f: MetaField| app.hits.fields.iter().find(|(x, _)| *x == f).unwrap().1;
+    let (album, title) = (find(&app, MetaField::Album), find(&app, MetaField::Title));
+    app.handle(mouse(Mk::Down(MouseButton::Left), album.x, album.y));
+    app.handle(mouse(Mk::Drag(MouseButton::Left), title.x, title.y));
+    app.handle(mouse(Mk::Up(MouseButton::Left), title.x, title.y));
+    assert_eq!(app.layout.fields.items[0].0, MetaField::Album, "dropped on Track: Album takes its place");
+    // the border between the player column and the lyrics
+    render(&mut app, 100, 30);
+    let b = app.hits.borders[0];
+    assert_eq!(b.left, PanelId::Metadata);
+    assert!(app.layout.is_automatic());
+    app.handle(mouse(Mk::Down(MouseButton::Left), b.rect.x, b.rect.y + 2));
+    app.handle(mouse(Mk::Drag(MouseButton::Left), 60, b.rect.y + 2));
+    app.handle(mouse(Mk::Up(MouseButton::Left), 60, b.rect.y + 2));
+    assert_eq!(app.layout.size_of(PanelId::Metadata), Some(60));
+    assert!(!app.layout.is_automatic());
+    render(&mut app, 100, 30);
+    assert!(app.hits.borders[0].rect.x >= 58 && app.hits.borders[0].rect.x <= 60, "{:?}", app.hits.borders[0].rect);
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("metadata = 60"));
+}
+
+#[tokio::test]
+async fn customize_page_toggles_moves_resizes_and_resets() {
+    use crossterm::event::KeyCode as K;
+    use layout::{MetaField, PanelId};
+    let (mut app, cfg) = settings_app("customize");
+    app.snap = Some(snap("A", "B", "C"));
+    app.show_settings = true;
+    let idx = app::Setting::ALL.iter().position(|s| *s == app::Setting::Customize).unwrap();
+    app.settings_sel = idx;
+    app.handle(key(K::Enter));
+    assert!(app.customizing);
+    let s = render(&mut app, 100, 40);
+    assert!(row_of(&s, "customize layout").is_some() && row_of(&s, "Metadata fields").is_some());
+    // first line: Metadata panel. Down to Cover, hide it
+    app.handle(key(K::Down));
+    app.handle(key(K::Char(' ')));
+    assert!(!app.layout.panels.shown(PanelId::Cover));
+    // move Lyrics up (reorder keeps the selection on it)
+    while app.cust_items()[app.cust_sel] != app::CustItem::Panel(PanelId::Lyrics) {
+        app.handle(key(K::Down));
+    }
+    app.handle(key(K::Char('u')));
+    assert_eq!(app.cust_items()[app.cust_sel], app::CustItem::Panel(PanelId::Lyrics));
+    assert!(app.layout.panels.position(PanelId::Lyrics) < app.layout.panels.position(PanelId::Controls));
+    // resize it: + starts from its automatic share
+    app.handle(key(K::Char('+')));
+    assert_eq!(app.layout.size_of(PanelId::Lyrics), Some(65));
+    app.handle(key(K::Char('-')));
+    app.handle(key(K::Char('-')));
+    assert_eq!(app.layout.size_of(PanelId::Lyrics), Some(55));
+    // a field
+    while app.cust_items()[app.cust_sel] != app::CustItem::Field(MetaField::Genre) {
+        app.handle(key(K::Down));
+    }
+    app.handle(key(K::Enter));
+    assert!(!app.layout.fields.shown(MetaField::Genre));
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[layout]") && saved.contains("hidden"), "{saved}");
+    // auto sizes, then reset everything
+    app.handle(key(K::Char('a')));
+    assert!(app.layout.sizes.is_empty());
+    app.handle(key(K::Char('r')));
+    assert_eq!(app.layout, layout::Layout::default());
+    // Esc leaves the page, not the settings menu
+    app.handle(key(K::Esc));
+    assert!(!app.customizing && app.show_settings);
+}
+
+#[tokio::test]
+async fn layout_loads_from_the_file_and_flags_win() {
+    use clap::Parser;
+    use layout::PanelId;
+    let dir = tmp("layoutload");
+    let cfg = dir.join("config.toml");
+    std::fs::write(
+        &cfg,
+        "player = \"spotify\"\n[layout]\norder = [\"lyrics\", \"metadata\"]\nhidden = [\"cava\"]\n[layout.size]\nlyrics = 30\n[layout.fields]\nhidden = [\"track_no\"]\n[keys]\nquit = \"x\"\n",
+    )
+    .unwrap();
+    let args = cli::Args::parse_from(["x"]);
+    let mut warns = Vec::new();
+    let l = config::load_layout(&args, &cfg, &mut |w| warns.push(w));
+    assert!(warns.is_empty(), "{warns:?}");
+    assert_eq!(l.panels.items[0].0, PanelId::Lyrics);
+    assert_eq!(l.size_of(PanelId::Lyrics), Some(30));
+    assert!(!l.fields.shown(layout::MetaField::TrackNo));
+    // a flag beats the file; --layout-preset replaces it; --reset-layout ignores it
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--nolyrics"]), &cfg, &mut |_| {});
+    assert!(!l.panels.shown(PanelId::Lyrics));
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--layout-preset", "under-lyrics"]), &cfg, &mut |_| {});
+    assert!(l.cava_under_lyrics && l.is_automatic());
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--reset-layout"]), &cfg, &mut |_| {});
+    assert!(l.is_automatic());
+    let mut w = Vec::new();
+    config::load_layout(&cli::Args::parse_from(["x", "--layout-preset", "wat"]), &cfg, &mut |m| w.push(m));
+    assert!(w[0].contains("unknown preset"), "{w:?}");
+    // the [layout] table does not trip the unknown-key warning, and [keys] survives a save
+    let (_, warns) = cfg_run(&std::fs::read_to_string(&cfg).unwrap(), &[]);
+    assert!(warns.is_empty(), "{warns:?}");
+    config::save_layout(&cfg, &layout::Layout::default()).unwrap();
+    let raw = std::fs::read_to_string(&cfg).unwrap();
+    assert!(raw.contains("quit") && raw.contains("player"), "{raw}");
+    // --reset-layout also removes the saved table
+    config::forget_layout(&cfg).unwrap();
+    assert!(!std::fs::read_to_string(&cfg).unwrap().contains("[layout"));
+}
+
+#[tokio::test]
+async fn layout_sets_the_start_state() {
+    use layout::PanelId;
+    let mut app = test_app();
+    let l = layout::Layout::default().with_flags(true, true, false);
+    app.set_layout(l);
+    assert!(!app.show_lyrics && app.show_cava);
+    let mut app = test_app();
+    app.set_layout(layout::Layout::preset("under-lyrics").unwrap());
+    assert!(app.show_cava && app.placement == app::CavaPlacement::UnderLyrics);
+    let mut app = test_app();
+    let mut l = layout::Layout::default();
+    l.panels.set(PanelId::Chords, true);
+    app.set_layout(l);
+    assert!(app.show_diagrams);
+}
+
+#[test]
+fn every_panel_id_has_a_panel_with_a_section_and_a_minimum_size() {
+    use layout::{Item, PanelId};
+    for id in PanelId::ALL {
+        let p = ui::panel_for(*id);
+        assert_eq!(p.id(), *id);
+        assert!(!p.title().is_empty() && p.config_section().starts_with("layout"));
+        let (w, h) = p.min_size();
+        assert!(w >= 8 && h >= 1);
+    }
+    assert_eq!(ui::panel_for(PanelId::Metadata).config_section(), "layout.fields");
 }

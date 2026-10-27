@@ -130,7 +130,27 @@ pub(super) fn labels_width(labels: &[(u8, &str)], gap: u16) -> u16 {
 /// it is dropped, never cut. Order of giving up: full labels with the volume beside them, volume
 /// on its own row (`row_ok`: there is a spare row), compact labels, shuffle / repeat, the
 /// volume (percentage, then the whole control), and last prev / next; play stays longest.
+#[cfg(test)]
 pub fn plan_controls(width: u16, shuffle: Option<bool>, rep: Option<bool>, playing: bool, volume: bool, row_ok: bool) -> ControlPlan {
+    plan_controls_shown(width, shuffle, rep, playing, volume, row_ok, &[true; 5])
+}
+
+/// [`plan_controls`] with some buttons switched off: `shown` is indexed by button id
+/// (shuffle, repeat, prev, play, next). The volume control is switched off with `volume`.
+pub fn plan_controls_shown(
+    width: u16,
+    shuffle: Option<bool>,
+    rep: Option<bool>,
+    playing: bool,
+    volume: bool,
+    row_ok: bool,
+    shown: &[bool; 5],
+) -> ControlPlan {
+    let labels_for = |compact: bool, modes: bool, shuffle, rep| {
+        let mut l = ctl_labels(compact, modes, shuffle, rep, playing);
+        l.retain(|b| shown[b.0 as usize]);
+        l
+    };
     // (compact labels, with shuffle / repeat, volume kind, volume on its own row)
     let mut cands: Vec<(bool, bool, Option<VolKind>, bool)> = Vec::new();
     let vols = |k: VolKind| if volume { Some(k) } else { None };
@@ -152,7 +172,7 @@ pub fn plan_controls(width: u16, shuffle: Option<bool>, rep: Option<bool>, playi
     cands.push((true, false, None, false));
     for (compact, modes, vol, on_row) in cands {
         let gap = if compact { CTL_GAP_COMPACT } else { CTL_GAP };
-        let labels = ctl_labels(compact, modes, shuffle, rep, playing);
+        let labels = labels_for(compact, modes, shuffle, rep);
         let t = labels_width(&labels, gap);
         let vw = vol.map_or(0, VolKind::width);
         let total = if vol.is_some() && !on_row { t + gap + vw } else { t };
@@ -169,7 +189,7 @@ pub fn plan_controls(width: u16, shuffle: Option<bool>, rep: Option<bool>, playi
         return ControlPlan { buttons, vol, vol_row: on_row };
     }
     // Too narrow even for the compact row: play first, then next, then prev, as many as fit
-    let labels = ctl_labels(true, false, None, None, playing);
+    let labels = labels_for(true, false, None, None);
     for keep in [&[3u8][..], &[3, 4], &[2, 3, 4]].iter().rev() {
         let set: Vec<_> = labels.iter().filter(|l| keep.contains(&l.0)).copied().collect();
         let t = labels_width(&set, CTL_GAP_COMPACT);

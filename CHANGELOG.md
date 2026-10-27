@@ -13,7 +13,21 @@ which turns the `Unreleased` section into that version.
 - `--version` and the settings menu show the build as `0.1.0 (a1b2c3d, dirty)`: the version, the
   git commit and whether the working tree had uncommitted changes.
 
+- Layout customization: a `[layout]` table in `config.toml` (panel order, visibility, size in
+  percent, split direction, metadata field order and visibility, control buttons), the
+  **Customize layout** page in the settings menu, `--layout-preset NAME` and `--reset-layout`. The
+  old flags (`--nolyrics`, `--cava`, `--thirdpanel`, `--underlyrics`) are now presets of it.
+- Metadata fields are an ordered list (`title`, `artist`, `album`, `track_no`, `release`,
+  `genre`, `tuning`, `capo`, `bpm`, `key`), each shown or hidden in any order.
+- `[ settings ]` and `[ ? ]` buttons in the top row; clicking Key, BPM, Capo or Tuning opens the chord
+  diagrams; right-click a metadata field for Hide / Move up / Move down; drag a field to reorder
+  and a column border to resize.
+- Core modules for the next features, not wired up yet: `genre` (tag normalisation, MusicBrainz
+  ranking), `ai` (whole-song translation through any OpenAI-compatible endpoint, Gemini, Claude or
+  OpenAI) and `layout`.
+
 ### Changed
+- The top row is always there (it holds the new buttons and, with Spotify, `[ library ]`).
 - The core (players, lyrics, chords, translation, Spotify, config, cover decoding, cava) is now a
   library crate with no terminal code, so another front end can reuse it. `ui.rs` and `app.rs`
   are split into one file per panel / concern. No behaviour change.

@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 // and has no terminal code; re-imported here so the TUI modules keep addressing it as `crate::x`.
 use music_display::{
     AppEvent, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
-    spotifyd, tags, translate, ug, util, year,
+    spotifyd, tags, translate, ug, util, year, layout,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -111,6 +111,12 @@ async fn main() -> Result<()> {
         ug::probe(&client, &p[0], &p[1], args.probe_save.clone()).await;
         return Ok(());
     }
+    if args.reset_layout {
+        if let Err(e) = config::forget_layout(&cfg_path) {
+            eprintln!("music_display: couldn't reset the layout in {}: {e}", cfg_path.display());
+        }
+    }
+    let layout = config::load_layout(&args, &cfg_path, &mut |w| eprintln!("music_display: {w}"));
     let theme = theme::load(&args);
 
     // ratatui::init = raw mode + alternate screen + a panic hook that restores both.
@@ -142,6 +148,7 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     let mut app = app::App::new(args, theme, picker, tx.clone());
     app.keys = keys;
+    app.set_layout(layout);
 
     // Player workers: periodic poll + instant change stream.
     tokio::spawn(app.ctl.clone().poll_loop(tx.clone()));

@@ -196,7 +196,7 @@ pub fn apply(
     // (line, message): reported in file order, not the table's alphabetical order
     let mut problems: Vec<(usize, String)> = Vec::new();
     for (name, v) in &table {
-        if name == "keys" {
+        if name == "keys" || name == "layout" {
             continue; // the [keys] section is read by keymap::load
         }
         let line = line_of(&raw, name);
@@ -221,6 +221,44 @@ pub fn apply(
         warn(p);
     }
     true
+}
+
+/// The layout: built-in default, then the file's `[layout]`, then `--layout-preset`, then the old
+/// layout flags (a flag always beats the file). Problems go to `warn`.
+pub fn load_layout(args: &Args, path: &Path, warn: &mut dyn FnMut(String)) -> crate::layout::Layout {
+    use crate::layout::Layout;
+    let mut l = Layout::default();
+    if !args.reset_layout {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Ok(root) = raw.parse::<toml::Table>() {
+                l.read(&root, &mut |m| warn(format!("{}: {m}", path.display())));
+            }
+        }
+    }
+    if let Some(name) = &args.layout_preset {
+        match Layout::preset(name) {
+            Some(p) => l = p,
+            None => warn(format!("--layout-preset: unknown preset '{name}' (use {})", crate::layout::PRESETS.join(", "))),
+        }
+    }
+    l.with_flags(args.nolyrics, args.cava || args.thirdpanel, args.underlyrics)
+}
+
+/// Store `layout` as the `[layout]` table, keeping every other key.
+pub fn save_layout(path: &Path, layout: &crate::layout::Layout) -> std::io::Result<()> {
+    edit(path, |table| {
+        table.insert("layout".into(), toml::Value::Table(layout.write()));
+    })
+}
+
+/// `--reset-layout`: drop the saved `[layout]` table (a missing or broken file is left alone).
+pub fn forget_layout(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    edit(path, |table| {
+        table.remove("layout");
+    })
 }
 
 /// Write `values` into the config file at `path`, keeping every other key already in it,

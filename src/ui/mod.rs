@@ -1,4 +1,5 @@
 use crate::app::{App, CavaPlacement, CoverState, LyricsState, Rendered, YearState};
+use crate::layout::PanelId;
 use crate::lyrics::Lyrics;
 use crate::player::Status;
 use crate::theme::Theme;
@@ -15,6 +16,7 @@ use ratatui_image::{Image, Resize};
 
 mod cava;
 mod controls;
+mod customize;
 mod cover_art;
 mod diagrams;
 mod focus;
@@ -24,11 +26,13 @@ mod karaoke;
 mod left;
 mod library;
 mod lyrics;
+mod panels;
 mod settings;
 mod text;
 
 use cava::*;
 pub use controls::*;
+use customize::*;
 use cover_art::*;
 use diagrams::*;
 pub use focus::*;
@@ -38,6 +42,7 @@ pub use karaoke::*;
 pub use left::*;
 use library::*;
 use lyrics::*;
+pub use panels::*;
 use settings::*;
 pub use text::*;
 
@@ -69,7 +74,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.show_settings {
         draw_settings(f, app);
+        if app.customizing {
+            draw_customize(f, app);
+        }
     }
+    draw_field_menu(f, app);
 }
 
 /// Terminals at least this wide show the library as a panel beside the player; narrower
@@ -143,6 +152,11 @@ fn draw_main(f: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     app.lyric_hits = Default::default();
     app.lib.hits = Default::default();
+    app.hits.fields.clear();
+    app.hits.borders.clear();
+    app.hits.menu_items.clear();
+    app.hits.settings_btn = Rect::default();
+    app.hits.help_btn = Rect::default();
 
     // the minimal view has no room for a button or a panel: the browser is an overlay there
     if app.minimal {
@@ -153,9 +167,12 @@ fn draw_main(f: &mut Frame, app: &mut App) {
 
     // Spotify: a one-row strip with the library button, and the browser as a panel on the
     // left when the terminal is wide enough (the player keeps the rest of the width)
-    if app.spot.is_some() && !app.args.no_spotify_button && main.height >= 10 {
+    if main.height >= 10 {
         let [strip, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(main);
-        draw_library_button(f, app, strip);
+        if app.spot.is_some() && !app.args.no_spotify_button {
+            draw_library_button(f, app, strip);
+        }
+        draw_top_buttons(f, app, strip);
         main = rest;
     }
     if app.lib.open && area.width >= PANEL_MIN_WIDTH {
@@ -167,50 +184,136 @@ fn draw_main(f: &mut Frame, app: &mut App) {
     }
 
     // ── column layout ──
-    let (left, lyr, cav) = match (app.show_lyrics, app.show_cava, app.placement) {
-        (false, false, _) => (main, None, None),
+    let cols: Vec<(PanelId, Rect)> = if app.layout.is_automatic() {
+        automatic_columns(app, main)
+    } else {
+        custom_columns(app, main)
+    };
+    for (id, r) in &cols {
+        panel_for(*id).render(f, app, *r);
+    }
+    record_borders(app, main, &cols);
+    draw_footer(f, app, footer);
+}
+
+/// Weight of a column when it has no explicit size (they share what the explicit ones leave).
+fn column_weight(p: PanelId) -> u16 {
+    match p {
+        PanelId::Metadata => 40,
+        PanelId::Lyrics => 60,
+        PanelId::Cava => 28,
+        _ => 30,
+    }
+}
+
+/// The classic screen, exactly as before the layout was customisable.
+fn automatic_columns(app: &App, main: Rect) -> Vec<(PanelId, Rect)> {
+    let two = |a: u16, b: u16| -> [Rect; 2] {
+        Layout::horizontal([Constraint::Percentage(a), Constraint::Percentage(b)]).areas(main)
+    };
+    match (app.show_lyrics, app.show_cava, app.placement) {
+        (false, false, _) => vec![(PanelId::Metadata, main)],
         (true, false, _) => {
-            let [l, r] =
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .areas(main);
-            (l, Some(r), None)
+            let [l, r] = two(40, 60);
+            vec![(PanelId::Metadata, l), (PanelId::Lyrics, r)]
         }
+        // Lyrics hidden: keep the two remaining columns the same width.
         (false, true, CavaPlacement::ThirdPanel) => {
-            // Lyrics hidden: keep the two remaining columns the same width.
-            let [l, r] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(main);
-            (l, None, Some(r))
+            let [l, r] = two(50, 50);
+            vec![(PanelId::Metadata, l), (PanelId::Cava, r)]
         }
         (false, true, CavaPlacement::UnderLyrics) => {
-            let [l, r] =
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .areas(main);
-            (l, None, Some(r))
+            let [l, r] = two(40, 60);
+            vec![(PanelId::Metadata, l), (PanelId::Cava, r)]
         }
         (true, true, CavaPlacement::ThirdPanel) => {
             let [l, m, r] = three_panel(main);
-            (l, Some(m), Some(r))
+            vec![(PanelId::Metadata, l), (PanelId::Lyrics, m), (PanelId::Cava, r)]
         }
+        // the cava goes under the lyrics inside their column
         (true, true, CavaPlacement::UnderLyrics) => {
-            let [l, r] =
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .areas(main);
-            let [t, b] =
-                Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
-                    .areas(r);
-            (l, Some(t), Some(b))
+            let [l, r] = two(40, 60);
+            vec![(PanelId::Metadata, l), (PanelId::Lyrics, r)]
         }
-    };
+    }
+}
 
-    draw_left(f, app, left);
-    if let Some(r) = lyr {
-        draw_lyrics_and_diagrams(f, app, r);
+/// A layout the user arranged: columns in the chosen order and sizes, side by side or stacked.
+fn custom_columns(app: &App, main: Rect) -> Vec<(PanelId, Rect)> {
+    let under = app.show_cava && app.placement == CavaPlacement::UnderLyrics;
+    let mut ids: Vec<PanelId> = app
+        .layout
+        .column_order()
+        .into_iter()
+        .filter(|p| match p {
+            PanelId::Lyrics => app.show_lyrics,
+            PanelId::Cava => app.show_cava && !under,
+            PanelId::Annotations => false, // drawn from Phase 5 on
+            _ => true,
+        })
+        .collect();
+    // cava "under the lyrics" with no lyrics column: it stands alone
+    if under && !ids.contains(&PanelId::Lyrics) {
+        ids.push(PanelId::Cava);
     }
-    if let Some(r) = cav {
-        draw_cava(f, app, r);
+    if ids.is_empty() {
+        ids.push(PanelId::Metadata);
     }
-    draw_footer(f, app, footer);
+    let horizontal = app.layout.direction == crate::layout::Split::Horizontal;
+    let total = if horizontal { main.width } else { main.height };
+    let spec: Vec<(Option<u16>, u16)> =
+        ids.iter().map(|p| (app.layout.size_of(*p), column_weight(*p))).collect();
+    let min = if horizontal { 12 } else { 4 };
+    let sizes = crate::layout::split_sizes(total, &spec, min);
+    let mut at = if horizontal { main.x } else { main.y };
+    ids.into_iter()
+        .zip(sizes)
+        .map(|(id, n)| {
+            let r = if horizontal {
+                Rect { x: at, width: n, ..main }
+            } else {
+                Rect { y: at, height: n, ..main }
+            };
+            at += n;
+            (id, r)
+        })
+        .collect()
+}
+
+/// The border between neighbouring columns can be dragged to resize the left one.
+fn record_borders(app: &mut App, main: Rect, cols: &[(PanelId, Rect)]) {
+    if app.layout.direction != crate::layout::Split::Horizontal || app.minimal {
+        return;
+    }
+    for pair in cols.windows(2) {
+        let (id, left) = pair[0];
+        let edge = left.right().saturating_sub(1);
+        app.hits.borders.push(crate::app::Border {
+            rect: Rect { x: edge, y: left.y, width: 2, height: left.height },
+            left: id,
+            start: main.x,
+            total: main.width,
+        });
+    }
+}
+
+/// `[ settings ]  [ ? ]` at the right end of the top row.
+fn draw_top_buttons(f: &mut Frame, app: &mut App, strip: Rect) {
+    let th = app.theme.clone();
+    let (s, h) = ("[ settings ]", "[ ? ]");
+    let (sw, hw) = (s.chars().count() as u16, h.chars().count() as u16);
+    let need = sw + 1 + hw;
+    if strip.width < need + 2 {
+        return;
+    }
+    let x = strip.right() - need;
+    let sr = Rect { x, y: strip.y, width: sw, height: 1 };
+    let hr = Rect { x: x + sw + 1, y: strip.y, width: hw, height: 1 };
+    let style = Style::new().fg(th.fade(0.35));
+    f.render_widget(Paragraph::new(Span::styled(s, style)), sr);
+    f.render_widget(Paragraph::new(Span::styled(h, style)), hr);
+    app.hits.settings_btn = sr;
+    app.hits.help_btn = hr;
 }
 
 /// `M`: title, lyrics across the whole area, and a thin progress bar. No cover,
