@@ -156,6 +156,7 @@ volume_step = 5                # percent per + / - / wheel notch
 interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
 translate = false              # start with translated lyrics (toggle with K; k keeps the original line too)
+translate_mode = "off"         # off | both (original, translation underneath) | translated; wins over `translate`
 translate_lang = "en"          # language lyrics are translated into
 translate_skip = ""              # languages never translated, e.g. "sv,fi"
 translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
@@ -214,6 +215,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
 | `--translate-skip CODES` | languages that are never translated, comma separated (`sv,fi`): the song's language is asked once, from a sample of its lines, before anything is translated; if it is on the list the lyrics stay as written (the title says `never translated (sv)`) and no line is sent, and a single line detected as one of them stays as written inside a song that is translated. Legacy codes (`iw`, `jw`, `zh-CN`) are normalised. If no service can name the language (rate-limited), the translation is held, the title says so, and the check is retried every 20 s. Also in the settings menu ("Never translate": ←/→ pick a language, space adds or removes it). |
 | `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
+| `--translate-mode MODE` | how a translation is shown: `off` (original only), `both` (the original line with its translation underneath) or `translated` (the translation replaces the line). Config: `translate_mode`; a row in the settings menu ("Translation shown as", ←/→) saves it. `--translate-mode` beats everything; `--translate` on the command line beats a mode from the file; without a mode, `translate = true` means `translated`. |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |

@@ -13,6 +13,7 @@ which turns the `Unreleased` section into that version.
 - `--version` and the settings menu show the build as `0.1.0 (a1b2c3d, dirty)`: the version, the
   git commit and whether the working tree had uncommitted changes.
 
+- `translate_mode` (`off`, `both`, `translated`): flag `--translate-mode`, config key and a "Translation shown as" row in the settings menu.
 - Layout customization: a `[layout]` table in `config.toml` (panel order, visibility, size in
   percent, split direction, metadata field order and visibility, control buttons), the
   **Customize layout** page in the settings menu, `--layout-preset NAME` and `--reset-layout`. The
