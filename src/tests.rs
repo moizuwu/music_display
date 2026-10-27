@@ -3527,3 +3527,15 @@ fn the_help_overlay_edits_keys_and_saves_them() {
     assert!(!app.show_help);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn file_urls_round_trip_on_both_systems() {
+    use crate::util::{file_url, path_from_url};
+    use std::path::{Path, PathBuf};
+    assert_eq!(file_url(Path::new("/home/me/a b.flac")), "file:///home/me/a b.flac");
+    assert_eq!(file_url(Path::new("C:\\Music\\a.flac")), "file:///C:/Music/a.flac");
+    assert_eq!(path_from_url("file:///home/me/My%20Song.flac"), Some(PathBuf::from("/home/me/My Song.flac")));
+    // a drive letter loses the slash in front of it
+    assert_eq!(path_from_url("file:///C:/Music/a.flac"), Some(PathBuf::from("C:/Music/a.flac")));
+    assert_eq!(path_from_url("https://x/y"), None);
+}

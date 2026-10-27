@@ -56,18 +56,30 @@ fn read_json(name: &str) -> Option<Value> {
 /// Write through a temp file readable by the owner only, then rename over the old one.
 fn write_private(name: &str, data: &Value) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     let d = dir();
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
     let tmp = d.join(format!("{name}.tmp"));
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f
+    };
+    // the profile folder is already private to the user on Windows
+    #[cfg(not(unix))]
+    let mut f = {
+        std::fs::create_dir_all(&d)?;
+        std::fs::File::create(&tmp)?
+    };
     f.write_all(data.to_string().as_bytes())?;
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(d.join(name)); // rename does not replace on every Windows version
     std::fs::rename(tmp, d.join(name))
 }
 
@@ -314,7 +326,16 @@ pub async fn login(client_id: &str, say: &(dyn Fn(LoginStep) + Send + Sync)) -> 
         .await
         .map_err(|e| anyhow::anyhow!("can't listen on 127.0.0.1:{PORT}: {e}"))?;
     say(LoginStep::Url(url.to_string()));
-    let opened = std::process::Command::new("xdg-open")
+    #[cfg(windows)]
+    let mut opener = {
+        // the empty string is `start`'s window title; `&` in the URL is quoted by Command
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut opener = std::process::Command::new("xdg-open");
+    let opened = opener
         .arg(url.as_str())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -620,6 +641,12 @@ pub fn parse_queue(v: &Value) -> (Vec<Item>, bool) {
     (out, has_now)
 }
 
+#[cfg(windows)]
+fn hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+#[cfg(not(windows))]
 fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()

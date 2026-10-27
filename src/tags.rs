@@ -19,7 +19,7 @@ pub struct Tags {
 
 /// `file:///home/me/My%20Song.flac` → the path.
 pub fn path_of(url: &str) -> Option<PathBuf> {
-    url.strip_prefix("file://").map(|p| PathBuf::from(crate::util::percent_decode(p)))
+    crate::util::path_from_url(url)
 }
 
 /// File name without folder and extension — what to show when there are no tags at all.
@@ -42,7 +42,7 @@ pub fn read(url: &str) -> Option<Tags> {
             let p = crate::util::cache_dir().join(format!("tagart-{:016x}", crate::util::fnv1a(url)));
             std::fs::create_dir_all(p.parent()?).ok()?;
             std::fs::write(&p, pic.data()).ok()?;
-            Some(format!("file://{}", p.display()))
+            Some(crate::util::file_url(&p))
         })
         .unwrap_or_default();
     Some(Tags {

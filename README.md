@@ -4,7 +4,7 @@
 
 A terminal now-playing display: cover art, metadata, clickable controls, synced lyrics, guitar chords and cava in one zero-flicker TUI.
 
-- Works with any MPRIS player (Spotify, spotifyd, VLC, mpv, …) through `playerctl`.
+- Works with any MPRIS player (Spotify, spotifyd, VLC, mpv, …) through `playerctl` on Linux, and with anything that shows up in the system media overlay (Spotify, browsers, VLC, …) on Windows.
 - Synced lyrics from lrclib.net, optional translation, big-font active line.
 - Guitar chords from your own sheets or Ultimate Guitar, with transpose, capo and diagrams.
 - Optional Spotify integration (`--spotify`): browse your playlists, Liked Songs, albums and artists, play, queue, like and add to playlists, and see and control what plays on your phone. Needs a one-time login, see [Spotify](#spotify).
@@ -57,6 +57,47 @@ What it does: installs only what is missing (asking first, with `sudo` or `doas`
 | `--aur` | Arch: allow building a dependency from the AUR when it isn't in the official repos (needs `yay` or `paru`; `--yes` does not allow this). Normally never needed. |
 
 Other systems: install the packages above yourself, then use `cargo install` or build from source.
+
+## Install on Windows
+
+Windows 10 (1809) or newer. The program reads the same media session that the volume flyout shows, so any player that appears there works (Spotify, Chrome / Edge / Firefox, VLC, …). Use **Windows Terminal** for the best result (cover art and mouse need a modern terminal). No `playerctl` is needed.
+
+**Portable:** download `music_display.exe` from the [releases](https://github.com/moizuwu/music_display/releases) and run it from any folder; there is nothing to install. The zip holds the same exe together with this README and `install.ps1`.
+
+**From source** (PowerShell; needs git and Rust 1.90 or newer plus the MSVC build tools, see below):
+
+```powershell
+irm https://raw.githubusercontent.com/moizuwu/music_display/main/install.ps1 | iex
+```
+
+or read it first and try it out:
+
+```powershell
+irm https://raw.githubusercontent.com/moizuwu/music_display/main/install.ps1 -OutFile install.ps1
+Get-Content install.ps1
+.\install.ps1 -DryRun     # shows every step, changes nothing
+.\install.ps1
+```
+
+It checks for git and Rust (offering to install rustup with `winget`), clones the source to `%LOCALAPPDATA%\music_display\src`, builds it with `cargo build --release --locked` and copies `music_display.exe` and a short copy `mdis.exe` to `%LOCALAPPDATA%\Programs\music_display`, which it adds to your user PATH. Re-running it updates and rebuilds only if something changed. If the build says `link.exe` is missing, install the C++ build tools: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools"`.
+
+| option | effect |
+| --- | --- |
+| `-DryRun` | print the steps, change nothing |
+| `-Ref REF` | install this branch or tag instead of `main` |
+| `-Force` | rebuild even when already up to date |
+| `-Prefix DIR` | install here instead of `%LOCALAPPDATA%\Programs\music_display` |
+| `-Portable DIR` | only copy `music_display.exe` into `DIR`: no `mdis.exe`, no PATH change |
+| `-NoDeps` | install nothing (no rustup / git), only check they are there |
+
+What differs from Linux:
+
+- **No cava.** `--cava` / `c` shows "the visualizer is not available on Windows" and does nothing else.
+- **The `player` setting** is matched against the app name of the media session (`spotify`, `vlc`, `chrome`, `firefox`, `msedge`); `any` (and `local`) means whatever Windows considers the current one.
+- **No volume control** from the program: Windows does not let other programs set a player's volume through the media session. The volume control is hidden (the player reports no volume), as it is for any player that doesn't report one.
+- Local-file tags (`xesam:url`) are not available, so lyrics, chords and year use the artist and title the player reports. Config and cache live under `%APPDATA%` and `%LOCALAPPDATA%` (`music_display\`).
+- `use_spotifyd` runs `spotifyd.exe` if it is on your PATH. This is untested on Windows.
+- The Windows build is new: please report what is off.
 
 ## Build from source
 

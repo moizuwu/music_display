@@ -59,6 +59,25 @@ pub fn fnv1a(s: &str) -> u64 {
     h
 }
 
+/// The `file://` URL of a path: `/home/me/a.flac` → `file:///home/me/a.flac`,
+/// `C:\Music\a.flac` → `file:///C:/Music/a.flac`.
+pub fn file_url(path: &Path) -> String {
+    let p = path.display().to_string().replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
+/// The path in a `file://` URL (percent-decoded); `file:///C:/x` gives `C:/x`, not `/C:/x`.
+pub fn path_from_url(url: &str) -> Option<PathBuf> {
+    let p = percent_decode(url.strip_prefix("file://")?);
+    let b = p.as_bytes();
+    let drive = b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':';
+    Some(PathBuf::from(if drive { &p[1..] } else { &p }))
+}
+
 /// `~/.cache/music_display`, created on demand.
 pub fn cache_dir() -> PathBuf {
     let d = dirs::cache_dir()

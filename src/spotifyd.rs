@@ -3,6 +3,17 @@
 use std::process::{Child, Command, Stdio};
 
 /// Is a spotifyd process running (ours or not)?
+#[cfg(windows)]
+pub fn running() -> bool {
+    Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq spotifyd.exe", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("spotifyd.exe"))
+}
+
+#[cfg(not(windows))]
 pub fn running() -> bool {
     std::fs::read_dir("/proc")
         .into_iter()

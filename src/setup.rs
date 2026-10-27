@@ -299,8 +299,14 @@ pub struct Live;
 
 impl Steps for Live {
     fn which(&self, name: &str) -> Option<PathBuf> {
+        // Windows programs carry an extension (spotifyd.exe) the caller doesn't type
+        let names: Vec<String> = if cfg!(windows) && !name.contains('.') {
+            vec![format!("{name}.exe"), format!("{name}.cmd"), name.to_string()]
+        } else {
+            vec![name.to_string()]
+        };
         std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|d| d.join(name))
+            .flat_map(|d| names.iter().map(move |n| d.join(n)))
             .find(|p| p.is_file())
     }
 
