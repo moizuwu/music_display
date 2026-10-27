@@ -56,6 +56,10 @@ mod theme;
 // ════════════════════════════════════════════════════════════════════════════
 mod player;
 
+// Windows replacement for playerctl: the system media session (SMTC)
+#[cfg(any(windows, test))]
+mod smtc;
+
 // ════════════════════════════════════════════════════════════════════════════
 // Spotify Web API (--spotify): PKCE login, library, playback on any device
 // ════════════════════════════════════════════════════════════════════════════
@@ -195,6 +199,11 @@ mod setup;
 mod spotifyd;
 
 // ════════════════════════════════════════════════════════════════════════════
+// Termination signals (Unix signals / Windows console events)
+// ════════════════════════════════════════════════════════════════════════════
+mod shutdown;
+
+// ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown
 // ════════════════════════════════════════════════════════════════════════════
 #[tokio::main]
@@ -300,14 +309,13 @@ async fn run(
     // the window title this program set (None = never touched, so the old one stays)
     let mut title: Option<String> = None;
 
-    // SIGTERM / SIGHUP end the loop like `q` does, so the terminal and spotifyd are cleaned up.
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    // SIGTERM / SIGHUP (window close on Windows) end the loop like `q` does, so the
+    // terminal and spotifyd are cleaned up.
+    let mut shutdown = shutdown::Shutdown::new()?;
 
     loop {
         tokio::select! {
-            _ = term.recv() => break,
-            _ = hup.recv() => break,
+            _ = shutdown.recv() => break,
             ev = events.next() => match ev {
                 Some(Ok(ev)) => if app.handle(ev) { break },
                 Some(Err(_)) | None => break,

@@ -1,11 +1,11 @@
 use crate::theme::{Rgb, mix, readable};
-use crate::util::{fnv1a, percent_decode, tmp_dir};
+use crate::util::{fnv1a, tmp_dir};
 use image::DynamicImage;
 use image::imageops::FilterType;
 
 async fn bytes(c: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
-    if let Some(p) = url.strip_prefix("file://") {
-        return tokio::fs::read(percent_decode(p)).await.ok();
+    if let Some(p) = crate::util::path_from_url(url) {
+        return tokio::fs::read(p).await.ok();
     }
     if url.starts_with("http") {
         let path = tmp_dir().join(format!("cover-{:016x}", fnv1a(url)));

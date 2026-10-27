@@ -1,0 +1,105 @@
+name: build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Clippy
+        run: cargo clippy --locked --target ${{ matrix.target }}
+
+      # The Windows tests have not run anywhere before; they report but do not block yet.
+      - name: Test
+        continue-on-error: ${{ matrix.platform == 'windows' }}
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Name the release files
+        id: names
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then v="$GITHUB_REF_NAME"; else v="${GITHUB_SHA::7}"; fi
+          echo "base=music_display-$v-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp target/${{ matrix.target }}/release/music_display dist/stage/
+          cp README.md CHORDS.md install.sh dist/stage/
+          tar -C dist/stage -czf "dist/${{ steps.names.outputs.base }}.tar.gz" .
+          (cd dist && sha256sum "${{ steps.names.outputs.base }}.tar.gz" > "${{ steps.names.outputs.base }}.tar.gz.sha256")
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp target/${{ matrix.target }}/release/music_display.exe dist/stage/
+          cp README.md CHORDS.md install.ps1 dist/stage/
+          # the standalone portable exe, next to the zip
+          cp target/${{ matrix.target }}/release/music_display.exe dist/music_display.exe
+          (cd dist/stage && 7z a -tzip "../${{ steps.names.outputs.base }}.zip" . > /dev/null)
+          (cd dist && sha256sum "${{ steps.names.outputs.base }}.zip" music_display.exe > "${{ steps.names.outputs.base }}.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/music_display.exe
+          if-no-files-found: error
+
+  release:
+    name: publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

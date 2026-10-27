@@ -1,12 +1,20 @@
 use crate::AppEvent;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(unix)]
+use tokio::process::Command;
+
+// The playerctl text format and its parsers are only used by the Linux backend; Windows
+// reads the system media session instead (see smtc.rs). They stay compiled so the
+// parsing tests run everywhere.
 
 /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
+#[cfg_attr(windows, allow(dead_code))]
 const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +53,7 @@ impl Loop {
 }
 
 /// `playerctl shuffle` prints `On` / `Off`; anything else means the player has none.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_shuffle(out: &str) -> Option<bool> {
     match out.trim() {
         "On" => Some(true),
@@ -54,6 +63,7 @@ pub fn parse_shuffle(out: &str) -> Option<bool> {
 }
 
 /// `playerctl loop` prints `None` / `Track` / `Playlist`.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_loop(out: &str) -> Option<Loop> {
     match out.trim() {
         "None" => Some(Loop::None),
@@ -106,6 +116,7 @@ impl Snapshot {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn parse(line: &str) -> Option<Snapshot> {
     let f: Vec<&str> = line.trim_end_matches(['\n', '\r']).split('\x1f').collect();
     let url = f.get(11).map(|u| u.trim()).unwrap_or("");
@@ -152,20 +163,28 @@ fn parse(line: &str) -> Option<Snapshot> {
     })
 }
 
+
 /// Handle used by the UI to send commands to the player.
 #[derive(Clone)]
 pub struct Ctl {
     /// `-p a,b,c` (playerctl tries them in order), or empty for "any". Shared by every
     /// clone so the settings menu can switch the player while the tasks run.
+    #[cfg(unix)]
     base: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Windows: the player name to follow (part of its app id), empty = the current session.
+    #[cfg(windows)]
+    name: Arc<std::sync::RwLock<String>>,
     pub repoll: Arc<Notify>,
     /// The follow task restarts its `playerctl --follow` when this fires.
+    #[cfg(unix)]
     switched: Arc<Notify>,
     /// Last shuffle / repeat read, stamped onto every snapshot (the follow task and the
     /// poller both send them).
+    #[cfg(unix)]
     modes: Arc<std::sync::RwLock<(Option<bool>, Option<Loop>)>>,
 }
 
+#[cfg(unix)]
 fn player_args(player: &str) -> Vec<String> {
     if player == "any" || player.is_empty() {
         vec![]
@@ -175,6 +194,7 @@ fn player_args(player: &str) -> Vec<String> {
 }
 
 /// Players the settings menu cycles through; `local` is the usual desktop players.
+#[cfg(unix)]
 pub const PRESETS: &[&str] = &[
     "spotify",
     "vlc",
@@ -184,7 +204,12 @@ pub const PRESETS: &[&str] = &[
     "any",
 ];
 
+/// Windows: the names are matched against the app id of the media session.
+#[cfg(windows)]
+pub const PRESETS: &[&str] = &["spotify", "vlc", "chrome", "firefox", "msedge", "any"];
+
 /// What a menu name means to playerctl (`local` = any of the common local players).
+#[cfg(unix)]
 pub fn expand(player: &str) -> String {
     match player {
         "local" => "vlc,mpv,rhythmbox,audacious,strawberry,deadbeef,elisa,lollypop,mpd".into(),
@@ -192,6 +217,7 @@ pub fn expand(player: &str) -> String {
     }
 }
 
+#[cfg(unix)]
 impl Ctl {
     pub fn new(player: &str) -> Self {
         Ctl {
@@ -331,5 +357,72 @@ impl Ctl {
             // playerctl missing or exited: retry later, polling covers us meanwhile.
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
+    }
+}
+
+/// Windows: the system media session (SMTC) stands in for playerctl. Commands keep the
+/// playerctl spelling (`play-pause`, `next`, `position 12+`…) so the callers don't care.
+#[cfg(windows)]
+impl Ctl {
+    pub fn new(player: &str) -> Self {
+        Ctl {
+            name: Arc::new(std::sync::RwLock::new(player_name(player))),
+            repoll: Arc::new(Notify::new()),
+        }
+    }
+
+    pub fn set_player(&self, player: &str) {
+        if let Ok(mut n) = self.name.write() {
+            *n = player_name(player);
+        }
+        self.repoll.notify_one();
+    }
+
+    fn wanted(&self) -> String {
+        self.name.read().map(|n| n.clone()).unwrap_or_default()
+    }
+
+    pub fn send(&self, args: &[&str]) {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let (name, notify) = (self.wanted(), self.repoll.clone());
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || crate::smtc::command(&name, &args)).await;
+            notify.notify_one();
+        });
+    }
+
+    pub fn seek_to(&self, secs: f64) {
+        self.send(&["position", &format!("{:.3}", secs.max(0.0))]);
+    }
+
+    pub async fn poll_loop(self, tx: UnboundedSender<AppEvent>) {
+        loop {
+            let name = self.wanted();
+            let snap = tokio::task::spawn_blocking(move || crate::smtc::snapshot(&name))
+                .await
+                .ok()
+                .flatten();
+            if tx.send(AppEvent::Player(snap)).is_err() {
+                return;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+                _ = self.repoll.notified() => {}
+            }
+        }
+    }
+
+    /// Nothing pushes updates here; the poll above is quick enough.
+    pub async fn follow_loop(self, _tx: UnboundedSender<AppEvent>) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The menu names that mean "whatever is playing" on Windows.
+#[cfg(windows)]
+fn player_name(player: &str) -> String {
+    match player {
+        "any" | "local" => String::new(),
+        p => p.to_string(),
     }
 }

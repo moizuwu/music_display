@@ -24,6 +24,11 @@ pub async fn run(bars: u16, tx: UnboundedSender<AppEvent>) {
         let _ = tx.send(AppEvent::CavaError(msg));
     };
 
+    // cava's raw output goes to /dev/stdout and it has no Windows capture setup here
+    if cfg!(windows) {
+        return fail("the visualizer is not available on Windows".into());
+    }
+
     let path = crate::util::tmp_dir().join(format!("cava-{bars}.conf"));
     if tokio::fs::write(&path, config(bars)).await.is_err() {
         return fail("couldn't write the cava config in /tmp".into());
