@@ -26,6 +26,7 @@ mod karaoke;
 mod left;
 mod library;
 mod lyrics;
+mod notes;
 mod panels;
 mod settings;
 mod text;
@@ -42,6 +43,7 @@ pub use karaoke::*;
 pub use left::*;
 use library::*;
 use lyrics::*;
+use notes::*;
 pub use panels::*;
 use settings::*;
 pub use text::*;
@@ -248,7 +250,6 @@ fn custom_columns(app: &App, main: Rect) -> Vec<(PanelId, Rect)> {
         .filter(|p| match p {
             PanelId::Lyrics => app.show_lyrics,
             PanelId::Cava => app.show_cava && !under,
-            PanelId::Annotations => false, // drawn from Phase 5 on
             _ => true,
         })
         .collect();

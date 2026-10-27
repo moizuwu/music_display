@@ -31,6 +31,7 @@ pub mod setup;
 pub mod layout;
 pub mod genre;
 pub mod ai;
+pub mod annotations;
 
 /// What the background tasks report to whichever front end owns the state. Results are tagged
 /// with the track they were requested for, so stale ones can be dropped.
@@ -43,6 +44,21 @@ pub enum AppEvent {
     Lyrics {
         key: u64,
         lyrics: lyrics::Lyrics,
+    },
+    /// Genius annotations of the track.
+    Annotations {
+        key: u64,
+        result: Result<Vec<annotations::Annotation>, String>,
+    },
+    /// AI-written notes, one optional note per lyric line.
+    AiNotes {
+        key: u64,
+        result: Result<Vec<Option<String>>, String>,
+    },
+    /// Genres from MusicBrainz for the track (`None` = nothing usable).
+    Genre {
+        key: u64,
+        genres: Option<Vec<String>>,
     },
     /// Every lyrics version lrclib has for the song (kind, text), best first.
     LyricVersions {
@@ -67,7 +83,7 @@ pub enum AppEvent {
     Translated {
         key: u64,
         lang: String,
-        lines: Result<(Vec<String>, &'static str), String>,
+        lines: Result<(Vec<String>, String), String>,
     },
     /// Lines with the members singing them, from Genius (empty = nothing usable).
     Members {

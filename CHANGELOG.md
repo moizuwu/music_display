@@ -14,6 +14,18 @@ which turns the `Unreleased` section into that version.
   git commit and whether the working tree had uncommitted changes.
 
 - `translate_mode` (`off`, `both`, `translated`): flag `--translate-mode`, config key and a "Translation shown as" row in the settings menu.
+- Optional AI lyric translation (`translate_engine = "ai"`, `[ai]` table, `--ai-*` flags, settings rows): the
+  whole song in one request to Ollama or any OpenAI-compatible endpoint, Gemini, Claude or OpenAI with your own key;
+  validated, retried once, cached, with a fallback to the standard engine and a first-use privacy notice.
+- Annotations panel (experimental, off by default; `N`): Genius annotations matched to the active
+  lyric line, or short AI-generated notes (labelled); `--annotations`, `--annotations-mode`,
+  `genius_token` / `GENIUS_TOKEN`, settings rows. Misses cached 7 days, errors never, soft failure.
+- `--gui` (build with `--features gui`): an egui/eframe window with metadata, cover and controls,
+  synced lyrics with karaoke fill, chords and drawn diagrams, translation (including the AI engine),
+  annotations, a settings window and the layout editor, on the same config file and layout as the
+  terminal UI. `docs/gui-design.md` explains the choice; the README has a feature parity table.
+- `docs/ROADMAP.md`: ideas that are free or work offline.
+- `Genre` metadata field (MPRIS, file tags, then MusicBrainz) with `--genre-lookup` / `genre_lookup` and a settings row.
 - Layout customization: a `[layout]` table in `config.toml` (panel order, visibility, size in
   percent, split direction, metadata field order and visibility, control buttons), the
   **Customize layout** page in the settings menu, `--layout-preset NAME` and `--reset-layout`. The

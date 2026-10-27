@@ -12,6 +12,14 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         use crate::app::TranslateState as TS;
         match (&app.translate_state, app.translation()) {
+            (_, Some(_)) if shown && app.translate_backend.starts_with("AI ") => {
+                format!("lyrics · translated by {} ({})", app.args.ai_model, app.args.translate_lang)
+            }
+            (_, Some(_)) if shown && app.translate_backend.starts_with(crate::app::FALLBACK_TAG) => format!(
+                "lyrics · translated ({}, {})",
+                app.args.translate_lang,
+                &app.translate_backend[crate::app::FALLBACK_TAG.len()..]
+            ),
             (_, Some(_)) if shown && app.translate_backend != "google" => {
                 format!("lyrics · translated ({}, {})", app.args.translate_lang, app.translate_backend)
             }

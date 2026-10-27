@@ -50,3 +50,11 @@ Do the extraction first, as its own change, with the TUI tests (`src/tests.rs`) 
 - terminal key remapping UI (`keymap.rs`); GUI can use fixed shortcuts first
 - `--minimal` teleprompter layout and three-panel layout flags (replace with resizable panels)
 - setup helpers for terminals (`setup.rs` where terminal-specific)
+
+## As built (checked against the code)
+
+- **Toolkit:** egui/eframe **0.37**, features `glow`, `wayland`, `x11`, `default_fonts`, `system_fonts`, `clipboard` (the default `wgpu` renderer is left out to keep the build lighter). Licence MIT OR Apache-2.0. `cargo build --release --features gui` produced a 22 MB binary here (the default TUI build has no GUI dependencies at all). The version-0.37 API differs from older examples: the app implements `ui(&mut self, ui, frame)` (plus `logic` for work without drawing) and panels are `egui::Panel::left(..).show(ui, ..)`.
+- **No App extraction.** The proposal above (moving the `App` state machine into the core crate) was **not** done. The GUI has its own small `Model` (`src/gui/model.rs`, no egui types, unit-tested) fed by the same `AppEvent` tasks, the same pollers (`Ctl::poll_loop` / `follow_loop`) and the same core modules (`lyrics`, `chords`, `translate`, `ai`, `annotations`, `genre`, `genius`, `cover`, `layout`, `config`). The cost is some duplicated orchestration (about 500 lines); the gain is that the terminal front end was left untouched. Extracting the shared part remains a sensible follow-up.
+- **Shared with the TUI:** `config.toml` (flag > file > default, `[layout]`, `[ai]`), the panel ids and the layout model (`src/layout.rs`), `--layout-preset`, `--reset-layout`.
+- **Fonts:** CJK / Hangul rely on `system_fonts` finding a suitable system font; this was not tested on every platform.
+- **Not verified:** that the window looks right on every compositor; the build and the model logic are covered by tests, drawing is not.

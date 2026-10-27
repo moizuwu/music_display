@@ -360,6 +360,22 @@ pub async fn translate(c: &reqwest::Client, cfg: &Cfg, song: &Song) -> Result<(V
     Err(redact(&last, &key))
 }
 
+/// One free-form request with the same key, breaker and error rules as [`translate`]; the caller
+/// validates the answer (used for the annotation notes).
+pub async fn complete(c: &reqwest::Client, cfg: &Cfg, system: &str, user: &str) -> Result<String, String> {
+    if cfg.model.trim().is_empty() {
+        return Err("no AI model configured".into());
+    }
+    let key = std::env::var(&cfg.api_key_env).unwrap_or_default();
+    if cfg.key_required() && key.trim().is_empty() {
+        return Err(format!("environment variable {} is not set", cfg.api_key_env));
+    }
+    if breaker_open() {
+        return Err("AI paused after repeated failures".into());
+    }
+    ask(c, cfg, key.trim(), system, user).await
+}
+
 /// Shown as the translation source, e.g. `claude claude-sonnet-5`.
 pub fn label(cfg: &Cfg) -> String {
     format!("AI {} {}", cfg.provider.name(), cfg.model)

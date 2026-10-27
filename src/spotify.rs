@@ -500,6 +500,7 @@ pub fn parse_state(p: &Value, is_local: impl Fn(&str) -> bool) -> Option<Remote>
         track_no: num(&t["track_number"]),
         disc_no: num(&t["disc_number"]),
         content_created: s(&album["release_date"]),
+        genre: String::new(),
         volume: dev["volume_percent"].as_f64().map(|v| (v / 100.0).clamp(0.0, 1.0)),
         url: String::new(),
         track_id: s(&t["uri"]),

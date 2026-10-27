@@ -42,6 +42,7 @@ impl Action {
             Action::CapoUp => "capo_up",
             Action::CapoReset => "capo_reset",
             Action::Diagrams => "diagrams",
+            Action::Annotations => "annotations",
             Action::Minimal => "minimal",
             Action::Translate => "translate",
             Action::TranslateBoth => "translate_both",

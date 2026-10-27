@@ -66,6 +66,9 @@ impl App {
     /// Take over a loaded layout: it decides what is shown at start.
     pub fn set_layout(&mut self, layout: Layout) {
         self.layout = layout;
+        if self.args.annotations {
+            self.layout.panels.set(PanelId::Annotations, true);
+        }
         self.show_lyrics = self.layout.panels.shown(PanelId::Lyrics);
         self.show_diagrams = self.layout.panels.shown(PanelId::Chords);
         if self.layout.cava_under_lyrics {
@@ -122,6 +125,12 @@ impl App {
                         self.snap_scroll = true;
                     }
                     PanelId::Chords => self.show_diagrams = on,
+                    PanelId::Annotations => {
+                        self.args.annotations = on;
+                        if on {
+                            self.ensure_annotations();
+                        }
+                    }
                     PanelId::Cava => {
                         if self.layout.cava_under_lyrics {
                             self.placement = CavaPlacement::UnderLyrics;

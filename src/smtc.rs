@@ -212,6 +212,7 @@ mod winrt {
             track_no: props.TrackNumber().ok().filter(|n| *n > 0).map(|n| n as u32),
             disc_no: None,
             content_created: String::new(),
+            genre: String::new(),
             volume: None,
             url: String::new(),
             track_id: String::new(),

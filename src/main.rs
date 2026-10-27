@@ -34,8 +34,8 @@ use tokio::sync::mpsc;
 // The core (players, lyrics, chords, Spotify, translation, config…) lives in the library crate
 // and has no terminal code; re-imported here so the TUI modules keep addressing it as `crate::x`.
 use music_display::{
-    AppEvent, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
-    spotifyd, tags, translate, ug, util, year, layout,
+    AppEvent, ai, annotations, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
+    spotifyd, tags, translate, ug, util, year, layout, genre,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -67,6 +67,9 @@ mod bigfont;
 // Rendering
 // ════════════════════════════════════════════════════════════════════════════
 mod ui;
+
+#[cfg(feature = "gui")]
+mod gui;
 
 // ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown
@@ -117,6 +120,17 @@ async fn main() -> Result<()> {
         }
     }
     let layout = config::load_layout(&args, &cfg_path, &mut |w| eprintln!("music_display: {w}"));
+    if args.gui {
+        #[cfg(feature = "gui")]
+        return gui::run(args, cfg_path, layout);
+        #[cfg(not(feature = "gui"))]
+        {
+            eprintln!(
+                "music_display: this build has no window. Rebuild with the GUI:\n  cargo install --path . --features gui\n(or `cargo build --release --features gui`), then run `music_display --gui` or `mdis --gui`."
+            );
+            std::process::exit(2);
+        }
+    }
     let theme = theme::load(&args);
 
     // ratatui::init = raw mode + alternate screen + a panic hook that restores both.

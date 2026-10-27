@@ -201,6 +201,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
 | `--layout-preset NAME` | start from a named layout: `default`, `no-lyrics`, `cava`, `under-lyrics`, `minimal`. The four flags above are shortcuts for these; a flag always beats the file. Config: `preset` in `[layout]`. |
 | `--reset-layout` | forget the saved `[layout]` (panel order, sizes, hidden fields and buttons) and start from the default. |
+| `--gui` | open the window instead of the terminal UI (see [Window (GUI)](#window-gui-experimental)). A build without the `gui` feature prints how to enable it. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
 | `--chords-match PERCENT` | how many percent of the lyric lines must match a chord sheet before its chords are shown (default 40). Lower it to see chords from sheets that match poorly, 0 shows every sheet; the lyrics title says `chords: weak match (N%) — hidden` when a sheet is below the limit. Also a typed row in the settings menu. |
@@ -215,6 +216,9 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
 | `--translate-skip CODES` | languages that are never translated, comma separated (`sv,fi`): the song's language is asked once, from a sample of its lines, before anything is translated; if it is on the list the lyrics stay as written (the title says `never translated (sv)`) and no line is sent, and a single line detected as one of them stays as written inside a song that is translated. Legacy codes (`iw`, `jw`, `zh-CN`) are normalised. If no service can name the language (rate-limited), the translation is held, the title says so, and the check is retried every 20 s. Also in the settings menu ("Never translate": ←/→ pick a language, space adds or removes it). |
 | `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
+| `--genre-lookup BOOL` | the `Genre` metadata field takes the first of: the player's `xesam:genre`, the genre tag of a local file, then MusicBrainz (the top tags by votes, filtered to real genres, at most three; cached on disk, misses for a week, errors never). `false` skips the MusicBrainz request (default `true`; the year lookup uses the same service). Config: `genre_lookup`; also a row in the settings menu. |
+| `--translate-engine ENGINE` | `standard` (default: Google Translate, LibreTranslate as the fallback) or `ai`: a language model translates the **whole song in one request**. Config: `translate_engine`; a row in the settings menu. See [AI translation](#ai-translation-optional). |
+| `--ai-provider P` / `--ai-model M` / `--ai-endpoint URL` / `--ai-key-env VAR` | the AI engine's settings (`[ai]` in the config file: `provider`, `model`, `endpoint`, `api_key_env`; rows in the settings menu). |
 | `--translate-mode MODE` | how a translation is shown: `off` (original only), `both` (the original line with its translation underneath) or `translated` (the translation replaces the line). Config: `translate_mode`; a row in the settings menu ("Translation shown as", ←/→) saves it. `--translate-mode` beats everything; `--translate` on the command line beats a mode from the file; without a mode, `translate = true` means `translated`. |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
@@ -305,6 +309,78 @@ big_scale = "2"                # unshifted keys work on any layout
 - The library browser, the settings menu, the device list and the help overlay have their own fixed keys (listed in the help); only the main-view keys above are remappable.
 - The `?` overlay and the key hints in the footer show the keys you configured. `music_display --print-config` ends with a `[keys]` block of the effective bindings, every action with its keys, which is valid config to paste back.
 - The settings menu writes the file again when you change a setting: your `[keys]` lines are kept (as the same values, in alphabetical order), but comments in the file are not, as for every other setting.
+
+## Window (GUI, experimental)
+
+`music_display --gui` (or `mdis --gui`) opens a window with the same panels, the same `config.toml` and the same `[layout]` as the terminal UI. It is behind a cargo feature so the default build has no extra dependencies:
+
+```
+cargo install --path . --features gui      # or: cargo build --release --features gui
+music_display --gui
+```
+
+It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Shortcuts: `space` play/pause, `←` / `→` seek 5 s, `,` / `.` lyrics 0.1 s earlier / later, `c` chords, `d` chord diagrams, `n` annotations. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** has the translation, chord and annotation switches and the layout editor.
+
+| feature | TUI | GUI |
+| --- | :-: | :-: |
+| metadata (all fields, order and visibility from `[layout]`), cover, progress, transport, volume | yes | yes |
+| synced lyrics, offset nudging, click to seek, karaoke fill, member tags | yes | yes |
+| chords above the lyrics, transpose, capo, key / BPM / tuning | yes | yes |
+| chord diagrams | yes (text) | yes (drawn) |
+| translation: `off` / `both` / `translated`, AI engine with fallback, never-translate list in the config | yes | yes |
+| genre field, annotations panel (Genius or AI) | yes | yes |
+| settings and the layout editor (panels, fields, buttons, sizes), saved to `config.toml` | yes | yes |
+| panel order and sizes from `[layout]` | yes | yes (drag to resize) |
+| cava bars | yes | no |
+| big block-font active line | yes | no (just a large font) |
+| terminal graphics protocols, ASCII cover, window-title option | yes | no |
+| key remapping (`[keys]`, the `?` key editor) | yes | no (fixed shortcuts) |
+| minimal view, three-panel presets | yes | no (resize the panels instead) |
+| Spotify library browser, likes, queue, devices, `--setup` | yes | no (the window follows whatever the MPRIS player reports) |
+| lyric versions (`L`), per-track capo memory, chord-sheet Ultimate Guitar toggle in the menu | yes | partly (capo and transpose are per session) |
+
+## AI translation (optional)
+
+Off by default. The standard engine (Google, LibreTranslate) keeps working as it did; set `translate_engine = "ai"` (or pick it in the settings menu) to let a language model translate instead. The whole song goes in **one request** (not line by line): title, artist, album, genre, year, the target language and the numbered lines. The model is told to keep the meaning, tone and imagery, to prefer natural, poetic phrasing over literal wording, to keep idioms meaningful, and to answer with a JSON array of strings, exactly one per line, in order, with no commentary.
+
+**The free way: Ollama** (runs on your computer, nothing leaves it, no account):
+
+```
+ollama pull llama3.1        # or any model you like
+music_display --translate --translate-engine ai --ai-model llama3.1
+```
+
+```toml
+translate_engine = "ai"
+[ai]
+provider = "openai-compatible"      # Ollama, LM Studio, llama.cpp server… (the default endpoint is Ollama's)
+model = "llama3.1"
+# endpoint = "http://localhost:11434/v1"     # LM Studio: "http://localhost:1234/v1"
+```
+
+Other providers (bring your own key; several have a free tier, such as Gemini's):
+
+| `provider` | default endpoint | key variable |
+| --- | --- | --- |
+| `openai-compatible` | `http://localhost:11434/v1` | none for a local endpoint |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` |
+| `claude` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+
+`api_key_env` names the environment variable that holds the key (the default is in the table); the key itself is read from there when a request is made and is never put in the config file, printed by `--print-config` or written to a log or an error message.
+
+The answer is checked: it must be valid JSON with exactly as many strings as there were lines. If not, the request is repeated once; if that fails too (or there is no key, no model or no connection), the standard engine translates instead and the lyrics title says so (`translated (en, google; AI failed: …)`). A good translation shows `translated by <model>` in the title and is cached per song, target language, provider and model, so a song is translated once. After repeated failures the AI engine rests for ten minutes.
+
+**Privacy.** With a provider other than a local endpoint, the lyrics and the song info are sent to that provider. The first time you turn it on, the settings menu says so and asks for a second press; if it was set in the file, the notice appears once in the footer. A local Ollama or LM Studio endpoint needs no notice.
+
+## Annotations panel (experimental)
+
+Off by default; `N` (or the settings row, or `annotations = true`) shows a panel that explains the line being sung. It is a column of its own that you can move, hide and resize like the others (see below).
+
+- **Genius (default).** Needs a free client token: create an API client at <https://genius.com/api-clients>, then put the *client access token* in the config file (`genius_token = "…"`), in the `GENIUS_TOKEN` environment variable, or in the settings menu ("Genius token"; never shown on screen). The song's annotations (Genius calls them referents) are fetched once, each is matched to the synced lyric line(s) it quotes, and the panel shows the one for the active line: the quoted passage, a short excerpt of the note (at most about 280 characters, cut at a word) and `— Genius`. Nothing is shown for lines without a note. Songs Genius doesn't have are remembered for 7 days; errors are shown in the panel and never remembered; after repeated failures it rests for ten minutes.
+- **AI notes (`annotations_mode = "ai"`).** With the AI engine set up (see AI translation), one request asks for a short note per line (references, idioms, backstory), `null` for lines that need none. They are labelled `AI-generated` in the panel and cached per model. They can be wrong; the labelled source is there so you can tell.
+
+Experimental: it depends on Genius' unofficial-for-this-use API, matching is by text, and short quoted fragments are deliberately ignored to avoid false matches. Flags: `--annotations`, `--annotations-mode genius|ai`, `--genius-token TOKEN` (prefer the file or the variable: command lines are visible to other users of the machine). `--print-config` never prints the token.
 
 ## Customizing the layout
 

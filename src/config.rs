@@ -58,6 +58,11 @@ pub const KEYS: &[Key] = &[
     k!("lyrics_retries", Kind::Int(0, 10), "lyrics_retries"),
     k!("translate", Kind::Bool, "translate"),
     k!("translate_mode", Kind::Choice(crate::cli::TranslateMode::NAMES), "translate_mode"),
+    k!("genre_lookup", Kind::Bool, "genre_lookup"),
+    k!("annotations", Kind::Bool, "annotations"),
+    k!("annotations_mode", Kind::Choice(crate::cli::AnnotationMode::NAMES), "annotations_mode"),
+    k!("genius_token", Kind::Text, "genius_token"),
+    k!("translate_engine", Kind::Choice(crate::cli::TranslateEngine::NAMES), "translate_engine"),
     k!("translate_lang", Kind::Str, "translate_lang"),
     k!("translate_skip", Kind::Text, "translate_skip"),
     k!("translate_fallback", Kind::Bool, "translate_fallback"),
@@ -156,6 +161,13 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "lyrics_retries" => args.lyrics_retries = i() as u32,
         "translate" => args.translate = b(),
         "translate_mode" => args.translate_mode = crate::cli::TranslateMode::parse(&st()),
+        "genre_lookup" => args.genre_lookup = b(),
+        "annotations" => args.annotations = b(),
+        "annotations_mode" => args.annotations_mode = crate::cli::AnnotationMode::parse(&st()).unwrap_or_default(),
+        "genius_token" => args.genius_token = st(),
+        "translate_engine" => {
+            args.translate_engine = crate::cli::TranslateEngine::parse(&st()).unwrap_or_default()
+        }
         "translate_lang" => args.translate_lang = st(),
         "translate_skip" => args.translate_skip = st(),
         "translate_fallback" => args.translate_fallback = b(),
@@ -171,6 +183,39 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "spotify_button" => args.no_spotify_button = !b(),
         "spotify_queue_tab" => args.no_spotify_queue_tab = !b(),
         _ => {}
+    }
+}
+
+/// The `[ai]` table: provider, model, endpoint, api_key_env (the key itself is never in the
+/// file). A flag given on the command line wins over each entry.
+fn read_ai(args: &mut Args, m: &ArgMatches, v: &toml::Value, bad: &mut dyn FnMut(String)) {
+    let Some(t) = v.as_table() else {
+        bad("[ai]: expected a table; ignored".into());
+        return;
+    };
+    for (k, v) in t {
+        let (arg, slot): (&str, &mut String) = match k.as_str() {
+            "provider" => ("ai_provider", &mut args.ai_provider),
+            "model" => ("ai_model", &mut args.ai_model),
+            "endpoint" => ("ai_endpoint", &mut args.ai_endpoint),
+            "api_key_env" => ("ai_key_env", &mut args.ai_key_env),
+            _ => {
+                bad(format!("[ai] {k}: unknown key (ignored); keys are provider, model, endpoint, api_key_env"));
+                continue;
+            }
+        };
+        let Some(s) = v.as_str() else {
+            bad(format!("[ai] {k}: expected a string; using the default"));
+            continue;
+        };
+        if k == "provider" && crate::ai::Provider::parse(s).is_none() {
+            bad("[ai] provider: expected openai-compatible, gemini, claude or openai; using the default".into());
+            continue;
+        }
+        if m.value_source(arg) == Some(ValueSource::CommandLine) {
+            continue;
+        }
+        *slot = s.trim().to_string();
     }
 }
 
@@ -204,6 +249,10 @@ pub fn apply(
     // (line, message): reported in file order, not the table's alphabetical order
     let mut problems: Vec<(usize, String)> = Vec::new();
     for (name, v) in &table {
+        if name == "ai" {
+            read_ai(args, m, v, &mut |msg| problems.push((line_of(&raw, "ai"), format!("{}: {msg}", at("ai")))));
+            continue;
+        }
         if name == "keys" || name == "layout" {
             continue; // the [keys] section is read by keymap::load
         }
@@ -281,7 +330,18 @@ pub fn forget_layout(path: &Path) -> std::io::Result<()> {
 pub fn save(path: &Path, values: &[(&str, toml::Value)]) -> std::io::Result<()> {
     edit(path, |table| {
         for (k, v) in values {
-            table.insert((*k).to_string(), v.clone());
+            // `ai.model` goes into the [ai] table
+            match k.split_once('.') {
+                Some((sec, key)) => {
+                    let t = table.entry(sec).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                    if let Some(t) = t.as_table_mut() {
+                        t.insert(key.to_string(), v.clone());
+                    }
+                }
+                None => {
+                    table.insert((*k).to_string(), v.clone());
+                }
+            }
         }
     })
 }
@@ -362,6 +422,15 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("lyrics_retries", args.lyrics_retries.to_string());
     line("translate", args.translate.to_string());
     line("translate_mode", q(args.start_translate_mode().name()));
+    line("genre_lookup", args.genre_lookup.to_string());
+    line("translate_engine", q(args.translate_engine.name()));
+    line("annotations", args.annotations.to_string());
+    line("annotations_mode", q(args.annotations_mode.name()));
+    if args.genius_token.is_empty() {
+        line("# genius_token", "\"…\"  # or GENIUS_TOKEN in the environment; free at genius.com/api-clients".into());
+    } else {
+        line("# genius_token", "\"…\"  # set (not shown)".into());
+    }
     line("translate_lang", q(&args.translate_lang));
     line("translate_skip", q(&args.translate_skip));
     line("translate_fallback", args.translate_fallback.to_string());
@@ -381,5 +450,10 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("kill_spotifyd_on_exit", (!args.no_kill_spotifyd).to_string());
     line("spotify_button", (!args.no_spotify_button).to_string());
     line("spotify_queue_tab", (!args.no_spotify_queue_tab).to_string());
+    // (the API key is never here: only the name of the environment variable that holds it)
+    line("\n[ai]\nprovider", q(&args.ai_provider));
+    line("model", q(&args.ai_model));
+    line("endpoint", q(&args.ai_endpoint));
+    line("api_key_env", q(&args.ai_key_env));
     o
 }

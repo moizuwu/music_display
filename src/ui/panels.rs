@@ -80,7 +80,9 @@ impl Panel for Annotations {
     fn id(&self) -> PanelId {
         PanelId::Annotations
     }
-    fn render(&self, _f: &mut Frame, _app: &mut App, _area: Rect) {}
+    fn render(&self, f: &mut Frame, app: &mut App, area: Rect) {
+        draw_annotations(f, app, area);
+    }
 }
 
 impl Panel for Inline {

@@ -41,6 +41,16 @@ unicode-width = "0.2"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "display", "serde"] }
 lofty = "0.24.0"
 
+# GUI (`--gui`), only with `--features gui`: the default build gets none of this
+eframe = { version = "0.37", optional = true, default-features = false, features = [
+    "glow", "wayland", "x11", "default_fonts", "system_fonts", "clipboard",
+] }
+egui = { version = "0.37", optional = true, default-features = false }
+
+[features]
+default = []
+gui = ["dep:eframe", "dep:egui"]
+
 [lints.clippy]
 # rust-version 1.90 (what the dependencies need) makes clippy suggest let chains for 19 nested
 # `if let`s in code written before; collapse them in a separate cleanup, not here.

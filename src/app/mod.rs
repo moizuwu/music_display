@@ -1,5 +1,5 @@
 use super::*;
-use crate::cli::TranslateMode;
+use crate::cli::{TranslateEngine, TranslateMode};
 use crate::lyrics::Lyrics;
 use crate::player::{Snapshot, Status};
 use crate::theme::Rgb;
@@ -15,11 +15,13 @@ use tokio::task::JoinHandle;
 
 mod actions;
 mod customize;
+mod notes;
 mod remote;
 mod settings;
 
 pub use actions::*;
 pub use customize::*;
+pub use notes::AnnState;
 pub use crate::browser::{Level, Library, TABS};
 use crate::browser::{DevicePicker, Edit, TextInput};
 
@@ -27,6 +29,8 @@ use crate::browser::{DevicePicker, Edit, TextInput};
 /// this many times.
 const HOLD_RETRY_SECS: u64 = 20;
 const HOLD_RETRIES: u32 = 6;
+/// Start of the backend name when the AI failed and the standard engine answered instead.
+pub const FALLBACK_TAG: &str = "fallback: ";
 pub use settings::*;
 
 
@@ -167,7 +171,7 @@ pub struct App {
     pub snap: Option<Snapshot>,
     /// Position anchor for smooth interpolation between polls.
     pub(crate) anchor: (f64, Instant),
-    track_key: u64,
+    pub track_key: u64,
     art_url: String,
 
     pub year: YearState,
@@ -248,7 +252,7 @@ pub struct App {
     /// Test hook: alternative translate endpoint.
     pub translate_base: Option<String>,
     /// Which backend produced the translation on screen.
-    pub translate_backend: &'static str,
+    pub translate_backend: String,
     /// Rows the lyrics are scrolled away from the playing line (0 = following).
     pub browse: f64,
     browse_at: Instant,
@@ -278,6 +282,17 @@ pub struct App {
     pub layout: crate::layout::Layout,
     /// Genre of the playing track, when a source knows it.
     pub genre: Option<String>,
+    /// The privacy notice for the AI engine was shown; the next press turns it on.
+    pub ai_confirm: bool,
+    /// Annotations panel: state, the Genius notes, their match to the lyric lines, AI notes.
+    pub ann_state: AnnState,
+    pub anns: Vec<crate::annotations::Annotation>,
+    pub ann_match: Vec<Option<usize>>,
+    pub ai_notes: Vec<Option<String>>,
+    /// Test hook: another Genius API address.
+    pub annotations_base: Option<String>,
+    /// What MusicBrainz said for the playing track.
+    mb_genre: Option<Vec<String>>,
     /// The customize page of the settings menu is open, and its selected line.
     pub customizing: bool,
     pub cust_sel: usize,
@@ -384,7 +399,7 @@ impl App {
             translate_task: None,
             translations: Default::default(),
             translate_base: None,
-            translate_backend: "google",
+            translate_backend: "google".to_string(),
             browse: 0.0,
             browse_at: Instant::now(),
             local_tags: Default::default(),
@@ -401,6 +416,13 @@ impl App {
             keys: Default::default(),
             layout: Default::default(),
             genre: None,
+            ai_confirm: false,
+            ann_state: AnnState::Idle,
+            anns: Vec::new(),
+            ann_match: Vec::new(),
+            ai_notes: Vec::new(),
+            annotations_base: None,
+            mb_genre: None,
             customizing: false,
             cust_sel: 0,
             field_menu: None,
@@ -446,6 +468,11 @@ impl App {
         if s.length > 0.0 { p.min(s.length) } else { p }
     }
 
+    #[cfg(test)]
+    pub fn set_position_for_test(&mut self, p: f64) {
+        self.set_position(p);
+    }
+
     fn set_position(&mut self, p: f64) {
         self.anchor = (p.max(0.0), Instant::now());
     }
@@ -487,8 +514,12 @@ impl App {
                 self.realign();
                 self.realign_members();
                 self.ensure_translation();
+                self.rematch_annotations();
+                self.ensure_annotations();
                 self.dirty = true;
             }
+            AppEvent::Annotations { key, result } if key == self.track_key => self.on_annotations(result),
+            AppEvent::AiNotes { key, result } if key == self.track_key => self.on_ai_notes(result),
             AppEvent::LyricVersions { key, list } if key == self.track_key => {
                 // which of them is on screen now
                 self.lyric_ver = match &self.lyrics {
@@ -542,6 +573,11 @@ impl App {
                         CoverState::Failed
                     }
                 };
+                self.dirty = true;
+            }
+            AppEvent::Genre { key, genres } if key == self.track_key => {
+                self.mb_genre = genres;
+                self.refresh_genre();
                 self.dirty = true;
             }
             AppEvent::Tags { url, tags } => {
@@ -602,7 +638,7 @@ impl App {
         }
     }
 
-    fn on_snapshot(&mut self, mut s: Snapshot) {
+    pub fn on_snapshot(&mut self, mut s: Snapshot) {
         if s.url.starts_with("file://") {
             self.merge_local_tags(&mut s);
         }
@@ -643,6 +679,7 @@ impl App {
                 keep(&o.artist, &mut s.artist);
                 keep(&o.album, &mut s.album);
                 keep(&o.content_created, &mut s.content_created);
+                keep(&o.genre, &mut s.genre);
                 if !self.art_url.is_empty() && !matches!(self.cover, CoverState::Failed) {
                     s.art_url = self.art_url.clone();
                 }
@@ -674,6 +711,7 @@ impl App {
             self.capo_override = None;
             self.member_src.clear();
             self.members.clear();
+            self.reset_annotations();
             self.chords_state = ChordsState::Idle;
             self.translate_state = TranslateState::Idle;
             self.translate_inflight = None;
@@ -694,6 +732,18 @@ impl App {
                     YearState::Loading
                 }
             };
+
+            // Genre: the player and the file's tags are merged into the snapshot; MusicBrainz is
+            // asked only when neither had one
+            self.mb_genre = None;
+            if s.genre.trim().is_empty() && self.args.genre_lookup {
+                let (c, tx) = (self.client.clone(), self.tx.clone());
+                let (a, t) = (s.artist.clone(), s.title.clone());
+                self.tasks.push(tokio::spawn(async move {
+                    let genres = genre::lookup(&c, &a, &t).await;
+                    let _ = tx.send(AppEvent::Genre { key, genres });
+                }));
+            }
 
             // Lyrics
             // (fetched even while the panel is hidden, so `l` shows them instantly)
@@ -766,6 +816,7 @@ impl App {
                 .as_ref()
                 .is_none_or(|o| o.status != s.status || o.length != s.length);
         self.snap = Some(s);
+        self.refresh_genre();
         if changed {
             self.dirty = true;
         }
@@ -774,6 +825,12 @@ impl App {
     /// A snapshot whose strings changed but that is still the item already playing: the
     /// player's own id is unchanged, or the position runs on where it was (a real track
     /// change starts near 0 or jumps) with the same length.
+    /// The genre line of the metadata block: player, then file tags, then MusicBrainz.
+    pub(super) fn refresh_genre(&mut self) {
+        let mpris = self.snap.as_ref().map(|s| s.genre.clone());
+        self.genre = genre::resolve(mpris.as_deref(), None, self.mb_genre.clone());
+    }
+
     fn same_recording(&self, s: &Snapshot) -> bool {
         let Some(o) = &self.snap else { return false };
         if self.track_key == 0 || o.player != s.player {
@@ -814,6 +871,7 @@ impl App {
         fill(&mut s.artist, &t.artist);
         fill(&mut s.album, &t.album);
         fill(&mut s.content_created, &t.year);
+        fill(&mut s.genre, &t.genre);
         fill(&mut s.art_url, &t.art_url);
         s.track_no = s.track_no.or(t.track);
         s.disc_no = s.disc_no.or(t.disc);
@@ -1029,12 +1087,39 @@ impl App {
         if let Some(t) = self.translate_task.take() {
             t.abort();
         }
+        let ai = self.ai_job(&lines);
         // (the tests must not read or fill the real cache folder)
-        let (keep, skip) = (!self.args.no_cache_translations && !cfg!(test), self.skip_langs());
+        let (keep, skip) = (!self.args.no_cache_translations && !crate::util::testing(), self.skip_langs());
         self.translate_task = Some(tokio::spawn(async move {
-            if keep {
-                if let Some(done) = translate::cached(&lang, &skip, &lines).await {
-                    let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok(done) });
+            // the language model first: one request for the whole song. If it can't deliver
+            // (no key, unreachable, an answer that stays invalid after a retry) the standard
+            // engine takes over and the lyrics title says so.
+            let mut ai_failed: Option<String> = None;
+            if let Some((acfg, song)) = ai {
+                if keep {
+                    if let Some(done) = ai::cached(&acfg, &song).await {
+                        let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok((done, ai::label(&acfg))) });
+                        return;
+                    }
+                }
+                match ai::translate(&c, &acfg, &song).await {
+                    Ok((done, label)) => {
+                        if keep {
+                            ai::store(&acfg, &song, &done).await;
+                        }
+                        let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok((done, label)) });
+                        return;
+                    }
+                    Err(why) => ai_failed = Some(why),
+                }
+            }
+            let tag = |backend: &str| match &ai_failed {
+                Some(why) => format!("{FALLBACK_TAG}{backend}; AI failed: {why}"),
+                None => backend.to_string(),
+            };
+            if keep && ai_failed.is_none() {
+                if let Some((done, backend)) = translate::cached(&lang, &skip, &lines).await {
+                    let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok((done, tag(backend))) });
                     return;
                 }
             }
@@ -1058,10 +1143,91 @@ impl App {
                 if let (true, Ok((done, backend))) = (keep, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
-                let _ = tx.send(AppEvent::Translated { key, lang, lines: r });
+                let _ = tx.send(AppEvent::Translated { key, lang, lines: r.map(|(l, b)| (l, tag(b))) });
                 return;
             }
         }));
+    }
+
+    /// The AI request for this song, when the AI engine is chosen and set up.
+    fn ai_job(&mut self, lines: &[String]) -> Option<(ai::Cfg, ai::Song)> {
+        if self.args.translate_engine != TranslateEngine::Ai {
+            return None;
+        }
+        let cfg = self.ai_cfg()?;
+        // first use with a remote provider: say where the lyrics go (once, ever)
+        if self.ai_notice_needed() {
+            self.set_note(self.ai_notice());
+            self.ack_ai_notice();
+        }
+        let snap = self.snap.as_ref()?;
+        Some((
+            cfg,
+            ai::Song {
+                title: snap.title.clone(),
+                artist: snap.artist.clone(),
+                album: snap.album.clone(),
+                genre: self.genre.clone(),
+                year: match &self.year {
+                    YearState::Known(y) => Some(y.clone()),
+                    _ => None,
+                },
+                source_lang: "the original language (detect it)".into(),
+                target_lang: self.args.translate_lang.clone(),
+                lines: lines.to_vec(),
+            },
+        ))
+    }
+
+    /// The AI settings as a request config; `None` (with a note) when the model is missing.
+    pub fn ai_cfg(&mut self) -> Option<ai::Cfg> {
+        let provider = ai::Provider::parse(&self.args.ai_provider).unwrap_or(ai::Provider::OpenAiCompatible);
+        if self.args.ai_model.trim().is_empty() {
+            self.set_note("AI translation needs a model (settings → AI model); using the standard engine");
+            return None;
+        }
+        Some(ai::Cfg::new(provider, &self.args.ai_model, &self.args.ai_endpoint, &self.args.ai_key_env))
+    }
+
+    fn ai_ack_path() -> std::path::PathBuf {
+        spotify::dir().with_file_name("ai-notice-ack")
+    }
+
+    /// A remote provider has not been confirmed yet. A local Ollama endpoint never needs it.
+    pub fn ai_notice_needed(&self) -> bool {
+        let provider = ai::Provider::parse(&self.args.ai_provider).unwrap_or(ai::Provider::OpenAiCompatible);
+        let cfg = ai::Cfg::new(provider, &self.args.ai_model, &self.args.ai_endpoint, &self.args.ai_key_env);
+        !cfg.is_local() && !Self::ai_ack_path().exists()
+    }
+
+    pub fn ai_notice(&self) -> String {
+        let provider = ai::Provider::parse(&self.args.ai_provider).unwrap_or(ai::Provider::OpenAiCompatible);
+        let cfg = ai::Cfg::new(provider, &self.args.ai_model, &self.args.ai_endpoint, &self.args.ai_key_env);
+        format!(
+            "AI translation sends the lyrics and song info (title, artist, album, genre, year) to {} ({})",
+            cfg.endpoint,
+            provider.name()
+        )
+    }
+
+    fn ack_ai_notice(&self) {
+        let p = Self::ai_ack_path();
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, "shown\n");
+    }
+
+    /// The engine or its settings changed: whatever was translated for this song is stale.
+    pub fn reset_translation(&mut self) {
+        self.translations.clear();
+        self.translate_state = TranslateState::Idle;
+        self.translate_inflight = None;
+        if let Some(t) = self.translate_task.take() {
+            t.abort();
+        }
+        self.snap_scroll = true;
+        self.ensure_translation();
     }
 
     /// Scroll the lyrics away from the playing line without touching playback.
@@ -1164,6 +1330,19 @@ impl App {
             Setting::MemberParts => onoff(self.args.member_parts),
             Setting::Translate => onoff(self.translate_on),
             Setting::TranslateMode => format!("< {} >", self.translate_mode().name()),
+            Setting::TranslateEngine => format!("< {} >", self.args.translate_engine.name()),
+            Setting::AiProvider => format!("< {} >", self.args.ai_provider),
+            Setting::AiModel | Setting::AiEndpoint | Setting::AiKeyEnv => match &self.settings_edit {
+                Some((cur, input)) if *cur == s => input.shown(),
+                _ => {
+                    let (v, none) = match s {
+                        Setting::AiModel => (&self.args.ai_model, "(not set)"),
+                        Setting::AiEndpoint => (&self.args.ai_endpoint, "(provider default)"),
+                        _ => (&self.args.ai_key_env, "(provider default)"),
+                    };
+                    if v.is_empty() { none.to_string() } else { v.clone() }
+                }
+            },
             Setting::TranslateLang => format!("< {} >", self.args.translate_lang),
             Setting::TranslateSkip => {
                 // `< sv [x] >`: ←/→ pick a language, space adds or removes it
@@ -1176,6 +1355,15 @@ impl App {
             Setting::CacheTranslations => onoff(!self.args.no_cache_translations),
             Setting::Minimal => onoff(self.minimal),
             Setting::Customize => "enter →".to_string(),
+            Setting::GenreLookup => onoff(self.args.genre_lookup),
+            Setting::Annotations => onoff(self.annotations_shown()),
+            Setting::AnnotationsMode => format!("< {} >", self.args.annotations_mode.name()),
+            Setting::GeniusToken => match &self.settings_edit {
+                Some((Setting::GeniusToken, input)) => input.shown(),
+                _ if !self.args.genius_token.is_empty() => "set (hidden)".to_string(),
+                _ if std::env::var("GENIUS_TOKEN").is_ok_and(|t| !t.trim().is_empty()) => "from GENIUS_TOKEN".to_string(),
+                _ => "(not set)".to_string(),
+            },
             Setting::BigLyrics => onoff(self.big_lyrics),
             Setting::Karaoke => onoff(self.args.karaoke),
             Setting::WindowTitle => format!("< {} >", self.args.window_title),
@@ -1261,6 +1449,41 @@ impl App {
             Setting::MemberParts => self.toggle_member_parts(),
             Setting::Translate => self.toggle_translate(),
             Setting::TranslateMode => self.set_translate_mode(self.translate_mode().step(dir)),
+            Setting::TranslateEngine => {
+                let next = if self.args.translate_engine == TranslateEngine::Ai {
+                    TranslateEngine::Standard
+                } else {
+                    TranslateEngine::Ai
+                };
+                if next == TranslateEngine::Ai && self.ai_notice_needed() && !self.ai_confirm {
+                    // the first time with a remote provider: say where the lyrics go, then ask again
+                    self.ai_confirm = true;
+                    self.settings_note = Some(format!("{}. Press again to turn it on.", self.ai_notice()));
+                    return;
+                }
+                if next == TranslateEngine::Ai && self.ai_notice_needed() {
+                    self.ack_ai_notice();
+                }
+                self.ai_confirm = false;
+                self.args.translate_engine = next;
+                self.reset_translation();
+            }
+            Setting::AiProvider => {
+                let all = ["openai-compatible", "gemini", "claude", "openai"];
+                let cur = all.iter().position(|p| *p == self.args.ai_provider).unwrap_or(0) as i32;
+                self.args.ai_provider = all[(cur + dir).rem_euclid(all.len() as i32) as usize].to_string();
+                self.ai_confirm = false;
+                self.reset_translation();
+            }
+            Setting::AiModel | Setting::AiEndpoint | Setting::AiKeyEnv => {
+                let cur = match s {
+                    Setting::AiModel => self.args.ai_model.clone(),
+                    Setting::AiEndpoint => self.args.ai_endpoint.clone(),
+                    _ => self.args.ai_key_env.clone(),
+                };
+                self.settings_edit = Some((s, TextInput::with(&cur)));
+                return;
+            }
             Setting::TranslateLang => {
                 let cur = LANGS.iter().position(|l| *l == self.args.translate_lang);
                 let n = LANGS.len() as i32;
@@ -1287,6 +1510,21 @@ impl App {
             Setting::Minimal => self.set_minimal(!self.minimal),
             Setting::Customize => {
                 self.open_customize();
+                return;
+            }
+            Setting::GenreLookup => self.args.genre_lookup = !self.args.genre_lookup,
+            Setting::Annotations => self.toggle_annotations(),
+            Setting::AnnotationsMode => {
+                let next = if self.args.annotations_mode == crate::cli::AnnotationMode::Genius {
+                    crate::cli::AnnotationMode::Ai
+                } else {
+                    crate::cli::AnnotationMode::Genius
+                };
+                self.args.annotations_mode = next;
+                self.restart_annotations();
+            }
+            Setting::GeniusToken => {
+                self.settings_edit = Some((s, TextInput::with("")));
                 return;
             }
             Setting::BigScale => {
@@ -1384,6 +1622,26 @@ impl App {
                 self.args.spotify_client_id = (!text.is_empty()).then(|| text.to_string());
             }
             Setting::SpotifyDevice => self.args.spotify_device = text.to_string(),
+            Setting::GeniusToken => {
+                // an empty entry keeps the old token (it is never shown to be edited)
+                if !text.is_empty() {
+                    self.args.genius_token = text.to_string();
+                    self.restart_annotations();
+                    self.save_settings(s);
+                }
+                return;
+            }
+            Setting::AiModel | Setting::AiEndpoint | Setting::AiKeyEnv => {
+                match s {
+                    Setting::AiModel => self.args.ai_model = text.to_string(),
+                    Setting::AiEndpoint => self.args.ai_endpoint = text.to_string(),
+                    _ => self.args.ai_key_env = text.to_string(),
+                }
+                self.ai_confirm = false;
+                self.reset_translation();
+                self.save_settings(s);
+                return;
+            }
             Setting::ChordsMatch => {
                 let Some(n) = text.trim_end_matches('%').trim().parse::<u32>().ok().filter(|n| *n <= 100) else {
                     self.settings_note = Some("a number from 0 to 100".into());
@@ -1410,8 +1668,17 @@ impl App {
             ("chords_ug", B(self.args.chords_ug)),
             ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
+            ("genre_lookup", B(self.args.genre_lookup)),
+            ("annotations", B(self.annotations_shown())),
+            ("annotations_mode", S(self.args.annotations_mode.name().to_string())),
+            ("genius_token", S(self.args.genius_token.clone())),
             ("translate", B(self.translate_on)),
             ("translate_mode", S(self.translate_mode().name().to_string())),
+            ("translate_engine", S(self.args.translate_engine.name().to_string())),
+            ("ai.provider", S(self.args.ai_provider.clone())),
+            ("ai.model", S(self.args.ai_model.clone())),
+            ("ai.endpoint", S(self.args.ai_endpoint.clone())),
+            ("ai.api_key_env", S(self.args.ai_key_env.clone())),
             ("translate_lang", S(self.args.translate_lang.clone())),
             ("translate_skip", S(self.args.translate_skip.clone())),
             ("translate_fallback", B(self.args.translate_fallback)),
@@ -1727,6 +1994,7 @@ impl App {
             Action::CapoDown => self.change_capo(-1),
             Action::CapoUp => self.change_capo(1),
             Action::CapoReset => self.set_capo_override(None),
+            Action::Annotations => self.toggle_annotations(),
             Action::Diagrams => {
                 self.show_diagrams = !self.show_diagrams;
                 self.snap_scroll = true;

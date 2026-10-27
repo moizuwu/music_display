@@ -11,6 +11,8 @@ pub struct Tags {
     pub album: String,
     /// `YYYY` (tags rarely carry more).
     pub year: String,
+    /// The raw genre tag (may hold several, "Rock; Blues").
+    pub genre: String,
     pub track: Option<u32>,
     pub disc: Option<u32>,
     /// `file://` URL of the embedded cover, written to the cache folder.
@@ -49,6 +51,7 @@ pub fn read(url: &str) -> Option<Tags> {
         title: s(tag.title()),
         artist: s(tag.artist()),
         album: s(tag.album()),
+        genre: s(tag.genre()),
         year: tag.date().map(|d| d.year.to_string()).unwrap_or_default(),
         track: tag.track(),
         disc: tag.disk(),

@@ -578,6 +578,7 @@ fn snap(artist: &str, title: &str, album: &str) -> player::Snapshot {
         track_no: None,
         disc_no: None,
         content_created: String::new(),
+        genre: String::new(),
         volume: None,
         url: String::new(),
         track_id: String::new(),
@@ -1033,7 +1034,12 @@ async fn local_files_fall_back_to_their_own_tags() {
 fn every_menu_row_saves_a_known_config_key() {
     for set in app::Setting::ALL {
         for k in set.config_keys() {
-            assert!(config::KEYS.iter().any(|c| c.name == *k), "{k}");
+            // `ai.model` lives in the [ai] table
+            let known = k.strip_prefix("ai.").map_or_else(
+                || config::KEYS.iter().any(|c| c.name == *k),
+                |sub| ["provider", "model", "endpoint", "api_key_env"].contains(&sub),
+            );
+            assert!(known, "{k}");
         }
         assert!(!set.label().is_empty());
     }
@@ -1610,7 +1616,7 @@ fn config_precedence_and_validation() {
     // print-config round-trips through the parser
     let text = config::render(&a, &nowhere, false);
     let table: toml::Table = text.parse().unwrap();
-    assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir" || k.name == "translate_fallback_key" || k.name == "spotify_client_id"), "{text}");
+    assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir" || k.name == "translate_fallback_key" || k.name == "genius_token" || k.name == "spotify_client_id"), "{text}");
     assert!(text.contains("# chords_dir"));
 }
 
@@ -3884,4 +3890,342 @@ fn every_panel_id_has_a_panel_with_a_section_and_a_minimum_size() {
         assert!(w >= 8 && h >= 1);
     }
     assert_eq!(ui::panel_for(PanelId::Metadata).config_section(), "layout.fields");
+}
+
+// ── Phase 3: genre ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn genre_comes_from_the_player_then_the_tags_then_musicbrainz() {
+    let mut app = test_app();
+    app.args.genre_lookup = false;
+    // the player's own xesam:genre
+    let mut s = snap("Boards of Canada", "Roygbiv", "MHTRTC");
+    s.genre = "electronic; ambient".into();
+    app.on_snapshot(s);
+    assert_eq!(app.genre.as_deref(), Some("Electronic / Ambient"));
+    // a new song without one: nothing shown, and no lookup when switched off
+    app.on_snapshot(snap("Other", "Song", "Album"));
+    assert_eq!(app.genre, None);
+    // MusicBrainz fills in, but only for the song it was asked about
+    app.args.genre_lookup = true;
+    app.on_snapshot(snap("Third", "Tune", "LP"));
+    let key = app.track_key;
+    app.apply(AppEvent::Genre { key: key ^ 1, genres: Some(vec!["Jazz".into()]) });
+    assert_eq!(app.genre, None, "a stale answer is dropped");
+    app.apply(AppEvent::Genre { key, genres: Some(vec!["Rock".into(), "Pop".into()]) });
+    assert_eq!(app.genre.as_deref(), Some("Rock / Pop"));
+    // the player wins over MusicBrainz, and the next track starts clean
+    let mut s = snap("Third", "Tune", "LP");
+    s.genre = "Folk".into();
+    app.on_snapshot(s);
+    assert_eq!(app.genre.as_deref(), Some("Folk"));
+    app.on_snapshot(snap("Fourth", "Next", "LP2"));
+    assert_eq!(app.genre, None);
+}
+
+#[tokio::test]
+async fn the_genre_field_is_drawn_and_can_be_hidden() {
+    use layout::MetaField;
+    let mut app = playing_app();
+    assert!(row_of(&render(&mut app, 100, 30), "Genre ").is_none(), "nothing known: no row");
+    app.genre = Some("Electronic / Ambient".into());
+    let s = render(&mut app, 100, 30);
+    let r = row_of(&s, "Genre ").expect("shown");
+    assert!(s[r].contains("Electronic / Ambient"));
+    assert!(app.hits.fields.iter().any(|(f, _)| *f == MetaField::Genre));
+    app.layout.fields.set(MetaField::Genre, false);
+    assert!(row_of(&render(&mut app, 100, 30), "Genre ").is_none());
+}
+
+#[test]
+fn mpris_genre_is_parsed_from_the_last_field() {
+    let line = "Playing\x1f1000000\x1fT\x1fA\x1fAl\x1f200000000\x1f\x1f1\x1f1\x1f\x1f0.5\x1f\x1fid\x1fvlc\x1f[Rock, Pop]";
+    let s = player::parse(line).unwrap();
+    assert_eq!(s.genre, "Rock, Pop");
+    // an older player line without the field still parses
+    let s = player::parse(&line[..line.rfind('\x1f').unwrap()]).unwrap();
+    assert_eq!(s.genre, "");
+}
+
+// ── Phase 4: AI translation ─────────────────────────────────────────────────
+
+fn ai_app(site: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
+    let args = cli::Args::parse_from([
+        "music_display",
+        "--translate",
+        "--translate-engine",
+        "ai",
+        "--ai-model",
+        "tester",
+        "--ai-endpoint",
+        site,
+        "--no-cache-translations",
+    ]);
+    let theme = theme::load(&args);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    app.args.config = Some(tmp(name).join("config.toml"));
+    app.on_snapshot(snap("Artist", "Hej", "Album"));
+    app.lyrics = app::LyricsState::Ready(lyrics::Lyrics::Plain(vec!["Jag gillar bär".into(), "Solen går ner".into()]));
+    (app, rx)
+}
+
+fn chat_reply(content: &str) -> R {
+    let body = serde_json::json!({"choices": [{"message": {"content": content}}]}).to_string();
+    R::Http(200, "Content-Type: application/json\r\n", body)
+}
+
+#[tokio::test]
+async fn ai_translates_the_whole_song_in_one_request() {
+    let (site, log) = scripted_site(vec![("/chat/completions", vec![chat_reply(r#"["I like berries","The sun goes down"]"#)])]);
+    let (mut app, mut rx) = ai_app(&site, "ai_ok");
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| a.translation().is_some()).await;
+    assert_eq!(app.translation().unwrap(), &vec!["I like berries".to_string(), "The sun goes down".to_string()]);
+    assert_eq!(log.lock().unwrap().iter().filter(|l| l.contains("/chat/completions")).count(), 1, "one request for the song");
+    // the title names the model
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "translated by tester (en)").is_some(), "{s:#?}");
+}
+
+#[tokio::test]
+async fn ai_that_keeps_failing_falls_back_to_the_standard_engine_and_says_so() {
+    // wrong line count twice (the retry too); Google answers
+    let (site, log) = scripted_site(vec![
+        ("/chat/completions", vec![chat_reply(r#"["only one"]"#)]),
+        ("/g/dict", vec![R::Http(429, "", String::new())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+        ("/libre", vec![R::Http(200, "Content-Type: application/json\r\n", r#"{"translatedText":"berries"}"#.into())]),
+    ]);
+    let (mut app, mut rx) = ai_app(&site, "ai_fail");
+    app.translate_base = Some(format!("{site}/g"));
+    app.args.translate_fallback_url = format!("{site}/libre");
+    app.args.translate_fallback_key = Some("k".into());
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| a.translation().is_some()).await;
+    assert!(app.translate_backend.starts_with(app::FALLBACK_TAG), "{}", app.translate_backend);
+    assert_eq!(log.lock().unwrap().iter().filter(|l| l.contains("/chat/completions")).count(), 2, "one retry, then give up");
+    let s = render(&mut app, 120, 30);
+    assert!(row_of(&s, "AI failed").is_some(), "the title says the AI failed: {s:#?}");
+}
+
+#[tokio::test]
+async fn ai_without_a_model_uses_the_standard_engine_with_a_note() {
+    let (site, _log) = scripted_site(vec![("/g", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["x","y"]],null,"sv"]"#.into())])]);
+    let (mut app, _rx) = ai_app(&site, "ai_nomodel");
+    app.args.ai_model.clear();
+    app.translate_base = Some(format!("{site}/g"));
+    app.ensure_translation();
+    assert!(app.note_text().unwrap_or("").contains("needs a model"));
+}
+
+#[tokio::test]
+async fn the_privacy_notice_is_for_remote_providers_only_and_needs_a_second_press() {
+    let (mut app, _rx) = ai_app("http://localhost:11434/v1", "ai_notice_local");
+    let _ = std::fs::remove_file(spotify::dir().with_file_name("ai-notice-ack"));
+    assert!(!app.ai_notice_needed(), "a local Ollama endpoint needs no notice");
+    // a remote provider: the first press only explains
+    app.args.translate_engine = cli::TranslateEngine::Standard;
+    app.args.ai_provider = "openai".into();
+    app.args.ai_endpoint = String::new();
+    assert!(app.ai_notice_needed());
+    app.change_setting(app::Setting::TranslateEngine, 1);
+    assert_eq!(app.args.translate_engine, cli::TranslateEngine::Standard);
+    let note = app.settings_note.clone().unwrap();
+    assert!(note.contains("sends the lyrics") && note.contains("api.openai.com"), "{note}");
+    // the second press turns it on, and the notice is not shown again
+    app.change_setting(app::Setting::TranslateEngine, 1);
+    assert_eq!(app.args.translate_engine, cli::TranslateEngine::Ai);
+    assert!(!app.ai_notice_needed());
+    let _ = std::fs::remove_file(spotify::dir().with_file_name("ai-notice-ack"));
+}
+
+#[tokio::test]
+async fn ai_settings_are_saved_under_the_ai_table_and_the_key_is_never_printed() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, _rx) = ai_app("http://localhost:11434/v1", "ai_save");
+    let cfg = app.args.config.clone().unwrap();
+    let _ = std::fs::remove_file(&cfg);
+    app.args.translate_engine = cli::TranslateEngine::Standard;
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::AiModel).unwrap();
+    app.handle(key(K::Enter));
+    for _ in 0..16 {
+        app.handle(key(K::Backspace));
+    }
+    for c in "llama3.1".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.ai_model, "llama3.1");
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[ai]") && saved.contains("model = \"llama3.1\""), "{saved}");
+    // config round trip; a bad provider is reported
+    let (a, w) = cfg_run("translate_engine = \"ai\"\n[ai]\nprovider = \"claude\"\nmodel = \"m\"\napi_key_env = \"MY_KEY\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!((a.translate_engine, a.ai_provider.as_str(), a.ai_model.as_str(), a.ai_key_env.as_str()), (cli::TranslateEngine::Ai, "claude", "m", "MY_KEY"));
+    let (_, w) = cfg_run("[ai]\nprovider = \"skynet\"\nbogus = 1\n", &[]);
+    assert!(w.iter().any(|m| m.contains("provider")) && w.iter().any(|m| m.contains("bogus")), "{w:?}");
+    // a flag beats the file
+    let (a, _) = cfg_run("[ai]\nmodel = \"file\"\n", &["--ai-model", "flag"]);
+    assert_eq!(a.ai_model, "flag");
+    // --print-config shows the variable's name, never a key
+    unsafe { std::env::set_var("MY_SECRET_KEY_FOR_TEST", "sk-super-secret") };
+    let (a, _) = cfg_run("[ai]\napi_key_env = \"MY_SECRET_KEY_FOR_TEST\"\n", &[]);
+    let printed = config::render(&a, std::path::Path::new("x"), true);
+    assert!(printed.contains("MY_SECRET_KEY_FOR_TEST") && !printed.contains("sk-super-secret"));
+}
+
+// ── Phase 5: annotations ────────────────────────────────────────────────────
+
+const GENIUS_JSON: &str = "Content-Type: application/json\r\n";
+
+fn genius_site(artist: &str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let search = serde_json::json!({"response": {"hits": [{"result": {"id": 77, "title": "Roygbiv", "primary_artist": {"name": artist}}}]}});
+    let referents = serde_json::json!({"response": {"referents": [
+        {"fragment": "We build castles in the sand", "annotations": [{"url": "https://genius.com/1", "body": {"plain": "A metaphor for fragile things people work hard on."}}]}
+    ]}});
+    scripted_site(vec![
+        ("/search", vec![R::Http(200, GENIUS_JSON, search.to_string())]),
+        ("/referents", vec![R::Http(200, GENIUS_JSON, referents.to_string())]),
+    ])
+}
+
+fn notes_app(artist: &str, site: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
+    let args = cli::Args::parse_from(["music_display", "--annotations", "--genius-token", "tok123"]);
+    let theme = theme::load(&args);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    app.set_layout(layout::Layout::default());
+    app.annotations_base = Some(site.to_string());
+    app.args.config = Some(tmp("notes").join("config.toml"));
+    app.on_snapshot(snap(artist, "Roygbiv", "Album"));
+    app.lyrics = app::LyricsState::Ready(lyrics::Lyrics::Synced(vec![
+        (0.0, "Intro line goes here".into()),
+        (10.0, "We build castles in the sand".into()),
+    ]));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn genius_annotations_follow_the_active_line() {
+    let artist = "NotesTest Genius Band";
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (site, log) = genius_site(artist);
+    let (mut app, mut rx) = notes_app(artist, &site);
+    assert!(app.annotations_shown());
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    assert_eq!(app.ann_match, vec![None, Some(0)]);
+    // before the matching line: nothing; on it: the excerpt, the quoted passage and the source
+    app.set_position_for_test(2.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("no annotation for"), "{s}");
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("fragile") && s.contains("— Genius") && s.contains("castles in the"), "{s}");
+    assert!(s.contains("annotations · Genius"));
+    // the token went out as a bearer header only
+    assert!(log.lock().unwrap().iter().all(|l| !l.contains("tok123")));
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+}
+
+#[tokio::test]
+async fn annotation_misses_are_cached_and_errors_never() {
+    annotations::reset_breaker();
+    // a miss: the search finds nothing; the second ask costs no request
+    let artist = "NotesTest Missing Band";
+    let path = annotations::cache_path(artist, "Roygbiv");
+    let _ = std::fs::remove_file(&path);
+    let empty = serde_json::json!({"response": {"hits": []}});
+    let (site, log) = scripted_site(vec![("/search", vec![R::Http(200, GENIUS_JSON, empty.to_string())])]);
+    let c = reqwest::Client::new();
+    assert_eq!(annotations::fetch_from(&c, &site, "t", artist, "Roygbiv").await, Ok(vec![]));
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"none\""));
+    assert_eq!(annotations::fetch_from(&c, &site, "t", artist, "Roygbiv").await, Ok(vec![]));
+    assert_eq!(log.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(&path);
+    // an error is reported, never cached, and never contains the token
+    let artist = "NotesTest Error Band";
+    let path = annotations::cache_path(artist, "Roygbiv");
+    let _ = std::fs::remove_file(&path);
+    let (site, _log) = scripted_site(vec![("/search", vec![R::Http(500, "", String::new())])]);
+    let e = annotations::fetch_from(&c, &site, "secret-token-xyz", artist, "Roygbiv").await.unwrap_err();
+    assert!(e.contains("500") && !e.contains("secret-token-xyz"), "{e}");
+    assert!(!path.exists());
+    annotations::reset_breaker();
+    // a refused token says so
+    let (site, _log) = scripted_site(vec![("/search", vec![R::Http(401, "", String::new())])]);
+    let e = annotations::fetch_from(&c, &site, "secret-token-xyz", artist, "Roygbiv").await.unwrap_err();
+    assert!(e.contains("refused the token") && !e.contains("secret-token-xyz"));
+    annotations::reset_breaker();
+}
+
+#[tokio::test]
+async fn without_a_token_the_panel_says_how_to_get_one_and_asks_nothing() {
+    let (mut app, _rx) = notes_app("NotesTest NoToken", "http://127.0.0.1:1");
+    app.args.genius_token.clear();
+    // (the environment may hold one on a developer machine)
+    if app.genius_token().is_some() {
+        return;
+    }
+    app.ensure_annotations();
+    assert!(matches!(&app.ann_state, app::AnnState::Failed(e) if e.contains("genius.com/api-clients")));
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("genius.com/api-clients"), "{s}");
+}
+
+#[tokio::test]
+async fn ai_notes_are_labelled_and_per_line() {
+    let reply = chat_reply(r#"[null, "A nod to Hamlet's 'to be or not to be'."]"#);
+    let (site, _log) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let artist = "NotesTest AI Band";
+    let (mut app, mut rx) = notes_app(artist, "http://127.0.0.1:1");
+    app.args.annotations_mode = cli::AnnotationMode::Ai;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = site;
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Hamlet") && s.contains("AI-generated"), "{s}");
+    assert!(s.contains("annotations · AI-generated"));
+    let _ = std::fs::remove_file(annotations::ai_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &app.lyric_lines().unwrap()));
+}
+
+#[tokio::test]
+async fn the_annotations_key_and_settings_rows_work_and_persist() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("notes_settings");
+    assert!(!app.annotations_shown(), "off by default");
+    app.handle(key(K::Char('N')));
+    assert!(app.annotations_shown());
+    app.handle(key(K::Char('N')));
+    assert!(!app.annotations_shown());
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::Annotations).unwrap();
+    app.handle(key(K::Enter));
+    assert!(app.annotations_shown());
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("annotations = true"));
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::AnnotationsMode).unwrap();
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.annotations_mode, cli::AnnotationMode::Ai);
+    // the token row never shows the token
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::GeniusToken).unwrap();
+    app.handle(key(K::Enter));
+    for c in "abc-secret".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.genius_token, "abc-secret");
+    assert_eq!(app.setting_value(app::Setting::GeniusToken), "set (hidden)");
+    let printed = config::render(&app.args, std::path::Path::new("x"), true);
+    assert!(!printed.contains("abc-secret"));
+    // the config file round-trips the new keys
+    let (a, w) = cfg_run("annotations = true\nannotations_mode = \"ai\"\ngenius_token = \"t\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert!(a.annotations && a.annotations_mode == cli::AnnotationMode::Ai && a.genius_token == "t");
 }
