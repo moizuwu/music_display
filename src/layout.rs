@@ -30,8 +30,8 @@ macro_rules! items {
 items! {
     /// A part of the screen with its own config section and click handling.
     PanelId {
-        Metadata => "metadata",
         Cover => "cover",
+        Metadata => "metadata",
         Controls => "controls",
         Lyrics => "lyrics",
         Chords => "chords",
@@ -310,7 +310,8 @@ impl Default for Layout {
             fields: Ordered::new(|_| true),
             buttons: Ordered::new(|_| true),
             sizes: Vec::new(),
-            cava_under_lyrics: false,
+            // cava below the lyrics unless asked for a column of its own (`--thirdpanel`)
+            cava_under_lyrics: true,
         }
     }
 }
@@ -322,7 +323,11 @@ impl Layout {
         match name.trim().to_ascii_lowercase().as_str() {
             "default" => {}
             "no-lyrics" => l.panels.set(PanelId::Lyrics, false),
-            "cava" => l.panels.set(PanelId::Cava, true),
+            // cava in a column of its own
+            "cava" => {
+                l.panels.set(PanelId::Cava, true);
+                l.cava_under_lyrics = false;
+            }
             "under-lyrics" => {
                 l.panels.set(PanelId::Cava, true);
                 l.cava_under_lyrics = true;
@@ -339,15 +344,18 @@ impl Layout {
     }
 
     /// Apply the legacy flags on top (a flag always wins over the file).
-    pub fn with_flags(mut self, no_lyrics: bool, cava: bool, under_lyrics: bool) -> Self {
+    pub fn with_flags(mut self, no_lyrics: bool, cava: bool, under_lyrics: bool, third_panel: bool) -> Self {
         if no_lyrics {
             self.panels.set(PanelId::Lyrics, false);
         }
-        if cava || under_lyrics {
+        if cava || under_lyrics || third_panel {
             self.panels.set(PanelId::Cava, true);
         }
         if under_lyrics {
             self.cava_under_lyrics = true;
+        }
+        if third_panel {
+            self.cava_under_lyrics = false;
         }
         self
     }
@@ -434,6 +442,21 @@ impl Layout {
             }
         }
         self.panels.read(t, "layout", warn);
+        // Files written before the cover moved to the top carry the old default order verbatim
+        // (metadata, cover, controls, …): that was never a choice, so it becomes the new default.
+        const OLD_DEFAULT: [PanelId; 8] = [
+            PanelId::Metadata,
+            PanelId::Cover,
+            PanelId::Controls,
+            PanelId::Lyrics,
+            PanelId::Chords,
+            PanelId::Cava,
+            PanelId::Annotations,
+            PanelId::Library,
+        ];
+        if self.panels.items.iter().map(|(p, _)| *p).eq(OLD_DEFAULT) {
+            self.panels.items.swap(0, 1);
+        }
         if let Some(b) = t.get("cava_under_lyrics") {
             match b.as_bool() {
                 Some(b) => self.cava_under_lyrics = b,
@@ -567,7 +590,9 @@ mod tests {
         let l = Layout::default();
         assert!(l.is_automatic());
         assert_eq!(l.column_order(), vec![PanelId::Metadata, PanelId::Lyrics]);
-        assert_eq!(l.now_playing(), vec![PanelId::Metadata, PanelId::Cover, PanelId::Controls]);
+        // the cover on top, the track information under it
+        assert_eq!(l.now_playing(), vec![PanelId::Cover, PanelId::Metadata, PanelId::Controls]);
+        assert!(l.cava_under_lyrics, "cava goes below the lyrics unless asked otherwise");
         assert_eq!(l.fields.visible().count(), 10);
         // Album can be moved above Title
         let mut f = l.fields.clone();
@@ -578,13 +603,18 @@ mod tests {
 
     #[test]
     fn flags_are_presets() {
-        let l = Layout::default().with_flags(true, true, false);
-        assert!(!l.panels.shown(PanelId::Lyrics) && l.panels.shown(PanelId::Cava));
+        // --thirdpanel: a column of its own
+        let l = Layout::default().with_flags(true, false, false, true);
+        assert!(!l.panels.shown(PanelId::Lyrics) && l.panels.shown(PanelId::Cava) && !l.cava_under_lyrics);
         assert_eq!(l.column_order(), vec![PanelId::Metadata, PanelId::Cava]);
-        let l = Layout::default().with_flags(false, false, true);
+        // --cava alone keeps the default: below the lyrics
+        let l = Layout::default().with_flags(false, true, false, false);
+        assert!(l.panels.shown(PanelId::Cava) && l.cava_under_lyrics);
+        let l = Layout::default().with_flags(false, false, true, false);
         assert!(l.cava_under_lyrics);
         assert_eq!(l.column_order(), vec![PanelId::Metadata, PanelId::Lyrics], "cava lives under the lyrics");
-        assert_eq!(Layout::preset("cava").unwrap().column_order().len(), 3);
+        assert_eq!(Layout::preset("cava").unwrap().column_order().len(), 3, "the cava preset is a column of its own");
+        assert!(Layout::preset("under-lyrics").unwrap().cava_under_lyrics);
         assert!(Layout::preset("nope").is_none());
         for n in PRESETS {
             assert!(Layout::preset(n).is_some(), "{n}");
@@ -636,6 +666,20 @@ mod tests {
         // lyrics listed first; everything not listed is still known (appended)
         assert_eq!(l.panels.items[0].0, PanelId::Lyrics);
         assert_eq!(l.panels.items.len(), PanelId::ALL.len());
+    }
+
+    #[test]
+    fn the_old_default_order_is_migrated_but_a_chosen_one_is_kept() {
+        // written by the first version, when the track information came before the cover
+        let old = "[layout]\norder = [\"metadata\", \"cover\", \"controls\", \"lyrics\", \"chords\", \"cava\", \"annotations\", \"library\"]\nhidden = [\"chords\", \"cava\"]\n";
+        let (l, w) = parse(old);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(l.now_playing(), vec![PanelId::Cover, PanelId::Metadata, PanelId::Controls]);
+        assert!(!l.panels.shown(PanelId::Chords) && !l.panels.shown(PanelId::Cava), "visibility survives");
+        // a deliberate rearrangement is left alone
+        let own = "[layout]\norder = [\"metadata\", \"controls\", \"cover\", \"lyrics\", \"chords\", \"cava\", \"annotations\", \"library\"]\n";
+        let (l, _) = parse(own);
+        assert_eq!(l.now_playing(), vec![PanelId::Metadata, PanelId::Controls, PanelId::Cover]);
     }
 
     #[test]

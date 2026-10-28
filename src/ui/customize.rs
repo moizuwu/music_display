@@ -56,6 +56,10 @@ pub(super) fn draw_customize(f: &mut Frame, app: &mut App) {
                     Style::new().fg(th.fade(0.5))
                 };
                 let size = match it {
+                    // cava has no share of its own to set: it says where it sits (`p` switches)
+                    CustItem::Panel(PanelId::Cava) => {
+                        if app.layout.cava_under_lyrics { "bottom" } else { "side" }.to_string()
+                    }
                     CustItem::Panel(p) => match app.cust_size(p) {
                         Some(n) => format!("{n}%"),
                         None => "auto".to_string(),
@@ -77,7 +81,7 @@ pub(super) fn draw_customize(f: &mut Frame, app: &mut App) {
     let hint = match &app.settings_note {
         Some(n) => n.chars().take(width).collect(),
         None => crate::browser::fit_items(
-            &["↑/↓ select", "space show/hide", "u/d move", "+/- size", "a auto sizes", "r reset", "esc back"],
+            &["↑/↓ select", "space show/hide", "u/d move", "+/- size", "p cava bottom/side", "a auto sizes", "r reset", "esc back"],
             width,
         ),
     };

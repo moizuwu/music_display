@@ -9,7 +9,8 @@ pub(super) fn draw_annotations(f: &mut Frame, app: &mut App, area: Rect) {
         crate::cli::AnnotationMode::Genius => "Genius",
         crate::cli::AnnotationMode::Ai => crate::annotations::AI_LABEL,
     };
-    let title = format!("annotations · {mode}");
+    // the source is named in the body too; the title only carries it when there is room
+    let title = if area.width >= 30 { format!("annotations · {mode}") } else { "annotations".to_string() };
     let block = panel(app, &title);
     let inner = block.inner(area).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, area);

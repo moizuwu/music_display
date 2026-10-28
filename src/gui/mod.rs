@@ -78,12 +78,20 @@ impl Gui {
                 }
             }
             PanelId::Lyrics => {
-                if self.m.show_diagrams {
+                // with the annotations column open the diagrams live in it (above the notes)
+                if self.m.show_diagrams && !self.m.annotations_shown() {
                     egui::Panel::right("diagrams").default_size(280.0).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
                 }
                 view::lyrics(ui, &mut self.m);
             }
-            PanelId::Annotations => view::annotations(ui, &mut self.m),
+            PanelId::Annotations => {
+                if self.m.show_diagrams {
+                    // one column, two panels: the diagrams take the top half, the notes the rest
+                    let half = ui.available_height() / 2.0;
+                    egui::Panel::top("diagrams_stack").default_size(half).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
+                }
+                view::annotations(ui, &mut self.m);
+            }
             _ => {}
         }
     }

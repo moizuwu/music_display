@@ -392,6 +392,7 @@ Open the settings menu (`s`, or click `[ settings ]` in the top row) and pick **
 | `space` / `Enter` | show / hide it |
 | `u` / `d` | move it up / down in its group (the selection follows) |
 | `+` / `-` (or `→` / `←`) | give a panel 5 % more / less of the screen |
+| `p` | on the Cava row: cava below the lyrics (`bottom`) or in a column of its own (`side`); saved as `cava_under_lyrics` |
 | `a` | back to automatic sizes |
 | `r` | reset the whole layout |
 | `Esc` | back to the settings menu |
@@ -403,9 +404,9 @@ Every change is saved at once to the `[layout]` table of `config.toml` (the rest
 ```toml
 [layout]
 direction = "horizontal"          # or "vertical": stack the columns
-order  = ["metadata", "cover", "controls", "lyrics", "chords", "cava", "annotations", "library"]
+order  = ["cover", "metadata", "controls", "lyrics", "chords", "cava", "annotations", "library"]
 hidden = ["chords", "cava", "annotations", "library"]
-cava_under_lyrics = false
+cava_under_lyrics = true             # cava below the lyrics (default); false = a column of its own
 [layout.size]                     # percent of the screen; a panel not listed gets the automatic size
 metadata = 40
 [layout.fields]
@@ -416,7 +417,7 @@ order  = ["shuffle", "repeat", "prev", "play", "next", "volume"]
 hidden = []
 ```
 
-`order` lists everything in order and `hidden` the entries that are off, so hiding something keeps its place; an entry missing from `order` (a field added in a later version) is appended and shown. Bad names or sizes are reported on start and skipped. The column order is the order of `metadata` (the Metadata, Cover and Controls panels form the left column, stacked cover-and-metadata first or metadata first as listed), `lyrics`, `cava` and `annotations`; the chord diagrams dock beside the lyrics and the library is always the side panel on the left. Without any `[layout]` the screen is laid out exactly as before. Precedence is the usual one: flag > file > default.
+`order` lists everything in order and `hidden` the entries that are off, so hiding something keeps its place; an entry missing from `order` (a field added in a later version) is appended and shown. Bad names or sizes are reported on start and skipped. The column order is the order of `metadata` (the Metadata, Cover and Controls panels form the left column, stacked cover-and-metadata first or metadata first as listed), `lyrics`, `cava` and `annotations`; the chord diagrams dock beside the lyrics and the library is always the side panel on the left. The cover is on top of the track information by default (a file written by the first version, which listed `metadata` before `cover` without anyone choosing that, is read with the new order; an order you arranged yourself is kept). Cava goes below the lyrics unless you set `cava_under_lyrics = false`, use `--thirdpanel`, or switch "Third panel" in the settings menu, which now writes this key. When the annotations panel and the chord diagrams are both on, they share one column: the diagrams on top, the notes below, half the height each. Without any `[layout]` the screen is laid out exactly as before. Precedence is the usual one: flag > file > default.
 
 ## Metadata panel
 

@@ -81,7 +81,14 @@ impl Panel for Annotations {
         PanelId::Annotations
     }
     fn render(&self, f: &mut Frame, app: &mut App, area: Rect) {
-        draw_annotations(f, app, area);
+        if app.hits.stack_diagrams {
+            // one column, two panels: the chord diagrams on top, the notes below, half each
+            let [top, bottom] = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+            draw_diagrams(f, app, top);
+            draw_annotations(f, app, bottom);
+        } else {
+            draw_annotations(f, app, area);
+        }
     }
 }
 

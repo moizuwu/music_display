@@ -3609,6 +3609,11 @@ fn playing_app() -> app::App {
     app
 }
 
+/// Screen column (in characters, not bytes) where `needle` starts in `row`.
+fn col_of(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle).map(|b| row[..b].chars().count())
+}
+
 fn row_of(screen: &[String], needle: &str) -> Option<usize> {
     screen.iter().position(|r| r.contains(needle))
 }
@@ -3788,10 +3793,11 @@ async fn customize_page_toggles_moves_resizes_and_resets() {
     assert!(app.customizing);
     let s = render(&mut app, 100, 40);
     assert!(row_of(&s, "customize layout").is_some() && row_of(&s, "Metadata fields").is_some());
-    // first line: Metadata panel. Down to Cover, hide it
+    // first line: the Cover panel (it is on top). Down to Metadata, hide it
+    assert_eq!(app.cust_items()[0], app::CustItem::Panel(PanelId::Cover));
     app.handle(key(K::Down));
     app.handle(key(K::Char(' ')));
-    assert!(!app.layout.panels.shown(PanelId::Cover));
+    assert!(!app.layout.panels.shown(PanelId::Metadata));
     // move Lyrics up (reorder keeps the selection on it)
     while app.cust_items()[app.cust_sel] != app::CustItem::Panel(PanelId::Lyrics) {
         app.handle(key(K::Down));
@@ -3866,7 +3872,7 @@ async fn layout_loads_from_the_file_and_flags_win() {
 async fn layout_sets_the_start_state() {
     use layout::PanelId;
     let mut app = test_app();
-    let l = layout::Layout::default().with_flags(true, true, false);
+    let l = layout::Layout::default().with_flags(true, false, false, true);
     app.set_layout(l);
     assert!(!app.show_lyrics && app.show_cava);
     let mut app = test_app();
@@ -4127,7 +4133,7 @@ async fn genius_annotations_follow_the_active_line() {
     app.set_position_for_test(11.0);
     let s = render(&mut app, 120, 30).join("\n");
     assert!(s.contains("fragile") && s.contains("— Genius") && s.contains("castles in the"), "{s}");
-    assert!(s.contains("annotations · Genius"));
+    assert!(s.contains("annotations"));
     // the token went out as a bearer header only
     assert!(log.lock().unwrap().iter().all(|l| !l.contains("tok123")));
     let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
@@ -4175,7 +4181,8 @@ async fn without_a_token_the_panel_says_how_to_get_one_and_asks_nothing() {
     app.ensure_annotations();
     assert!(matches!(&app.ann_state, app::AnnState::Failed(e) if e.contains("genius.com/api-clients")));
     let s = render(&mut app, 120, 30).join("\n");
-    assert!(s.contains("genius.com/api-clients"), "{s}");
+    // (the column is narrow, so the message wraps)
+    assert!(s.contains("no token") && s.contains("genius.com"), "{s}");
 }
 
 #[tokio::test]
@@ -4192,7 +4199,7 @@ async fn ai_notes_are_labelled_and_per_line() {
     app.set_position_for_test(11.0);
     let s = render(&mut app, 120, 30).join("\n");
     assert!(s.contains("Hamlet") && s.contains("AI-generated"), "{s}");
-    assert!(s.contains("annotations · AI-generated"));
+    assert!(s.contains("annotations"));
     let _ = std::fs::remove_file(annotations::ai_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &app.lyric_lines().unwrap()));
 }
 
@@ -4228,4 +4235,107 @@ async fn the_annotations_key_and_settings_rows_work_and_persist() {
     let (a, w) = cfg_run("annotations = true\nannotations_mode = \"ai\"\ngenius_token = \"t\"\n", &[]);
     assert!(w.is_empty(), "{w:?}");
     assert!(a.annotations && a.annotations_mode == cli::AnnotationMode::Ai && a.genius_token == "t");
+}
+
+// ── fixes: cava placement, cover above the track info, annotations next to the diagrams ──
+
+#[tokio::test]
+async fn the_cava_placement_toggle_is_saved_and_survives_a_restart() {
+    use crossterm::event::KeyCode as K;
+    use layout::PanelId;
+    let (mut app, cfg) = settings_app("cavadock");
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics, "below the lyrics by default");
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::ThirdPanel).unwrap();
+    // "Third panel" on: a column of its own, written to [layout] (the toggle used to write only `thirdpanel`)
+    app.handle(key(K::Enter));
+    assert_eq!(app.placement, app::CavaPlacement::ThirdPanel);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("cava_under_lyrics = false") && saved.contains("thirdpanel = true"), "{saved}");
+    // ... and back to the bottom
+    app.handle(key(K::Enter));
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("cava_under_lyrics = true") && saved.contains("thirdpanel = false"), "{saved}");
+    // a restart with cava on: the saved placement is kept (it used to flip to a side column)
+    let mut args = cli::Args::parse_from(["x", "--config", cfg.to_str().unwrap()]);
+    let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x", "--config", cfg.to_str().unwrap()]);
+    config::apply(&mut args, &m, &cfg, true, &mut |_| {});
+    let mut l = config::load_layout(&args, &cfg, &mut |_| {});
+    l.panels.set(PanelId::Cava, true);
+    let mut app = test_app();
+    app.set_layout(l);
+    assert!(app.show_cava);
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+    // `--thirdpanel` still asks for the column
+    let args = cli::Args::parse_from(["x", "--thirdpanel"]);
+    let l = config::load_layout(&args, &cfg, &mut |_| {});
+    assert!(!l.cava_under_lyrics && l.panels.shown(PanelId::Cava));
+}
+
+#[tokio::test]
+async fn the_customize_page_switches_cava_between_bottom_and_side() {
+    use crossterm::event::KeyCode as K;
+    use layout::PanelId;
+    let (mut app, cfg) = settings_app("cavadock_page");
+    app.snap = Some(snap("A", "B", "C"));
+    app.show_settings = true;
+    app.open_customize();
+    while app.cust_items()[app.cust_sel] != app::CustItem::Panel(PanelId::Cava) {
+        app.handle(key(K::Down));
+    }
+    let s = render(&mut app, 100, 40);
+    assert!(row_of(&s, "bottom").is_some(), "{s:#?}");
+    app.handle(key(K::Char('p')));
+    assert_eq!(app.placement, app::CavaPlacement::ThirdPanel);
+    assert!(app.show_cava, "a column of its own is shown");
+    assert!(row_of(&render(&mut app, 100, 40), "side").is_some());
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("cava_under_lyrics = false"));
+    app.handle(key(K::Char('p')));
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+}
+
+#[tokio::test]
+async fn the_cover_is_above_the_track_information() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let track = row_of(&s, "Track ").unwrap();
+    assert!(track > 8, "the cover takes the top rows, the track information is under it (row {track})");
+    // the other way round is still a choice
+    app.layout.panels.shift(PanelId::Metadata, -1);
+    assert_eq!(app.layout.now_playing()[0], PanelId::Metadata);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Track ").unwrap() < 5, "{s:#?}");
+}
+
+#[tokio::test]
+async fn annotations_and_diagrams_share_one_column() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    app.set_layout(layout::Layout::default());
+    // the notes alone: a column of their own, narrower than before
+    app.toggle_annotations();
+    let s = render(&mut app, 120, 40);
+    let x = s.iter().find_map(|r| col_of(r, "annotations")).unwrap();
+    assert!(!app.hits.stack_diagrams);
+    assert!(x >= 94, "the notes column starts at {x} of 120");
+    // the diagrams alone dock inside the lyrics column, as before
+    app.toggle_annotations();
+    app.show_diagrams = true;
+    let s = render(&mut app, 120, 40);
+    assert!(!app.hits.stack_diagrams && s.iter().any(|r| r.contains("chords")));
+    // both: one column, the diagrams on top and the notes under them, half each
+    app.toggle_annotations();
+    let s = render(&mut app, 120, 40);
+    assert!(app.hits.stack_diagrams);
+    let chords_row = s.iter().position(|r| r.contains("╭ chords")).unwrap();
+    let notes_row = s.iter().position(|r| r.contains("╭ annotations")).unwrap();
+    assert!(chords_row < notes_row, "diagrams above notes");
+    let (cx, nx) = (col_of(&s[chords_row], "╭ chords").unwrap(), col_of(&s[notes_row], "╭ annotations").unwrap());
+    assert_eq!(cx, nx, "the same column");
+    assert_eq!(s.iter().filter(|r| r.contains("╭ chords")).count(), 1, "the lyrics column no longer holds its own copy");
+    // roughly half the height each (the column is 40 - top row - footer rows tall)
+    assert!(notes_row.abs_diff(chords_row + (40 - 2) / 2) <= 3, "{chords_row} {notes_row}");
+    let _ = PanelId::Chords;
 }

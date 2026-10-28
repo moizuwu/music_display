@@ -5,7 +5,7 @@ pub(super) const DIAGRAM_MIN_WIDTH: u16 = 56;
 pub(super) const DIAGRAM_PANEL_WIDTH: u16 = 28;
 
 pub(super) fn draw_lyrics_and_diagrams(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.show_diagrams && area.width >= DIAGRAM_MIN_WIDTH {
+    if app.show_diagrams && !app.hits.stack_diagrams && area.width >= DIAGRAM_MIN_WIDTH {
         let [l, d] = Layout::horizontal([
             Constraint::Min(1),
             Constraint::Length(DIAGRAM_PANEL_WIDTH),

@@ -34,7 +34,7 @@ pub const FALLBACK_TAG: &str = "fallback: ";
 pub use settings::*;
 
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CavaPlacement {
     ThirdPanel,
     UnderLyrics,
@@ -132,6 +132,9 @@ pub struct Hits {
     pub borders: Vec<Border>,
     /// The rows of the open field menu.
     pub menu_items: Vec<Rect>,
+    /// Chord diagrams share the annotations column (drawn above the notes) instead of docking
+    /// inside the lyrics column.
+    pub stack_diagrams: bool,
 }
 
 /// A draggable border between two columns.
@@ -1553,15 +1556,9 @@ impl App {
                 self.run(Action::ToggleCava);
             }
             Setting::ThirdPanel => {
-                self.placement = match self.placement {
-                    CavaPlacement::ThirdPanel => CavaPlacement::UnderLyrics,
-                    CavaPlacement::UnderLyrics => CavaPlacement::ThirdPanel,
-                };
-                self.args.thirdpanel = self.placement == CavaPlacement::ThirdPanel;
-                // startup shows cava whenever thirdpanel is set, so keep the two in step
-                if self.args.thirdpanel && !self.minimal && !self.show_cava {
-                    self.set_cava(true);
-                }
+                // written to `[layout]` too: that is what decides on the next start
+                let under = self.placement == CavaPlacement::ThirdPanel;
+                self.set_cava_dock(under);
             }
             Setting::CoverTheme => self.args.cover_theme = !self.args.cover_theme,
             Setting::AsciiCover => self.args.ascii_cover = !self.args.ascii_cover,
@@ -1781,6 +1778,7 @@ impl App {
     // ── cava lifecycle ─────────────────────────────────────────────────
     fn set_cava(&mut self, on: bool) {
         self.show_cava = on;
+        self.layout.panels.set(crate::layout::PanelId::Cava, on);
         if on {
             if self.cava_task.is_none() {
                 self.cava_status = Some("starting cava…".into());
@@ -1952,6 +1950,7 @@ impl App {
             Action::Mute => self.toggle_mute(),
             Action::ToggleLyrics => {
                 self.show_lyrics = !self.show_lyrics;
+                self.layout.panels.set(crate::layout::PanelId::Lyrics, self.show_lyrics);
                 self.snap_scroll = true;
             }
             Action::NextLyrics => self.next_lyrics(),
@@ -1997,6 +1996,7 @@ impl App {
             Action::Annotations => self.toggle_annotations(),
             Action::Diagrams => {
                 self.show_diagrams = !self.show_diagrams;
+                self.layout.panels.set(crate::layout::PanelId::Chords, self.show_diagrams);
                 self.snap_scroll = true;
             }
             Action::Minimal => self.set_minimal(!self.minimal),

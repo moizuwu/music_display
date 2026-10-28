@@ -39,6 +39,17 @@ which turns the `Unreleased` section into that version.
   ranking), `ai` (whole-song translation through any OpenAI-compatible endpoint, Gemini, Claude or
   OpenAI) and `layout`.
 
+### Fixed
+- Cava placement: the "Third panel" row in the settings menu now writes `[layout] cava_under_lyrics`
+  (it only wrote `thirdpanel`, which the layout then overrode, so the choice was lost on restart), the
+  layout alone decides where cava goes, and "below the lyrics" is the default again. The customize
+  page shows `bottom` / `side` on the Cava row and switches it with `p`.
+- The cover is above the track information again; a saved layout with the old default panel order is
+  migrated.
+- The annotations panel no longer takes a third of the screen: it is narrower by default, and when the
+  chord diagrams are on as well they share one column with it (diagrams above, notes below).
+- Toggling lyrics, cava or the diagrams with their keys now keeps the layout's panel list in step.
+
 ### Changed
 - The top row is always there (it holds the new buttons and, with Spotify, `[ library ]`).
 - The core (players, lyrics, chords, translation, Spotify, config, cover decoding, cava) is now a

@@ -157,6 +157,7 @@ fn draw_main(f: &mut Frame, app: &mut App) {
     app.hits.fields.clear();
     app.hits.borders.clear();
     app.hits.menu_items.clear();
+    app.hits.stack_diagrams = false;
     app.hits.settings_btn = Rect::default();
     app.hits.help_btn = Rect::default();
 
@@ -191,6 +192,9 @@ fn draw_main(f: &mut Frame, app: &mut App) {
     } else {
         custom_columns(app, main)
     };
+    // with the annotations column open, the chord diagrams move into it, above the notes, so the
+    // two share one column instead of the diagrams eating into the lyrics as well
+    app.hits.stack_diagrams = app.show_diagrams && cols.iter().any(|(id, _)| *id == PanelId::Annotations);
     for (id, r) in &cols {
         panel_for(*id).render(f, app, *r);
     }
@@ -199,11 +203,15 @@ fn draw_main(f: &mut Frame, app: &mut App) {
 }
 
 /// Weight of a column when it has no explicit size (they share what the explicit ones leave).
-fn column_weight(p: PanelId) -> u16 {
+fn column_weight(p: PanelId, diagrams_stacked: bool) -> u16 {
     match p {
         PanelId::Metadata => 40,
         PanelId::Lyrics => 60,
         PanelId::Cava => 28,
+        // the notes of one line need less room than the lyrics; with the diagrams above them the
+        // column has to fit those
+        PanelId::Annotations if diagrams_stacked => 30,
+        PanelId::Annotations => 24,
         _ => 30,
     }
 }
@@ -263,7 +271,7 @@ fn custom_columns(app: &App, main: Rect) -> Vec<(PanelId, Rect)> {
     let horizontal = app.layout.direction == crate::layout::Split::Horizontal;
     let total = if horizontal { main.width } else { main.height };
     let spec: Vec<(Option<u16>, u16)> =
-        ids.iter().map(|p| (app.layout.size_of(*p), column_weight(*p))).collect();
+        ids.iter().map(|p| (app.layout.size_of(*p), column_weight(*p, app.show_diagrams))).collect();
     let min = if horizontal { 12 } else { 4 };
     let sizes = crate::layout::split_sizes(total, &spec, min);
     let mut at = if horizontal { main.x } else { main.y };

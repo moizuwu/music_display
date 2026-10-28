@@ -71,11 +71,9 @@ impl App {
         }
         self.show_lyrics = self.layout.panels.shown(PanelId::Lyrics);
         self.show_diagrams = self.layout.panels.shown(PanelId::Chords);
-        if self.layout.cava_under_lyrics {
-            self.placement = CavaPlacement::UnderLyrics;
-        } else if self.args.thirdpanel || self.layout.panels.shown(PanelId::Cava) {
-            self.placement = CavaPlacement::ThirdPanel;
-        }
+        // the layout alone decides where cava goes (`--thirdpanel` was folded into it on load)
+        self.placement =
+            if self.layout.cava_under_lyrics { CavaPlacement::UnderLyrics } else { CavaPlacement::ThirdPanel };
         if self.layout.panels.shown(PanelId::Cava) && !self.show_cava && !self.minimal {
             self.set_cava(true);
         }
@@ -131,17 +129,25 @@ impl App {
                             self.ensure_annotations();
                         }
                     }
-                    PanelId::Cava => {
-                        if self.layout.cava_under_lyrics {
-                            self.placement = CavaPlacement::UnderLyrics;
-                        }
-                        self.set_cava(on);
-                    }
+                    PanelId::Cava => self.set_cava(on),
                     _ => {}
                 }
             }
             CustItem::Field(f) => self.layout.fields.toggle(f),
             CustItem::Button(b) => self.layout.buttons.toggle(b),
+        }
+        self.save_layout();
+    }
+
+    /// Where cava goes: below the lyrics (`true`) or in a column of its own. This is the one place
+    /// that changes it, so the layout, the running screen and the config file cannot disagree.
+    pub fn set_cava_dock(&mut self, under: bool) {
+        self.layout.cava_under_lyrics = under;
+        self.placement = if under { CavaPlacement::UnderLyrics } else { CavaPlacement::ThirdPanel };
+        self.args.thirdpanel = !under;
+        // a column of its own is only worth choosing for something you can see
+        if !under && !self.minimal && !self.show_cava {
+            self.set_cava(true);
         }
         self.save_layout();
     }
@@ -172,6 +178,7 @@ impl App {
         self.show_lyrics = true;
         self.show_diagrams = false;
         self.placement = CavaPlacement::UnderLyrics;
+        self.args.thirdpanel = false;
         if self.show_cava {
             self.set_cava(false);
         }
@@ -202,6 +209,11 @@ impl App {
                 if let CustItem::Panel(p) = it {
                     self.cust_resize(p, -1)
                 }
+            }
+            // cava: below the lyrics or in a column of its own
+            KeyCode::Char('p') if matches!(it, CustItem::Panel(PanelId::Cava)) => {
+                let under = !self.layout.cava_under_lyrics;
+                self.set_cava_dock(under);
             }
             KeyCode::Char('a') => {
                 self.layout.clear_sizes();

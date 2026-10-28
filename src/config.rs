@@ -304,7 +304,7 @@ pub fn load_layout(args: &Args, path: &Path, warn: &mut dyn FnMut(String)) -> cr
             None => warn(format!("--layout-preset: unknown preset '{name}' (use {})", crate::layout::PRESETS.join(", "))),
         }
     }
-    l.with_flags(args.nolyrics, args.cava || args.thirdpanel, args.underlyrics)
+    l.with_flags(args.nolyrics, args.cava, args.underlyrics, args.thirdpanel)
 }
 
 /// Store `layout` as the `[layout]` table, keeping every other key.
