@@ -1,4 +1,4 @@
-use crate::theme::{Rgb, mix, readable};
+use crate::color::{Rgb, mix, readable};
 use crate::util::{fnv1a, tmp_dir};
 use image::DynamicImage;
 use image::imageops::FilterType;

@@ -1,6 +1,104 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Where the annotations panel gets its notes.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AnnotationMode {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // Genius annotations of the song (free client token).
+    #[default]
+    Genius,
+    // Short notes written by the AI engine, labelled as AI-generated.
+    Ai,
+}
+
+impl AnnotationMode {
+    pub const NAMES: &'static [&'static str] = &["genius", "ai"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "genius" => Some(Self::Genius),
+            "ai" => Some(Self::Ai),
+            _ => None,
+        }
+    }
+}
+
+/// Which engine translates the lyrics.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TranslateEngine {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // Google Translate (unofficial endpoint), LibreTranslate as the fallback.
+    #[default]
+    Standard,
+    // A language model, one request per song (see the `[ai]` settings).
+    Ai,
+}
+
+impl TranslateEngine {
+    pub const NAMES: &'static [&'static str] = &["standard", "ai"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "ai" => Some(Self::Ai),
+            _ => None,
+        }
+    }
+}
+
+/// What the lyrics panel shows when a translation exists.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TranslateMode {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // The original line only.
+    #[default]
+    Off,
+    // The original line with its translation underneath.
+    Both,
+    // The translation replaces the original line.
+    Translated,
+}
+
+impl TranslateMode {
+    pub const NAMES: &'static [&'static str] = &["off", "both", "translated"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "both" => Some(Self::Both),
+            "translated" => Some(Self::Translated),
+            _ => None,
+        }
+    }
+
+    /// Next / previous mode, wrapping.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
+    }
+}
+
+impl Args {
+    /// The mode the app starts in: `--translate-mode` / `translate_mode`, else `--translate`.
+    pub fn start_translate_mode(&self) -> TranslateMode {
+        self.translate_mode
+            .unwrap_or(if self.translate { TranslateMode::Translated } else { TranslateMode::Off })
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "music_display",
@@ -35,6 +133,21 @@ pub struct Args {
     /// Put cava underneath the lyrics panel (default placement) [no config key]
     #[arg(long)]
     pub underlyrics: bool,
+
+    /// Open the window instead of the terminal UI (needs a build with `--features gui`)
+    /// [no config key]
+    #[arg(long)]
+    pub gui: bool,
+
+    /// Start from a named layout: default, no-lyrics, cava, under-lyrics, minimal. The flags
+    /// above are shortcuts for these [config: [layout] preset]
+    #[arg(long, value_name = "NAME")]
+    pub layout_preset: Option<String>,
+
+    /// Forget the saved `[layout]` (panel order, sizes, hidden fields and buttons) and start
+    /// from the default [no config key]
+    #[arg(long)]
+    pub reset_layout: bool,
 
     /// MPRIS player name passed to `playerctl -p` ("any" = playerctl's default choice) [config: player]
     #[arg(long, default_value = "spotify")]
@@ -159,6 +272,55 @@ pub struct Args {
     /// Show lyrics translated (Google Translate, unofficial; toggle with `K`) [config: translate]
     #[arg(long)]
     pub translate: bool,
+
+    /// How translated lyrics are shown: off, both (original, then the translation underneath)
+    /// or translated (the translation replaces the line). Wins over --translate [config: translate_mode]
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub translate_mode: Option<TranslateMode>,
+
+    /// Look the genre up on MusicBrainz when neither the player nor the file's tags have one
+    /// [config: genre_lookup]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
+    pub genre_lookup: bool,
+
+    /// Translation engine: standard (Google, LibreTranslate fallback) or ai (a language model,
+    /// off by default; see --ai-provider) [config: translate_engine]
+    #[arg(long, value_enum, default_value = "standard", value_name = "ENGINE")]
+    pub translate_engine: TranslateEngine,
+
+    /// AI provider: openai-compatible (Ollama, LM Studio: free, local), gemini, claude, openai
+    /// [config: [ai] provider]
+    #[arg(long, default_value = "openai-compatible", value_name = "PROVIDER")]
+    pub ai_provider: String,
+
+    /// AI model name, e.g. `llama3.1` (Ollama), `gemini-2.5-flash`, `gpt-4o-mini` [config: [ai] model]
+    #[arg(long, default_value = "", value_name = "MODEL")]
+    pub ai_model: String,
+
+    /// AI endpoint; empty = the provider's default (Ollama: http://localhost:11434/v1)
+    /// [config: [ai] endpoint]
+    #[arg(long, default_value = "", value_name = "URL")]
+    pub ai_endpoint: String,
+
+    /// Name of the environment variable holding the API key (the key itself is never read from
+    /// a flag or the file, printed or logged); empty = the provider's usual one [config: [ai] api_key_env]
+    #[arg(long, default_value = "", value_name = "VAR")]
+    pub ai_key_env: String,
+
+    /// Show the annotations panel (experimental): what the active line means, from Genius
+    /// [config: annotations]
+    #[arg(long)]
+    pub annotations: bool,
+
+    /// Source of the annotations: genius (free client token) or ai (short notes by the AI engine,
+    /// labelled) [config: annotations_mode]
+    #[arg(long, value_enum, default_value = "genius", value_name = "MODE")]
+    pub annotations_mode: AnnotationMode,
+
+    /// Genius API client token (free: genius.com/api-clients). Better in the config file or the
+    /// GENIUS_TOKEN environment variable than on the command line [config: genius_token]
+    #[arg(long, default_value = "", value_name = "TOKEN")]
+    pub genius_token: String,
 
     /// Language code lyrics are translated into, e.g. en, sv, de [config: translate_lang]
     #[arg(long, default_value = "en")]

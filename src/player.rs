@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
 #[cfg_attr(windows, allow(dead_code))]
-const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}";
+const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}\x1f{{xesam:genre}}";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -85,6 +85,8 @@ pub struct Snapshot {
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
     pub content_created: String,
+    /// `xesam:genre` as the player reports it (may be empty; see `genre::resolve`).
+    pub genre: String,
     /// Player volume 0.0..=1.0 (`None` if the player doesn't report one).
     pub volume: Option<f64>,
     /// `xesam:url` — a `file://` path for locally played audio.
@@ -117,7 +119,7 @@ impl Snapshot {
 }
 
 #[cfg_attr(windows, allow(dead_code))]
-fn parse(line: &str) -> Option<Snapshot> {
+pub fn parse(line: &str) -> Option<Snapshot> {
     let f: Vec<&str> = line.trim_end_matches(['\n', '\r']).split('\x1f').collect();
     let url = f.get(11).map(|u| u.trim()).unwrap_or("");
     // a local file without any tags still has a name to show
@@ -150,6 +152,7 @@ fn parse(line: &str) -> Option<Snapshot> {
         track_no: num(f[7]),
         disc_no: num(f[8]),
         content_created: f[9].trim().to_string(),
+        genre: f.get(14).map_or(String::new(), |g| g.trim().trim_matches(|c| c == '[' || c == ']').to_string()),
         volume: f
             .get(10)
             .and_then(|v| v.trim().parse::<f64>().ok())

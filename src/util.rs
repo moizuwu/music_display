@@ -139,3 +139,17 @@ pub fn fmt_time(secs: f64) -> String {
         format!("{}:{:02}", s / 60, s % 60)
     }
 }
+
+static TESTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// True under `cargo test`: no real daemon, no saved rate-limit pause, no real token folder,
+/// short retry sleeps. The library's own tests get it from `cfg!(test)`; the front end's tests
+/// (a different crate, where that flag is off here) turn it on with [`enter_test_mode`].
+pub fn testing() -> bool {
+    TESTING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[doc(hidden)]
+pub fn enter_test_mode() {
+    TESTING.store(true, std::sync::atomic::Ordering::Relaxed);
+}

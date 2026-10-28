@@ -107,7 +107,7 @@ cargo build --release
 install -Dm755 target/release/music_display ~/.local/bin/music_display
 ```
 
-**Which version do I have?** `music_display --version` prints it, and so does the top right corner of the settings menu (`s`): `v0.1.0 (a1b2c3d)`. The number is the version in `Cargo.toml` (the badge at the top of this page shows the one on GitHub), the part in brackets is the git commit the program was built from. Compare it with the latest commit on GitHub to see whether you are up to date. (A build without the `.git` folder, such as one from a source archive, shows the number only.)
+**Which version do I have?** `music_display --version` prints it, and so does the top right corner of the settings menu (`s`): `v0.1.0 (a1b2c3d)`, or `v0.1.0 (a1b2c3d, dirty)` when it was built from a working tree with uncommitted changes. The number is the version in `Cargo.toml` (the badge at the top of this page shows the one on GitHub), the part in brackets is the git commit the program was built from. Compare it with the latest commit on GitHub to see whether you are up to date. (A build without the `.git` folder, such as one from a source archive, shows the number only.) What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Run
 
@@ -156,6 +156,7 @@ volume_step = 5                # percent per + / - / wheel notch
 interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
 translate = false              # start with translated lyrics (toggle with K; k keeps the original line too)
+translate_mode = "off"         # off | both (original, translation underneath) | translated; wins over `translate`
 translate_lang = "en"          # language lyrics are translated into
 translate_skip = ""              # languages never translated, e.g. "sv,fi"
 translate_fallback = true      # use LibreTranslate when Google is rate-limited / unreachable
@@ -198,6 +199,9 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | flag | effect |
 | --- | --- |
 | `--nolyrics` / `--cava` / `--thirdpanel` / `--underlyrics` | panel layout. In `--cava --thirdpanel` the cava panel is exactly as wide as the metadata panel; cava always runs in `mono`. |
+| `--layout-preset NAME` | start from a named layout: `default`, `no-lyrics`, `cava`, `under-lyrics`, `minimal`. The four flags above are shortcuts for these; a flag always beats the file. Config: `preset` in `[layout]`. |
+| `--reset-layout` | forget the saved `[layout]` (panel order, sizes, hidden fields and buttons) and start from the default. |
+| `--gui` | open the window instead of the terminal UI (see [Window (GUI)](#window-gui-experimental)). A build without the `gui` feature prints how to enable it. |
 | `--ascii-cover` | draw the cover as coloured ASCII characters (no graphics protocol needed). |
 | `--lyric-spacing 0..3` | blank rows between lyric lines (default 1; dropped on very short panels). |
 | `--chords-match PERCENT` | how many percent of the lyric lines must match a chord sheet before its chords are shown (default 40). Lower it to see chords from sheets that match poorly, 0 shows every sheet; the lyrics title says `chords: weak match (N%) — hidden` when a sheet is below the limit. Also a typed row in the settings menu. |
@@ -212,6 +216,10 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--hide-color-warning` | hide the "(no usable colour file)" note in the footer. |
 | `--translate-skip CODES` | languages that are never translated, comma separated (`sv,fi`): the song's language is asked once, from a sample of its lines, before anything is translated; if it is on the list the lyrics stay as written (the title says `never translated (sv)`) and no line is sent, and a single line detected as one of them stays as written inside a song that is translated. Legacy codes (`iw`, `jw`, `zh-CN`) are normalised. If no service can name the language (rate-limited), the translation is held, the title says so, and the check is retried every 20 s. Also in the settings menu ("Never translate": ←/→ pick a language, space adds or removes it). |
 | `--translate-fallback BOOL` / `--translate-fallback-url URL` / `--translate-fallback-key KEY` | when Google answers 429 or can't be reached, translate through LibreTranslate (default `libretranslate.com`, which needs a key; point it at your own server otherwise). The rest of that song then stays on the fallback and the lyrics title names it. |
+| `--genre-lookup BOOL` | the `Genre` metadata field takes the first of: the player's `xesam:genre`, the genre tag of a local file, then MusicBrainz (the top tags by votes, filtered to real genres, at most three; cached on disk, misses for a week, errors never). `false` skips the MusicBrainz request (default `true`; the year lookup uses the same service). Config: `genre_lookup`; also a row in the settings menu. |
+| `--translate-engine ENGINE` | `standard` (default: Google Translate, LibreTranslate as the fallback) or `ai`: a language model translates the **whole song in one request**. Config: `translate_engine`; a row in the settings menu. See [AI translation](#ai-translation-optional). |
+| `--ai-provider P` / `--ai-model M` / `--ai-endpoint URL` / `--ai-key-env VAR` | the AI engine's settings (`[ai]` in the config file: `provider`, `model`, `endpoint`, `api_key_env`; rows in the settings menu). |
+| `--translate-mode MODE` | how a translation is shown: `off` (original only), `both` (the original line with its translation underneath) or `translated` (the translation replaces the line). Config: `translate_mode`; a row in the settings menu ("Translation shown as", ←/→) saves it. `--translate-mode` beats everything; `--translate` on the command line beats a mode from the file; without a mode, `translate = true` means `translated`. |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |
@@ -302,7 +310,118 @@ big_scale = "2"                # unshifted keys work on any layout
 - The `?` overlay and the key hints in the footer show the keys you configured. `music_display --print-config` ends with a `[keys]` block of the effective bindings, every action with its keys, which is valid config to paste back.
 - The settings menu writes the file again when you change a setting: your `[keys]` lines are kept (as the same values, in alphabetical order), but comments in the file are not, as for every other setting.
 
+## Window (GUI, experimental)
+
+`music_display --gui` (or `mdis --gui`) opens a window with the same panels, the same `config.toml` and the same `[layout]` as the terminal UI. It is behind a cargo feature so the default build has no extra dependencies:
+
+```
+cargo install --path . --features gui      # or: cargo build --release --features gui
+music_display --gui
+```
+
+It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Shortcuts: `space` play/pause, `←` / `→` seek 5 s, `,` / `.` lyrics 0.1 s earlier / later, `c` chords, `d` chord diagrams, `n` annotations. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** has the translation, chord and annotation switches and the layout editor.
+
+| feature | TUI | GUI |
+| --- | :-: | :-: |
+| metadata (all fields, order and visibility from `[layout]`), cover, progress, transport, volume | yes | yes |
+| synced lyrics, offset nudging, click to seek, karaoke fill, member tags | yes | yes |
+| chords above the lyrics, transpose, capo, key / BPM / tuning | yes | yes |
+| chord diagrams | yes (text) | yes (drawn) |
+| translation: `off` / `both` / `translated`, AI engine with fallback, never-translate list in the config | yes | yes |
+| genre field, annotations panel (Genius or AI) | yes | yes |
+| settings and the layout editor (panels, fields, buttons, sizes), saved to `config.toml` | yes | yes |
+| panel order and sizes from `[layout]` | yes | yes (drag to resize) |
+| cava bars | yes | no |
+| big block-font active line | yes | no (just a large font) |
+| terminal graphics protocols, ASCII cover, window-title option | yes | no |
+| key remapping (`[keys]`, the `?` key editor) | yes | no (fixed shortcuts) |
+| minimal view, three-panel presets | yes | no (resize the panels instead) |
+| Spotify library browser, likes, queue, devices, `--setup` | yes | no (the window follows whatever the MPRIS player reports) |
+| lyric versions (`L`), per-track capo memory, chord-sheet Ultimate Guitar toggle in the menu | yes | partly (capo and transpose are per session) |
+
+## AI translation (optional)
+
+Off by default. The standard engine (Google, LibreTranslate) keeps working as it did; set `translate_engine = "ai"` (or pick it in the settings menu) to let a language model translate instead. The whole song goes in **one request** (not line by line): title, artist, album, genre, year, the target language and the numbered lines. The model is told to keep the meaning, tone and imagery, to prefer natural, poetic phrasing over literal wording, to keep idioms meaningful, and to answer with a JSON array of strings, exactly one per line, in order, with no commentary.
+
+**The free way: Ollama** (runs on your computer, nothing leaves it, no account):
+
+```
+ollama pull llama3.1        # or any model you like
+music_display --translate --translate-engine ai --ai-model llama3.1
+```
+
+```toml
+translate_engine = "ai"
+[ai]
+provider = "openai-compatible"      # Ollama, LM Studio, llama.cpp server… (the default endpoint is Ollama's)
+model = "llama3.1"
+# endpoint = "http://localhost:11434/v1"     # LM Studio: "http://localhost:1234/v1"
+```
+
+Other providers (bring your own key; several have a free tier, such as Gemini's):
+
+| `provider` | default endpoint | key variable |
+| --- | --- | --- |
+| `openai-compatible` | `http://localhost:11434/v1` | none for a local endpoint |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` |
+| `claude` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+
+`api_key_env` names the environment variable that holds the key (the default is in the table); the key itself is read from there when a request is made and is never put in the config file, printed by `--print-config` or written to a log or an error message.
+
+The answer is checked: it must be valid JSON with exactly as many strings as there were lines. If not, the request is repeated once; if that fails too (or there is no key, no model or no connection), the standard engine translates instead and the lyrics title says so (`translated (en, google; AI failed: …)`). A good translation shows `translated by <model>` in the title and is cached per song, target language, provider and model, so a song is translated once. After repeated failures the AI engine rests for ten minutes.
+
+**Privacy.** With a provider other than a local endpoint, the lyrics and the song info are sent to that provider. The first time you turn it on, the settings menu says so and asks for a second press; if it was set in the file, the notice appears once in the footer. A local Ollama or LM Studio endpoint needs no notice.
+
+## Annotations panel (experimental)
+
+Off by default; `N` (or the settings row, or `annotations = true`) shows a panel that explains the line being sung. It is a column of its own that you can move, hide and resize like the others (see below).
+
+- **Genius (default).** Needs a free client token: create an API client at <https://genius.com/api-clients>, then put the *client access token* in the config file (`genius_token = "…"`), in the `GENIUS_TOKEN` environment variable, or in the settings menu ("Genius token"; never shown on screen). The song's annotations (Genius calls them referents) are fetched once, each is matched to the synced lyric line(s) it quotes, and the panel shows the one for the active line: the quoted passage, a short excerpt of the note (at most about 280 characters, cut at a word) and `— Genius`. Nothing is shown for lines without a note. Songs Genius doesn't have are remembered for 7 days; errors are shown in the panel and never remembered; after repeated failures it rests for ten minutes.
+- **AI notes (`annotations_mode = "ai"`).** With the AI engine set up (see AI translation), one request asks for a short note per line (references, idioms, backstory), `null` for lines that need none. They are labelled `AI-generated` in the panel and cached per model. They can be wrong; the labelled source is there so you can tell.
+
+Experimental: it depends on Genius' unofficial-for-this-use API, matching is by text, and short quoted fragments are deliberately ignored to avoid false matches. Flags: `--annotations`, `--annotations-mode genius|ai`, `--genius-token TOKEN` (prefer the file or the variable: command lines are visible to other users of the machine). `--print-config` never prints the token.
+
+## Customizing the layout
+
+Open the settings menu (`s`, or click `[ settings ]` in the top row) and pick **Customize layout**. The page lists three groups, each in the order it is shown: **panels** (Metadata, Cover, Controls, Lyrics, Chord diagrams, Cava, Annotations, Library), **metadata fields** (title, artist, album, track_no, release, genre, tuning, capo, bpm, key) and **control buttons** (shuffle, repeat, prev, play, next, volume).
+
+| key (on the page) | effect |
+| --- | --- |
+| `↑` / `↓` | select a line |
+| `space` / `Enter` | show / hide it |
+| `u` / `d` | move it up / down in its group (the selection follows) |
+| `+` / `-` (or `→` / `←`) | give a panel 5 % more / less of the screen |
+| `p` | on the Cava row: cava below the lyrics (`bottom`) or in a column of its own (`side`); saved as `cava_under_lyrics` |
+| `a` | back to automatic sizes |
+| `r` | reset the whole layout |
+| `Esc` | back to the settings menu |
+
+With the mouse: **right-click a metadata field** for a small menu (Hide, Move up, Move down); **drag a field** onto another to reorder; **drag the border between two columns** to resize; **click Key, BPM, Capo or Tuning** to open the chord diagrams. `[ settings ]` and `[ ? ]` in the top row open the settings menu and this help.
+
+Every change is saved at once to the `[layout]` table of `config.toml` (the rest of the file, including `[keys]`, is kept; comments are not):
+
+```toml
+[layout]
+direction = "horizontal"          # or "vertical": stack the columns
+order  = ["cover", "metadata", "controls", "lyrics", "chords", "cava", "annotations", "library"]
+hidden = ["chords", "cava", "annotations", "library"]
+cava_under_lyrics = true             # cava below the lyrics (default); false = a column of its own
+[layout.size]                     # percent of the screen; a panel not listed gets the automatic size
+metadata = 40
+[layout.fields]
+order  = ["title", "artist", "album", "track_no", "release", "genre", "tuning", "capo", "bpm", "key"]
+hidden = []
+[layout.buttons]
+order  = ["shuffle", "repeat", "prev", "play", "next", "volume"]
+hidden = []
+```
+
+`order` lists everything in order and `hidden` the entries that are off, so hiding something keeps its place; an entry missing from `order` (a field added in a later version) is appended and shown. Bad names or sizes are reported on start and skipped. The column order is the order of `metadata` (the Metadata, Cover and Controls panels form the left column, stacked cover-and-metadata first or metadata first as listed), `lyrics`, `cava` and `annotations`; the chord diagrams dock beside the lyrics and the library is always the side panel on the left. The cover is on top of the track information by default (a file written by the first version, which listed `metadata` before `cover` without anyone choosing that, is read with the new order; an order you arranged yourself is kept). Cava goes below the lyrics unless you set `cava_under_lyrics = false`, use `--thirdpanel`, or switch "Third panel" in the settings menu, which now writes this key. When the annotations panel and the chord diagrams are both on, they share one column: the diagrams on top, the notes below, half the height each. Without any `[layout]` the screen is laid out exactly as before. Precedence is the usual one: flag > file > default.
+
 ## Metadata panel
+
+The fields below can be hidden and reordered (see above). `Genre` appears once a source knows it.
 
 Track, Artist and Album take a full row each. Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
 
@@ -406,3 +525,7 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 **Hangul in big mode.** A terminal can't pick a font, so the big Hangul is drawn from character-cell blocks (`▀ ▄ █`, which every terminal font has). A line with Hangul is tried on the fine 12×12 grid first at the chosen `big_scale`, then on the 8×8 grid at the same scale, then one scale smaller, and so on; the compact font can't draw Hangul, so a very narrow panel shows the line as bold text. The fine grid gives a final consonant four rows instead of three and tells more syllables apart (about 10 460 of the 11 172 blocks have a distinct shape, against about 10 050 on 8×8), but its syllables are wider (13 columns instead of 9), so fewer fit on one row and a long line wraps into more pieces. Quadrant and braille blocks were considered and left out: a quadrant cell doubles only the horizontal resolution (the cramped direction is vertical) and braille depends on the terminal font.
 
 **Member parts (experimental).** With `member_parts = true` / `--member-parts` the song is looked up on Genius (unauthenticated search, then the song page; the title and artist must match closely). Section headers such as `[Verse 1: Jimin]`, `[Chorus: Jungkook, V]` and `[Pre-Chorus: RM & SUGA]` give the members for the lines below them, and those lines are matched in order onto the synced lyrics. The active line and its neighbours get a dim `[Jimin]` tag, each member in a stable colour of the terminal palette. In the normal scrolling layout the tag sits in front of the line; in the big-font layout it is one dim, centred row directly above the big active line (above the chord row when chords are shown, with a row kept free for it on every line of a song that has member data, so nothing jumps). On a narrow panel the tag shortens, `[Jimin, V, Jungkook]` → `[Jimin +2]` → `[Jim…]`, and is left out when there is no room. Lines that can't be matched (for example romanized vs. Hangul wording) are left untagged. Results are cached per track (misses for 7 days); failures are silent. This scrapes a website that has no public API, so it can stop working at any time.
+
+## Releasing
+
+The version is only bumped when a release is cut, never by a build. Add entries to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) as you work, then run `scripts/release.sh X.Y.Z` on a clean tree: it bumps `Cargo.toml` and `Cargo.lock`, turns `Unreleased` into `X.Y.Z` with today's date, commits `Release X.Y.Z` and tags `vX.Y.Z` (`--dry-run` only checks). It pushes nothing; push the commit and the tag yourself.

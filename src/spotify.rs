@@ -34,19 +34,15 @@ pub fn redirect_uri() -> String {
 // ── storage ────────────────────────────────────────────────────────────
 
 /// `~/.local/state/music_display/spotify` (the token lives here, mode 600).
-#[cfg(not(test))]
 pub fn dir() -> PathBuf {
+    if crate::util::testing() {
+        return std::env::temp_dir().join(format!("music_display-test-{}", std::process::id())).join("spotify");
+    }
     dirs::state_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("music_display")
         .join("spotify")
-}
-
-/// Tests never see (or delete) the real token.
-#[cfg(test)]
-pub fn dir() -> PathBuf {
-    std::env::temp_dir().join(format!("music_display-test-{}", std::process::id())).join("spotify")
 }
 
 fn read_json(name: &str) -> Option<Value> {
@@ -231,7 +227,7 @@ fn pause_left(until: u64, now: u64) -> Option<Duration> {
 /// The pause a 429 set in an earlier run: it keeps counting while the app is closed, so
 /// starting again does not ask Spotify before it said it is ready.
 fn saved_pause() -> Option<std::time::Instant> {
-    if cfg!(test) {
+    if crate::util::testing() {
         return None; // the tests share one folder
     }
     let until = read_json("ratelimit.json")?["until"].as_u64()?;
@@ -504,6 +500,7 @@ pub fn parse_state(p: &Value, is_local: impl Fn(&str) -> bool) -> Option<Remote>
         track_no: num(&t["track_number"]),
         disc_no: num(&t["disc_number"]),
         content_created: s(&album["release_date"]),
+        genre: String::new(),
         volume: dev["volume_percent"].as_f64().map(|v| (v / 100.0).clamp(0.0, 1.0)),
         url: String::new(),
         track_id: s(&t["uri"]),
@@ -759,8 +756,7 @@ impl Api {
             let until = std::time::Instant::now() + wait;
             let until = p.map_or(until, |old| old.max(until));
             *p = Some(until);
-            #[cfg(not(test))]
-            {
+            if !crate::util::testing() {
                 let end = now_secs() + until.saturating_duration_since(std::time::Instant::now()).as_secs();
                 let _ = std::fs::create_dir_all(dir());
                 let _ = std::fs::write(dir().join("ratelimit.json"), json!({ "until": end }).to_string());
@@ -770,8 +766,9 @@ impl Api {
 
     /// Test hook: talk to a fake server at `base` with a token that never expires, so nothing
     /// reads the token file or reaches the real service.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn with_fake_server(mut self, base: &str) -> Self {
+        crate::util::enter_test_mode();
         self.base = base.trim_end_matches('/').to_string();
         self.token = Arc::new(Mutex::new(Some(
             json!({"access_token": "test", "refresh_token": "test", "expires_at": u64::MAX}),
@@ -780,8 +777,9 @@ impl Api {
     }
 
     /// Test hook: pretend this computer has another host name.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn with_host(mut self, host: &str) -> Self {
+        crate::util::enter_test_mode();
         self.host = host.to_string();
         self
     }

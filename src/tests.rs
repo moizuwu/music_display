@@ -211,12 +211,12 @@ fn accent_from_cover() {
 
     // readable() lifts a dark accent on a dark surface and keeps unknown-bg accents bright
     let dark_bg = Some((16, 16, 16));
-    let r = theme::readable((30, 20, 90), dark_bg);
+    let r = color::readable((30, 20, 90), dark_bg);
     assert!(
         theme::luminance(r) - theme::luminance((16, 16, 16)) >= 0.4 - 1e-3,
         "{r:?}"
     );
-    assert!(theme::luminance(theme::readable((10, 10, 40), None)) >= 0.35);
+    assert!(theme::luminance(color::readable((10, 10, 40), None)) >= 0.35);
 }
 
 #[test]
@@ -578,6 +578,7 @@ fn snap(artist: &str, title: &str, album: &str) -> player::Snapshot {
         track_no: None,
         disc_no: None,
         content_created: String::new(),
+        genre: String::new(),
         volume: None,
         url: String::new(),
         track_id: String::new(),
@@ -1033,7 +1034,12 @@ async fn local_files_fall_back_to_their_own_tags() {
 fn every_menu_row_saves_a_known_config_key() {
     for set in app::Setting::ALL {
         for k in set.config_keys() {
-            assert!(config::KEYS.iter().any(|c| c.name == *k), "{k}");
+            // `ai.model` lives in the [ai] table
+            let known = k.strip_prefix("ai.").map_or_else(
+                || config::KEYS.iter().any(|c| c.name == *k),
+                |sub| ["provider", "model", "endpoint", "api_key_env"].contains(&sub),
+            );
+            assert!(known, "{k}");
         }
         assert!(!set.label().is_empty());
     }
@@ -1094,6 +1100,7 @@ fn solo_chords_are_kept_for_the_break() {
 }
 
 fn test_app() -> app::App {
+    util::enter_test_mode();
     use clap::Parser;
     let args = cli::Args::parse_from(["music_display"]);
     let theme = theme::load(&args);
@@ -1526,6 +1533,47 @@ fn cfg_run(file: &str, argv: &[&str]) -> (cli::Args, Vec<String>) {
 }
 
 #[test]
+fn translate_mode_config_flag_and_menu() {
+    use cli::TranslateMode::{Both, Off, Translated};
+    // default off; the old `translate` switch still means "translated"
+    assert_eq!(cfg_run("", &[]).0.start_translate_mode(), Off);
+    assert_eq!(cfg_run("translate = true\n", &[]).0.start_translate_mode(), Translated);
+    // the file's mode, then the flag beating the file
+    assert_eq!(cfg_run("translate_mode = \"both\"\n", &[]).0.start_translate_mode(), Both);
+    let (a, w) = cfg_run("translate_mode = \"both\"\n", &["--translate-mode", "off"]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(a.start_translate_mode(), Off);
+    // --translate on the command line beats a mode from the file
+    assert_eq!(cfg_run("translate_mode = \"both\"\n", &["--translate"]).0.start_translate_mode(), Translated);
+    // a bad word is reported and ignored
+    let (a, w) = cfg_run("translate_mode = \"sideways\"\n", &[]);
+    assert_eq!(a.start_translate_mode(), Off);
+    assert!(w.iter().any(|x| x.contains("translate_mode") && x.contains("off, both, translated")), "{w:?}");
+    // the settings row cycles all three and wraps
+    assert_eq!(Off.step(1), Both);
+    assert_eq!(Both.step(1), Translated);
+    assert_eq!(Translated.step(1), Off);
+    assert_eq!(Off.step(-1), Translated);
+}
+
+#[tokio::test]
+async fn translate_mode_row_drives_the_lyrics_panel() {
+    use cli::TranslateMode::{Both, Off, Translated};
+    let mut app = test_app();
+    assert_eq!(app.translate_mode(), Off);
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!((app.translate_mode(), app.translate_both), (Both, true));
+    assert_eq!(app.setting_value(app::Setting::TranslateMode), "< both >");
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!((app.translate_mode(), app.translate_both), (Translated, false));
+    app.change_setting(app::Setting::TranslateMode, 1);
+    assert_eq!(app.translate_mode(), Off);
+    // both keys are written, so the file never contradicts itself
+    let saved: Vec<_> = app.settings_values().into_iter().map(|(k, _)| k).collect();
+    assert!(saved.contains(&"translate") && saved.contains(&"translate_mode"));
+}
+
+#[test]
 fn config_precedence_and_validation() {
     let file = "player = \"spotifyd\"\noffset = -0.5\ntint = 0.25\ncava = true\ncava_bars = 32\nvolume_step = 10\ninterlude_threshold_secs = 12\nlyrics_retries = 5\nminimal_view = true\nmouse = false\nchords = true\nchords_ug = true\nthirdpanel = true\n";
     // file beats built-in defaults
@@ -1568,7 +1616,7 @@ fn config_precedence_and_validation() {
     // print-config round-trips through the parser
     let text = config::render(&a, &nowhere, false);
     let table: toml::Table = text.parse().unwrap();
-    assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir" || k.name == "translate_fallback_key" || k.name == "spotify_client_id"), "{text}");
+    assert!(config::KEYS.iter().all(|k| table.contains_key(k.name) || k.name == "chords_dir" || k.name == "translate_fallback_key" || k.name == "genius_token" || k.name == "spotify_client_id"), "{text}");
     assert!(text.contains("# chords_dir"));
 }
 
@@ -1775,7 +1823,7 @@ fn genius_lines_are_attributed_to_synced_lines_in_order() {
     assert_eq!(m[4], ["Jungkook", "V"]);
     assert_eq!(m[5], ["RM", "SUGA"]);
     // stable colour per name, whatever the case
-    assert_eq!(genius::color("Jimin"), genius::color("jimin"));
+    assert_eq!(ui::member_color("Jimin"), ui::member_color("jimin"));
 }
 
 #[test]
@@ -2552,6 +2600,7 @@ async fn the_client_searches_lists_devices_and_reports_limits() {
 
 /// An app with Spotify on that talks to a fake server, and the channel its answers come back on.
 fn spotify_app(base: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
     let args = cli::Args::parse_from(["music_display"]);
     let theme = theme::load(&args);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3085,7 +3134,7 @@ async fn the_library_is_a_side_panel_when_wide_and_an_overlay_when_narrow() {
     app.args.no_spotify_button = true;
     render(&mut app, 120, 30);
     assert!(app.lib.hits.button.width == 0 && app.lib.hits.panel);
-    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 0, width: ui::PANEL_WIDTH, height: 29 }, "the panel gets the strip's row");
+    assert_eq!(app.lib.hits.area, Rect { x: 0, y: 1, width: ui::PANEL_WIDTH, height: 28 }, "the strip stays: it holds [ settings ] and [ ? ]");
     app.args.no_spotify_button = false;
     render(&mut app, 120, 9);
     assert_eq!(app.lib.hits.button.width, 0);
@@ -3538,4 +3587,755 @@ fn file_urls_round_trip_on_both_systems() {
     // a drive letter loses the slash in front of it
     assert_eq!(path_from_url("file:///C:/Music/a.flac"), Some(PathBuf::from("C:/Music/a.flac")));
     assert_eq!(path_from_url("https://x/y"), None);
+}
+
+#[test]
+fn changelog_keeps_an_unreleased_section_and_the_release_links() {
+    let log = include_str!("../CHANGELOG.md");
+    assert!(log.contains("\n## [Unreleased]\n"));
+    assert!(log.contains("\n[Unreleased]: https://github.com/"));
+    // the newest release heading is never older than the version in Cargo.toml
+    let head = log.lines().find(|l| l.starts_with("## [") && !l.contains("Unreleased")).unwrap();
+    let newest = head.trim_start_matches("## [").split(']').next().unwrap();
+    let ver = |s: &str| s.split('.').map(|n| n.parse::<u32>().unwrap()).collect::<Vec<_>>();
+    assert!(ver(newest) >= ver(env!("CARGO_PKG_VERSION")), "{newest} vs {}", env!("CARGO_PKG_VERSION"));
+}
+
+// ── Phase 2: layout, customize page, mouse editing ──────────────────────────
+
+fn playing_app() -> app::App {
+    let mut app = test_app();
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    app
+}
+
+/// Screen column (in characters, not bytes) where `needle` starts in `row`.
+fn col_of(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle).map(|b| row[..b].chars().count())
+}
+
+fn row_of(screen: &[String], needle: &str) -> Option<usize> {
+    screen.iter().position(|r| r.contains(needle))
+}
+
+#[tokio::test]
+async fn metadata_fields_follow_the_layout() {
+    use layout::{Item, MetaField};
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let (t, a) = (row_of(&s, "Track ").unwrap(), row_of(&s, "Album ").unwrap());
+    assert!(t < a, "Track above Album by default");
+    // Album above Title
+    app.layout.fields.shift(MetaField::Album, -2);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Album ").unwrap() < row_of(&s, "Track ").unwrap());
+    // hidden fields vanish, the rest keeps its place
+    app.layout.fields.set(MetaField::Artist, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Artist ").is_none() && row_of(&s, "Album ").is_some());
+    assert!(app.hits.fields.iter().all(|(f, _)| *f != MetaField::Artist));
+    // a field on the right-hand side can move above the first one: one row each, in order
+    app.layout.fields.set(MetaField::Bpm, true);
+    app.layout.fields.move_to(MetaField::Release, MetaField::Album);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Release ").unwrap() < row_of(&s, "Album ").unwrap());
+    let _ = MetaField::ALL;
+}
+
+#[tokio::test]
+async fn cover_and_controls_can_be_switched_off() {
+    use layout::{Button, PanelId};
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_some() && app.hits.play.width > 0);
+    app.layout.buttons.set(Button::Shuffle, false);
+    app.layout.buttons.set(Button::Next, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_some() && row_of(&s, "[ next ]").is_none());
+    assert_eq!(app.hits.next.width, 0, "a hidden button is not clickable either");
+    app.layout.panels.set(PanelId::Controls, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "[ pause ]").is_none() && app.hits.progress.width == 0);
+    app.layout.panels.set(PanelId::Metadata, false);
+    app.layout.panels.set(PanelId::Cover, false);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Roygbiv").is_none(), "{s:#?}");
+}
+
+#[tokio::test]
+async fn panels_follow_their_order_and_size() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    render(&mut app, 100, 30);
+    let classic = app.hits.progress;
+    assert!(classic.x < 50, "the player column is on the left");
+    app.layout.panels.shift(PanelId::Lyrics, -3); // lyrics first
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.x >= 50, "now the player column is on the right: {:?}", app.hits.progress);
+    // an explicit size
+    app.layout = layout::Layout::default();
+    app.layout.set_size(PanelId::Metadata, 70);
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.right() > 55, "{:?}", app.hits.progress);
+    // vertical stack: the player column sits above the lyrics
+    app.layout = layout::Layout::default();
+    app.layout.direction = layout::Split::Vertical;
+    render(&mut app, 100, 30);
+    assert!(app.hits.progress.x < 50);
+    assert!(app.hits.borders.is_empty(), "vertical splits are resized from the customize page");
+}
+
+#[tokio::test]
+async fn top_buttons_open_settings_and_help() {
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let (sb, hb) = (app.hits.settings_btn, app.hits.help_btn);
+    assert_eq!(text_at(&s, sb), "[ settings ]");
+    assert_eq!(text_at(&s, hb), "[ ? ]");
+    assert_eq!((sb.y, hb.y), (0, 0));
+    click(&mut app, sb.x + 1, sb.y);
+    assert!(app.show_settings);
+    app.show_settings = false;
+    click(&mut app, hb.x, hb.y);
+    assert!(app.show_help);
+    // no room: no buttons, no hit areas
+    app.show_help = false;
+    render(&mut app, 100, 8);
+    assert_eq!(app.hits.settings_btn.width, 0);
+}
+
+#[tokio::test]
+async fn clicking_bpm_key_capo_or_tuning_opens_the_chord_diagrams() {
+    use layout::MetaField;
+    let mut app = playing_app();
+    assert!(!app.show_diagrams);
+    assert!(!app.open_diagrams_for(MetaField::Album), "other fields do nothing");
+    assert!(app.open_diagrams_for(MetaField::Bpm));
+    assert!(app.show_diagrams && app.show_lyrics && app.layout.panels.shown(layout::PanelId::Chords));
+    // through the mouse: a click on a drawn Release field does not
+    app.show_diagrams = false;
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Release).unwrap();
+    click(&mut app, r.x, r.y);
+    app.handle(mouse(Mk::Up(MouseButton::Left), r.x, r.y));
+    assert!(!app.show_diagrams);
+}
+
+#[tokio::test]
+async fn right_click_menu_hides_and_moves_a_field() {
+    use layout::{Item, MetaField};
+    let (mut app, cfg) = settings_app("fieldmenu");
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Artist).unwrap();
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x + 1, r.y));
+    assert_eq!(app.field_menu.map(|m| m.field), Some(MetaField::Artist));
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Move up").is_some() && row_of(&s, "Hide").is_some());
+    // "Move down" by mouse: Artist swaps with Album
+    let down = app.hits.menu_items[2];
+    click(&mut app, down.x + 1, down.y);
+    assert!(app.field_menu.is_none());
+    assert!(app.layout.fields.position(MetaField::Artist) > app.layout.fields.position(MetaField::Album));
+    // "Hide" by keyboard
+    render(&mut app, 100, 30);
+    let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Album).unwrap();
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x, r.y));
+    app.handle(key(crossterm::event::KeyCode::Enter));
+    assert!(!app.layout.fields.shown(MetaField::Album));
+    // everything was saved as [layout]
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[layout.fields]") && saved.contains("album"), "{saved}");
+    // a click elsewhere just closes the menu
+    app.handle(mouse(Mk::Down(MouseButton::Right), r.x, r.y));
+    app.handle(mouse(Mk::Down(MouseButton::Left), 0, 29));
+    assert!(app.field_menu.is_none());
+    let _ = MetaField::ALL;
+}
+
+#[tokio::test]
+async fn dragging_a_field_reorders_and_dragging_a_border_resizes() {
+    use layout::{MetaField, PanelId};
+    let (mut app, cfg) = settings_app("dragging");
+    app.snap = Some(snap("Boards of Canada", "Roygbiv", "Music Has the Right to Children"));
+    render(&mut app, 100, 30);
+    let find = |app: &app::App, f: MetaField| app.hits.fields.iter().find(|(x, _)| *x == f).unwrap().1;
+    let (album, title) = (find(&app, MetaField::Album), find(&app, MetaField::Title));
+    app.handle(mouse(Mk::Down(MouseButton::Left), album.x, album.y));
+    app.handle(mouse(Mk::Drag(MouseButton::Left), title.x, title.y));
+    app.handle(mouse(Mk::Up(MouseButton::Left), title.x, title.y));
+    assert_eq!(app.layout.fields.items[0].0, MetaField::Album, "dropped on Track: Album takes its place");
+    // the border between the player column and the lyrics
+    render(&mut app, 100, 30);
+    let b = app.hits.borders[0];
+    assert_eq!(b.left, PanelId::Metadata);
+    assert!(app.layout.is_automatic());
+    app.handle(mouse(Mk::Down(MouseButton::Left), b.rect.x, b.rect.y + 2));
+    app.handle(mouse(Mk::Drag(MouseButton::Left), 60, b.rect.y + 2));
+    app.handle(mouse(Mk::Up(MouseButton::Left), 60, b.rect.y + 2));
+    assert_eq!(app.layout.size_of(PanelId::Metadata), Some(60));
+    assert!(!app.layout.is_automatic());
+    render(&mut app, 100, 30);
+    assert!(app.hits.borders[0].rect.x >= 58 && app.hits.borders[0].rect.x <= 60, "{:?}", app.hits.borders[0].rect);
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("metadata = 60"));
+}
+
+#[tokio::test]
+async fn customize_page_toggles_moves_resizes_and_resets() {
+    use crossterm::event::KeyCode as K;
+    use layout::{MetaField, PanelId};
+    let (mut app, cfg) = settings_app("customize");
+    app.snap = Some(snap("A", "B", "C"));
+    app.show_settings = true;
+    let idx = app::Setting::ALL.iter().position(|s| *s == app::Setting::Customize).unwrap();
+    app.settings_sel = idx;
+    app.handle(key(K::Enter));
+    assert!(app.customizing);
+    let s = render(&mut app, 100, 40);
+    assert!(row_of(&s, "customize layout").is_some() && row_of(&s, "Metadata fields").is_some());
+    // first line: the Cover panel (it is on top). Down to Metadata, hide it
+    assert_eq!(app.cust_items()[0], app::CustItem::Panel(PanelId::Cover));
+    app.handle(key(K::Down));
+    app.handle(key(K::Char(' ')));
+    assert!(!app.layout.panels.shown(PanelId::Metadata));
+    // move Lyrics up (reorder keeps the selection on it)
+    while app.cust_items()[app.cust_sel] != app::CustItem::Panel(PanelId::Lyrics) {
+        app.handle(key(K::Down));
+    }
+    app.handle(key(K::Char('u')));
+    assert_eq!(app.cust_items()[app.cust_sel], app::CustItem::Panel(PanelId::Lyrics));
+    assert!(app.layout.panels.position(PanelId::Lyrics) < app.layout.panels.position(PanelId::Controls));
+    // resize it: + starts from its automatic share
+    app.handle(key(K::Char('+')));
+    assert_eq!(app.layout.size_of(PanelId::Lyrics), Some(65));
+    app.handle(key(K::Char('-')));
+    app.handle(key(K::Char('-')));
+    assert_eq!(app.layout.size_of(PanelId::Lyrics), Some(55));
+    // a field
+    while app.cust_items()[app.cust_sel] != app::CustItem::Field(MetaField::Genre) {
+        app.handle(key(K::Down));
+    }
+    app.handle(key(K::Enter));
+    assert!(!app.layout.fields.shown(MetaField::Genre));
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[layout]") && saved.contains("hidden"), "{saved}");
+    // auto sizes, then reset everything
+    app.handle(key(K::Char('a')));
+    assert!(app.layout.sizes.is_empty());
+    app.handle(key(K::Char('r')));
+    assert_eq!(app.layout, layout::Layout::default());
+    // Esc leaves the page, not the settings menu
+    app.handle(key(K::Esc));
+    assert!(!app.customizing && app.show_settings);
+}
+
+#[tokio::test]
+async fn layout_loads_from_the_file_and_flags_win() {
+    use clap::Parser;
+    use layout::PanelId;
+    let dir = tmp("layoutload");
+    let cfg = dir.join("config.toml");
+    std::fs::write(
+        &cfg,
+        "player = \"spotify\"\n[layout]\norder = [\"lyrics\", \"metadata\"]\nhidden = [\"cava\"]\n[layout.size]\nlyrics = 30\n[layout.fields]\nhidden = [\"track_no\"]\n[keys]\nquit = \"x\"\n",
+    )
+    .unwrap();
+    let args = cli::Args::parse_from(["x"]);
+    let mut warns = Vec::new();
+    let l = config::load_layout(&args, &cfg, &mut |w| warns.push(w));
+    assert!(warns.is_empty(), "{warns:?}");
+    assert_eq!(l.panels.items[0].0, PanelId::Lyrics);
+    assert_eq!(l.size_of(PanelId::Lyrics), Some(30));
+    assert!(!l.fields.shown(layout::MetaField::TrackNo));
+    // a flag beats the file; --layout-preset replaces it; --reset-layout ignores it
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--nolyrics"]), &cfg, &mut |_| {});
+    assert!(!l.panels.shown(PanelId::Lyrics));
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--layout-preset", "under-lyrics"]), &cfg, &mut |_| {});
+    assert!(l.cava_under_lyrics && l.is_automatic());
+    let l = config::load_layout(&cli::Args::parse_from(["x", "--reset-layout"]), &cfg, &mut |_| {});
+    assert!(l.is_automatic());
+    let mut w = Vec::new();
+    config::load_layout(&cli::Args::parse_from(["x", "--layout-preset", "wat"]), &cfg, &mut |m| w.push(m));
+    assert!(w[0].contains("unknown preset"), "{w:?}");
+    // the [layout] table does not trip the unknown-key warning, and [keys] survives a save
+    let (_, warns) = cfg_run(&std::fs::read_to_string(&cfg).unwrap(), &[]);
+    assert!(warns.is_empty(), "{warns:?}");
+    config::save_layout(&cfg, &layout::Layout::default()).unwrap();
+    let raw = std::fs::read_to_string(&cfg).unwrap();
+    assert!(raw.contains("quit") && raw.contains("player"), "{raw}");
+    // --reset-layout also removes the saved table
+    config::forget_layout(&cfg).unwrap();
+    assert!(!std::fs::read_to_string(&cfg).unwrap().contains("[layout"));
+}
+
+#[tokio::test]
+async fn layout_sets_the_start_state() {
+    use layout::PanelId;
+    let mut app = test_app();
+    let l = layout::Layout::default().with_flags(true, false, false, true);
+    app.set_layout(l);
+    assert!(!app.show_lyrics && app.show_cava);
+    let mut app = test_app();
+    app.set_layout(layout::Layout::preset("under-lyrics").unwrap());
+    assert!(app.show_cava && app.placement == app::CavaPlacement::UnderLyrics);
+    let mut app = test_app();
+    let mut l = layout::Layout::default();
+    l.panels.set(PanelId::Chords, true);
+    app.set_layout(l);
+    assert!(app.show_diagrams);
+}
+
+#[test]
+fn every_panel_id_has_a_panel_with_a_section_and_a_minimum_size() {
+    use layout::{Item, PanelId};
+    for id in PanelId::ALL {
+        let p = ui::panel_for(*id);
+        assert_eq!(p.id(), *id);
+        assert!(!p.title().is_empty() && p.config_section().starts_with("layout"));
+        let (w, h) = p.min_size();
+        assert!(w >= 8 && h >= 1);
+    }
+    assert_eq!(ui::panel_for(PanelId::Metadata).config_section(), "layout.fields");
+}
+
+// ── Phase 3: genre ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn genre_comes_from_the_player_then_the_tags_then_musicbrainz() {
+    let mut app = test_app();
+    app.args.genre_lookup = false;
+    // the player's own xesam:genre
+    let mut s = snap("Boards of Canada", "Roygbiv", "MHTRTC");
+    s.genre = "electronic; ambient".into();
+    app.on_snapshot(s);
+    assert_eq!(app.genre.as_deref(), Some("Electronic / Ambient"));
+    // a new song without one: nothing shown, and no lookup when switched off
+    app.on_snapshot(snap("Other", "Song", "Album"));
+    assert_eq!(app.genre, None);
+    // MusicBrainz fills in, but only for the song it was asked about
+    app.args.genre_lookup = true;
+    app.on_snapshot(snap("Third", "Tune", "LP"));
+    let key = app.track_key;
+    app.apply(AppEvent::Genre { key: key ^ 1, genres: Some(vec!["Jazz".into()]) });
+    assert_eq!(app.genre, None, "a stale answer is dropped");
+    app.apply(AppEvent::Genre { key, genres: Some(vec!["Rock".into(), "Pop".into()]) });
+    assert_eq!(app.genre.as_deref(), Some("Rock / Pop"));
+    // the player wins over MusicBrainz, and the next track starts clean
+    let mut s = snap("Third", "Tune", "LP");
+    s.genre = "Folk".into();
+    app.on_snapshot(s);
+    assert_eq!(app.genre.as_deref(), Some("Folk"));
+    app.on_snapshot(snap("Fourth", "Next", "LP2"));
+    assert_eq!(app.genre, None);
+}
+
+#[tokio::test]
+async fn the_genre_field_is_drawn_and_can_be_hidden() {
+    use layout::MetaField;
+    let mut app = playing_app();
+    assert!(row_of(&render(&mut app, 100, 30), "Genre ").is_none(), "nothing known: no row");
+    app.genre = Some("Electronic / Ambient".into());
+    let s = render(&mut app, 100, 30);
+    let r = row_of(&s, "Genre ").expect("shown");
+    assert!(s[r].contains("Electronic / Ambient"));
+    assert!(app.hits.fields.iter().any(|(f, _)| *f == MetaField::Genre));
+    app.layout.fields.set(MetaField::Genre, false);
+    assert!(row_of(&render(&mut app, 100, 30), "Genre ").is_none());
+}
+
+#[test]
+fn mpris_genre_is_parsed_from_the_last_field() {
+    let line = "Playing\x1f1000000\x1fT\x1fA\x1fAl\x1f200000000\x1f\x1f1\x1f1\x1f\x1f0.5\x1f\x1fid\x1fvlc\x1f[Rock, Pop]";
+    let s = player::parse(line).unwrap();
+    assert_eq!(s.genre, "Rock, Pop");
+    // an older player line without the field still parses
+    let s = player::parse(&line[..line.rfind('\x1f').unwrap()]).unwrap();
+    assert_eq!(s.genre, "");
+}
+
+// ── Phase 4: AI translation ─────────────────────────────────────────────────
+
+fn ai_app(site: &str, name: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
+    let args = cli::Args::parse_from([
+        "music_display",
+        "--translate",
+        "--translate-engine",
+        "ai",
+        "--ai-model",
+        "tester",
+        "--ai-endpoint",
+        site,
+        "--no-cache-translations",
+    ]);
+    let theme = theme::load(&args);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    app.args.config = Some(tmp(name).join("config.toml"));
+    app.on_snapshot(snap("Artist", "Hej", "Album"));
+    app.lyrics = app::LyricsState::Ready(lyrics::Lyrics::Plain(vec!["Jag gillar bär".into(), "Solen går ner".into()]));
+    (app, rx)
+}
+
+fn chat_reply(content: &str) -> R {
+    let body = serde_json::json!({"choices": [{"message": {"content": content}}]}).to_string();
+    R::Http(200, "Content-Type: application/json\r\n", body)
+}
+
+#[tokio::test]
+async fn ai_translates_the_whole_song_in_one_request() {
+    let (site, log) = scripted_site(vec![("/chat/completions", vec![chat_reply(r#"["I like berries","The sun goes down"]"#)])]);
+    let (mut app, mut rx) = ai_app(&site, "ai_ok");
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| a.translation().is_some()).await;
+    assert_eq!(app.translation().unwrap(), &vec!["I like berries".to_string(), "The sun goes down".to_string()]);
+    assert_eq!(log.lock().unwrap().iter().filter(|l| l.contains("/chat/completions")).count(), 1, "one request for the song");
+    // the title names the model
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "translated by tester (en)").is_some(), "{s:#?}");
+}
+
+#[tokio::test]
+async fn ai_that_keeps_failing_falls_back_to_the_standard_engine_and_says_so() {
+    // wrong line count twice (the retry too); Google answers
+    let (site, log) = scripted_site(vec![
+        ("/chat/completions", vec![chat_reply(r#"["only one"]"#)]),
+        ("/g/dict", vec![R::Http(429, "", String::new())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+        ("/libre", vec![R::Http(200, "Content-Type: application/json\r\n", r#"{"translatedText":"berries"}"#.into())]),
+    ]);
+    let (mut app, mut rx) = ai_app(&site, "ai_fail");
+    app.translate_base = Some(format!("{site}/g"));
+    app.args.translate_fallback_url = format!("{site}/libre");
+    app.args.translate_fallback_key = Some("k".into());
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| a.translation().is_some()).await;
+    assert!(app.translate_backend.starts_with(app::FALLBACK_TAG), "{}", app.translate_backend);
+    assert_eq!(log.lock().unwrap().iter().filter(|l| l.contains("/chat/completions")).count(), 2, "one retry, then give up");
+    let s = render(&mut app, 120, 30);
+    assert!(row_of(&s, "AI failed").is_some(), "the title says the AI failed: {s:#?}");
+}
+
+#[tokio::test]
+async fn ai_without_a_model_uses_the_standard_engine_with_a_note() {
+    let (site, _log) = scripted_site(vec![("/g", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["x","y"]],null,"sv"]"#.into())])]);
+    let (mut app, _rx) = ai_app(&site, "ai_nomodel");
+    app.args.ai_model.clear();
+    app.translate_base = Some(format!("{site}/g"));
+    app.ensure_translation();
+    assert!(app.note_text().unwrap_or("").contains("needs a model"));
+}
+
+#[tokio::test]
+async fn the_privacy_notice_is_for_remote_providers_only_and_needs_a_second_press() {
+    let (mut app, _rx) = ai_app("http://localhost:11434/v1", "ai_notice_local");
+    let _ = std::fs::remove_file(spotify::dir().with_file_name("ai-notice-ack"));
+    assert!(!app.ai_notice_needed(), "a local Ollama endpoint needs no notice");
+    // a remote provider: the first press only explains
+    app.args.translate_engine = cli::TranslateEngine::Standard;
+    app.args.ai_provider = "openai".into();
+    app.args.ai_endpoint = String::new();
+    assert!(app.ai_notice_needed());
+    app.change_setting(app::Setting::TranslateEngine, 1);
+    assert_eq!(app.args.translate_engine, cli::TranslateEngine::Standard);
+    let note = app.settings_note.clone().unwrap();
+    assert!(note.contains("sends the lyrics") && note.contains("api.openai.com"), "{note}");
+    // the second press turns it on, and the notice is not shown again
+    app.change_setting(app::Setting::TranslateEngine, 1);
+    assert_eq!(app.args.translate_engine, cli::TranslateEngine::Ai);
+    assert!(!app.ai_notice_needed());
+    let _ = std::fs::remove_file(spotify::dir().with_file_name("ai-notice-ack"));
+}
+
+#[tokio::test]
+async fn ai_settings_are_saved_under_the_ai_table_and_the_key_is_never_printed() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, _rx) = ai_app("http://localhost:11434/v1", "ai_save");
+    let cfg = app.args.config.clone().unwrap();
+    let _ = std::fs::remove_file(&cfg);
+    app.args.translate_engine = cli::TranslateEngine::Standard;
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::AiModel).unwrap();
+    app.handle(key(K::Enter));
+    for _ in 0..16 {
+        app.handle(key(K::Backspace));
+    }
+    for c in "llama3.1".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.ai_model, "llama3.1");
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("[ai]") && saved.contains("model = \"llama3.1\""), "{saved}");
+    // config round trip; a bad provider is reported
+    let (a, w) = cfg_run("translate_engine = \"ai\"\n[ai]\nprovider = \"claude\"\nmodel = \"m\"\napi_key_env = \"MY_KEY\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!((a.translate_engine, a.ai_provider.as_str(), a.ai_model.as_str(), a.ai_key_env.as_str()), (cli::TranslateEngine::Ai, "claude", "m", "MY_KEY"));
+    let (_, w) = cfg_run("[ai]\nprovider = \"skynet\"\nbogus = 1\n", &[]);
+    assert!(w.iter().any(|m| m.contains("provider")) && w.iter().any(|m| m.contains("bogus")), "{w:?}");
+    // a flag beats the file
+    let (a, _) = cfg_run("[ai]\nmodel = \"file\"\n", &["--ai-model", "flag"]);
+    assert_eq!(a.ai_model, "flag");
+    // --print-config shows the variable's name, never a key
+    unsafe { std::env::set_var("MY_SECRET_KEY_FOR_TEST", "sk-super-secret") };
+    let (a, _) = cfg_run("[ai]\napi_key_env = \"MY_SECRET_KEY_FOR_TEST\"\n", &[]);
+    let printed = config::render(&a, std::path::Path::new("x"), true);
+    assert!(printed.contains("MY_SECRET_KEY_FOR_TEST") && !printed.contains("sk-super-secret"));
+}
+
+// ── Phase 5: annotations ────────────────────────────────────────────────────
+
+const GENIUS_JSON: &str = "Content-Type: application/json\r\n";
+
+fn genius_site(artist: &str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let search = serde_json::json!({"response": {"hits": [{"result": {"id": 77, "title": "Roygbiv", "primary_artist": {"name": artist}}}]}});
+    let referents = serde_json::json!({"response": {"referents": [
+        {"fragment": "We build castles in the sand", "annotations": [{"url": "https://genius.com/1", "body": {"plain": "A metaphor for fragile things people work hard on."}}]}
+    ]}});
+    scripted_site(vec![
+        ("/search", vec![R::Http(200, GENIUS_JSON, search.to_string())]),
+        ("/referents", vec![R::Http(200, GENIUS_JSON, referents.to_string())]),
+    ])
+}
+
+fn notes_app(artist: &str, site: &str) -> (app::App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    util::enter_test_mode();
+    let args = cli::Args::parse_from(["music_display", "--annotations", "--genius-token", "tok123"]);
+    let theme = theme::load(&args);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    app.set_layout(layout::Layout::default());
+    app.annotations_base = Some(site.to_string());
+    app.args.config = Some(tmp("notes").join("config.toml"));
+    app.on_snapshot(snap(artist, "Roygbiv", "Album"));
+    app.lyrics = app::LyricsState::Ready(lyrics::Lyrics::Synced(vec![
+        (0.0, "Intro line goes here".into()),
+        (10.0, "We build castles in the sand".into()),
+    ]));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn genius_annotations_follow_the_active_line() {
+    let artist = "NotesTest Genius Band";
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (site, log) = genius_site(artist);
+    let (mut app, mut rx) = notes_app(artist, &site);
+    assert!(app.annotations_shown());
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    assert_eq!(app.ann_match, vec![None, Some(0)]);
+    // before the matching line: nothing; on it: the excerpt, the quoted passage and the source
+    app.set_position_for_test(2.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("no annotation for"), "{s}");
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("fragile") && s.contains("— Genius") && s.contains("castles in the"), "{s}");
+    assert!(s.contains("annotations"));
+    // the token went out as a bearer header only
+    assert!(log.lock().unwrap().iter().all(|l| !l.contains("tok123")));
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+}
+
+#[tokio::test]
+async fn annotation_misses_are_cached_and_errors_never() {
+    annotations::reset_breaker();
+    // a miss: the search finds nothing; the second ask costs no request
+    let artist = "NotesTest Missing Band";
+    let path = annotations::cache_path(artist, "Roygbiv");
+    let _ = std::fs::remove_file(&path);
+    let empty = serde_json::json!({"response": {"hits": []}});
+    let (site, log) = scripted_site(vec![("/search", vec![R::Http(200, GENIUS_JSON, empty.to_string())])]);
+    let c = reqwest::Client::new();
+    assert_eq!(annotations::fetch_from(&c, &site, "t", artist, "Roygbiv").await, Ok(vec![]));
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"none\""));
+    assert_eq!(annotations::fetch_from(&c, &site, "t", artist, "Roygbiv").await, Ok(vec![]));
+    assert_eq!(log.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(&path);
+    // an error is reported, never cached, and never contains the token
+    let artist = "NotesTest Error Band";
+    let path = annotations::cache_path(artist, "Roygbiv");
+    let _ = std::fs::remove_file(&path);
+    let (site, _log) = scripted_site(vec![("/search", vec![R::Http(500, "", String::new())])]);
+    let e = annotations::fetch_from(&c, &site, "secret-token-xyz", artist, "Roygbiv").await.unwrap_err();
+    assert!(e.contains("500") && !e.contains("secret-token-xyz"), "{e}");
+    assert!(!path.exists());
+    annotations::reset_breaker();
+    // a refused token says so
+    let (site, _log) = scripted_site(vec![("/search", vec![R::Http(401, "", String::new())])]);
+    let e = annotations::fetch_from(&c, &site, "secret-token-xyz", artist, "Roygbiv").await.unwrap_err();
+    assert!(e.contains("refused the token") && !e.contains("secret-token-xyz"));
+    annotations::reset_breaker();
+}
+
+#[tokio::test]
+async fn without_a_token_the_panel_says_how_to_get_one_and_asks_nothing() {
+    let (mut app, _rx) = notes_app("NotesTest NoToken", "http://127.0.0.1:1");
+    app.args.genius_token.clear();
+    // (the environment may hold one on a developer machine)
+    if app.genius_token().is_some() {
+        return;
+    }
+    app.ensure_annotations();
+    assert!(matches!(&app.ann_state, app::AnnState::Failed(e) if e.contains("genius.com/api-clients")));
+    let s = render(&mut app, 120, 30).join("\n");
+    // (the column is narrow, so the message wraps)
+    assert!(s.contains("no token") && s.contains("genius.com"), "{s}");
+}
+
+#[tokio::test]
+async fn ai_notes_are_labelled_and_per_line() {
+    let reply = chat_reply(r#"[null, "A nod to Hamlet's 'to be or not to be'."]"#);
+    let (site, _log) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let artist = "NotesTest AI Band";
+    let (mut app, mut rx) = notes_app(artist, "http://127.0.0.1:1");
+    app.args.annotations_mode = cli::AnnotationMode::Ai;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = site;
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Hamlet") && s.contains("AI-generated"), "{s}");
+    assert!(s.contains("annotations"));
+    let _ = std::fs::remove_file(annotations::ai_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &app.lyric_lines().unwrap()));
+}
+
+#[tokio::test]
+async fn the_annotations_key_and_settings_rows_work_and_persist() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("notes_settings");
+    assert!(!app.annotations_shown(), "off by default");
+    app.handle(key(K::Char('N')));
+    assert!(app.annotations_shown());
+    app.handle(key(K::Char('N')));
+    assert!(!app.annotations_shown());
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::Annotations).unwrap();
+    app.handle(key(K::Enter));
+    assert!(app.annotations_shown());
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("annotations = true"));
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::AnnotationsMode).unwrap();
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.annotations_mode, cli::AnnotationMode::Ai);
+    // the token row never shows the token
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::GeniusToken).unwrap();
+    app.handle(key(K::Enter));
+    for c in "abc-secret".chars() {
+        app.handle(key(K::Char(c)));
+    }
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.genius_token, "abc-secret");
+    assert_eq!(app.setting_value(app::Setting::GeniusToken), "set (hidden)");
+    let printed = config::render(&app.args, std::path::Path::new("x"), true);
+    assert!(!printed.contains("abc-secret"));
+    // the config file round-trips the new keys
+    let (a, w) = cfg_run("annotations = true\nannotations_mode = \"ai\"\ngenius_token = \"t\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert!(a.annotations && a.annotations_mode == cli::AnnotationMode::Ai && a.genius_token == "t");
+}
+
+// ── fixes: cava placement, cover above the track info, annotations next to the diagrams ──
+
+#[tokio::test]
+async fn the_cava_placement_toggle_is_saved_and_survives_a_restart() {
+    use crossterm::event::KeyCode as K;
+    use layout::PanelId;
+    let (mut app, cfg) = settings_app("cavadock");
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics, "below the lyrics by default");
+    app.show_settings = true;
+    app.settings_sel = app::Setting::ALL.iter().position(|s| *s == app::Setting::ThirdPanel).unwrap();
+    // "Third panel" on: a column of its own, written to [layout] (the toggle used to write only `thirdpanel`)
+    app.handle(key(K::Enter));
+    assert_eq!(app.placement, app::CavaPlacement::ThirdPanel);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("cava_under_lyrics = false") && saved.contains("thirdpanel = true"), "{saved}");
+    // ... and back to the bottom
+    app.handle(key(K::Enter));
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("cava_under_lyrics = true") && saved.contains("thirdpanel = false"), "{saved}");
+    // a restart with cava on: the saved placement is kept (it used to flip to a side column)
+    let mut args = cli::Args::parse_from(["x", "--config", cfg.to_str().unwrap()]);
+    let m = <cli::Args as clap::CommandFactory>::command().get_matches_from(["x", "--config", cfg.to_str().unwrap()]);
+    config::apply(&mut args, &m, &cfg, true, &mut |_| {});
+    let mut l = config::load_layout(&args, &cfg, &mut |_| {});
+    l.panels.set(PanelId::Cava, true);
+    let mut app = test_app();
+    app.set_layout(l);
+    assert!(app.show_cava);
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+    // `--thirdpanel` still asks for the column
+    let args = cli::Args::parse_from(["x", "--thirdpanel"]);
+    let l = config::load_layout(&args, &cfg, &mut |_| {});
+    assert!(!l.cava_under_lyrics && l.panels.shown(PanelId::Cava));
+}
+
+#[tokio::test]
+async fn the_customize_page_switches_cava_between_bottom_and_side() {
+    use crossterm::event::KeyCode as K;
+    use layout::PanelId;
+    let (mut app, cfg) = settings_app("cavadock_page");
+    app.snap = Some(snap("A", "B", "C"));
+    app.show_settings = true;
+    app.open_customize();
+    while app.cust_items()[app.cust_sel] != app::CustItem::Panel(PanelId::Cava) {
+        app.handle(key(K::Down));
+    }
+    let s = render(&mut app, 100, 40);
+    assert!(row_of(&s, "bottom").is_some(), "{s:#?}");
+    app.handle(key(K::Char('p')));
+    assert_eq!(app.placement, app::CavaPlacement::ThirdPanel);
+    assert!(app.show_cava, "a column of its own is shown");
+    assert!(row_of(&render(&mut app, 100, 40), "side").is_some());
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("cava_under_lyrics = false"));
+    app.handle(key(K::Char('p')));
+    assert_eq!(app.placement, app::CavaPlacement::UnderLyrics);
+}
+
+#[tokio::test]
+async fn the_cover_is_above_the_track_information() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    let s = render(&mut app, 100, 30);
+    let track = row_of(&s, "Track ").unwrap();
+    assert!(track > 8, "the cover takes the top rows, the track information is under it (row {track})");
+    // the other way round is still a choice
+    app.layout.panels.shift(PanelId::Metadata, -1);
+    assert_eq!(app.layout.now_playing()[0], PanelId::Metadata);
+    let s = render(&mut app, 100, 30);
+    assert!(row_of(&s, "Track ").unwrap() < 5, "{s:#?}");
+}
+
+#[tokio::test]
+async fn annotations_and_diagrams_share_one_column() {
+    use layout::PanelId;
+    let mut app = playing_app();
+    app.set_layout(layout::Layout::default());
+    // the notes alone: a column of their own, narrower than before
+    app.toggle_annotations();
+    let s = render(&mut app, 120, 40);
+    let x = s.iter().find_map(|r| col_of(r, "annotations")).unwrap();
+    assert!(!app.hits.stack_diagrams);
+    assert!(x >= 94, "the notes column starts at {x} of 120");
+    // the diagrams alone dock inside the lyrics column, as before
+    app.toggle_annotations();
+    app.show_diagrams = true;
+    let s = render(&mut app, 120, 40);
+    assert!(!app.hits.stack_diagrams && s.iter().any(|r| r.contains("chords")));
+    // both: one column, the diagrams on top and the notes under them, half each
+    app.toggle_annotations();
+    let s = render(&mut app, 120, 40);
+    assert!(app.hits.stack_diagrams);
+    let chords_row = s.iter().position(|r| r.contains("╭ chords")).unwrap();
+    let notes_row = s.iter().position(|r| r.contains("╭ annotations")).unwrap();
+    assert!(chords_row < notes_row, "diagrams above notes");
+    let (cx, nx) = (col_of(&s[chords_row], "╭ chords").unwrap(), col_of(&s[notes_row], "╭ annotations").unwrap());
+    assert_eq!(cx, nx, "the same column");
+    assert_eq!(s.iter().filter(|r| r.contains("╭ chords")).count(), 1, "the lyrics column no longer holds its own copy");
+    // roughly half the height each (the column is 40 - top row - footer rows tall)
+    assert!(notes_row.abs_diff(chords_row + (40 - 2) / 2) <= 3, "{chords_row} {notes_row}");
+    let _ = PanelId::Chords;
 }
