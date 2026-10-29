@@ -66,6 +66,9 @@ pub struct Model {
     pub anns: Vec<Annotation>,
     pub ann_match: Vec<Option<usize>>,
     pub ai_notes: Vec<Option<String>>,
+    /// genius+ai: the AI part's state (`notes` is the Genius part) and why Genius gave nothing.
+    pub ai_state: Notes,
+    pub genius_err: Option<String>,
     pub note: Option<(String, Instant)>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -110,6 +113,8 @@ impl Model {
             anns: Vec::new(),
             ann_match: Vec::new(),
             ai_notes: Vec::new(),
+            ai_state: Notes::Idle,
+            genius_err: None,
             note: None,
             tasks: Vec::new(),
             args,
@@ -163,6 +168,10 @@ impl Model {
                 self.realign_members();
                 self.ensure_translation();
                 self.rematch_annotations();
+                // AI notes are per line number: another lyrics version needs its own
+                if self.args.annotations_mode.uses_ai() && !matches!(self.notes, Notes::Idle) {
+                    self.reset_annotations();
+                }
                 self.ensure_annotations();
             }
             AppEvent::Cover { url, loaded } if url == self.art_url => {
@@ -213,15 +222,23 @@ impl Model {
                     self.rematch_annotations();
                     self.notes = Notes::Ready;
                 }
-                Err(e) => self.notes = Notes::Failed(e),
-            },
-            AppEvent::AiNotes { key, result } if key == self.track_key => match result {
-                Ok(n) => {
-                    self.ai_notes = n;
+                // genius+ai: the AI part still comes
+                Err(e) if self.args.annotations_mode == AnnotationMode::GeniusAi => {
+                    self.genius_err = Some(e);
                     self.notes = Notes::Ready;
                 }
                 Err(e) => self.notes = Notes::Failed(e),
             },
+            AppEvent::AiNotes { key, result } if key == self.track_key => {
+                let state = if self.args.annotations_mode == AnnotationMode::GeniusAi { &mut self.ai_state } else { &mut self.notes };
+                match result {
+                    Ok(n) => {
+                        self.ai_notes = n;
+                        *state = Notes::Ready;
+                    }
+                    Err(e) => *state = Notes::Failed(e),
+                }
+            }
             _ => {}
         }
     }
@@ -259,10 +276,7 @@ impl Model {
             self.chords_state = Chords::Idle;
             self.translate_inflight = false;
             self.translate_note = None;
-            self.notes = Notes::Idle;
-            self.anns.clear();
-            self.ann_match.clear();
-            self.ai_notes.clear();
+            self.reset_annotations();
             self.mb_genre = None;
             self.year = year::from_content_created(&s.content_created);
             self.spawn_lookups(&s, key);
@@ -551,16 +565,24 @@ impl Model {
         };
     }
 
-    pub fn note_for(&self, i: usize) -> Option<Annotation> {
-        match self.args.annotations_mode {
-            AnnotationMode::Genius => self.anns.get((*self.ann_match.get(i)?)?).cloned(),
-            AnnotationMode::Ai => Some(Annotation {
-                fragment: String::new(),
-                text: self.ai_notes.get(i)?.clone()?,
-                source: annotations::AI_LABEL.into(),
-                url: None,
-            }),
-        }
+    /// The notes for lyric line `i`, Genius first (the same rule as the terminal UI).
+    pub fn notes_for(&self, i: usize) -> Vec<Annotation> {
+        annotations::notes_for(self.args.annotations_mode, &self.anns, &self.ann_match, &self.ai_notes, i)
+    }
+
+    pub fn reset_annotations(&mut self) {
+        self.notes = Notes::Idle;
+        self.ai_state = Notes::Idle;
+        self.genius_err = None;
+        self.anns.clear();
+        self.ann_match.clear();
+        self.ai_notes.clear();
+    }
+
+    /// The mode or the token changed: start over for this song.
+    pub fn restart_annotations(&mut self) {
+        self.reset_annotations();
+        self.ensure_annotations();
     }
 
     pub fn ensure_annotations(&mut self) {
@@ -573,7 +595,7 @@ impl Model {
         match self.args.annotations_mode {
             AnnotationMode::Genius => {
                 let Some(token) = annotations::token(&self.args.genius_token) else {
-                    self.notes = Notes::Failed("no token: set genius_token or GENIUS_TOKEN (free at genius.com/api-clients)".into());
+                    self.notes = Notes::Failed(annotations::NO_TOKEN.into());
                     return;
                 };
                 self.notes = Notes::Loading;
@@ -590,6 +612,27 @@ impl Model {
                 self.notes = Notes::Loading;
                 self.tasks.push(tokio::spawn(async move {
                     let result = annotations::ai_notes(&c, &cfg, &snap.artist, &snap.title, &lines).await;
+                    let _ = tx.send(AppEvent::AiNotes { key, result });
+                }));
+            }
+            // Genius first (shown as soon as it arrives), then one AI request that sees it
+            AnnotationMode::GeniusAi => {
+                let token = annotations::token(&self.args.genius_token);
+                let cfg = self.ai_cfg();
+                self.notes = Notes::Loading;
+                self.ai_state = match cfg {
+                    Some(_) => Notes::Loading,
+                    None => Notes::Failed("AI extras need a model (settings → AI)".into()),
+                };
+                self.tasks.push(tokio::spawn(async move {
+                    let genius = match token {
+                        Some(t) => annotations::fetch(&c, &t, &snap.artist, &snap.title).await,
+                        None => Err(annotations::NO_TOKEN.to_string()),
+                    };
+                    let _ = tx.send(AppEvent::Annotations { key, result: genius.clone() });
+                    let Some(cfg) = cfg else { return };
+                    let per_line = annotations::genius_per_line(&lines, &genius.unwrap_or_default());
+                    let result = annotations::ai_extras(&c, &cfg, &snap.artist, &snap.title, &lines, &per_line).await;
                     let _ = tx.send(AppEvent::AiNotes { key, result });
                 }));
             }

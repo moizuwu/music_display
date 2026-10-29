@@ -276,11 +276,28 @@ impl Gui {
                     self.m.ensure_annotations();
                     cfg.push(("annotations", notes.into()));
                 }
-                let mut ai_notes = self.m.args.annotations_mode == AnnotationMode::Ai;
-                if ui.checkbox(&mut ai_notes, "…as AI-generated notes instead of Genius").changed() {
-                    self.m.args.annotations_mode = if ai_notes { AnnotationMode::Ai } else { AnnotationMode::Genius };
-                    cfg.push(("annotations_mode", self.m.args.annotations_mode.name().into()));
+                let mut mode = self.m.args.annotations_mode;
+                egui::ComboBox::from_label("Annotations from")
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for m in [AnnotationMode::Genius, AnnotationMode::Ai, AnnotationMode::GeniusAi] {
+                            ui.selectable_value(&mut mode, m, m.label());
+                        }
+                    });
+                if mode != self.m.args.annotations_mode {
+                    self.m.args.annotations_mode = mode;
+                    cfg.push(("annotations_mode", mode.name().into()));
+                    self.m.restart_annotations();
                 }
+                let mut max = self.m.args.annotation_max_chars as u32;
+                ui.horizontal(|ui| {
+                    ui.label("Annotation length");
+                    if ui.add(egui::DragValue::new(&mut max).range(0..=4000).speed(10)).changed() {
+                        self.m.args.annotation_max_chars = max as usize;
+                        cfg.push(("annotation_max_chars", (max as i64).into()));
+                    }
+                    ui.label(egui::RichText::new("0 = the whole note").small().weak());
+                });
                 ui.separator();
                 ui.heading("Layout");
                 if ui.button(if self.customize { "Hide the layout editor" } else { "Customize layout…" }).clicked() {

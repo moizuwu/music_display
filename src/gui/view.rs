@@ -397,11 +397,8 @@ pub fn draw_shape(ui: &mut Ui, shape: &music_display::diagram::Shape, color: Col
 // ── annotations ─────────────────────────────────────────────────────────────
 
 pub fn annotations(ui: &mut Ui, m: &mut Model) {
-    let mode = match m.args.annotations_mode {
-        music_display::cli::AnnotationMode::Genius => "Genius",
-        music_display::cli::AnnotationMode::Ai => music_display::annotations::AI_LABEL,
-    };
-    ui.heading(format!("Annotations · {mode}"));
+    let mode = m.args.annotations_mode;
+    ui.heading(format!("Annotations · {}", mode.label()));
     ui.label(RichText::new("experimental").small().weak());
     match &m.notes {
         Notes::Idle => return drop(ui.label(RichText::new("waiting for lyrics…").weak())),
@@ -412,14 +409,35 @@ pub fn annotations(ui: &mut Ui, m: &mut Model) {
     let Some(i) = m.active_line() else {
         return drop(ui.label(RichText::new("annotations follow the synced lyrics").weak()));
     };
-    match m.note_for(i) {
-        None => drop(ui.label(RichText::new("no annotation for this line").weak())),
-        Some(n) => {
+    let notes = m.notes_for(i);
+    let max = m.args.annotation_max_chars;
+    // a long note scrolls; back to the top when the line changes
+    egui::ScrollArea::vertical().id_salt(("notes", m.track_key, i)).auto_shrink([false, true]).show(ui, |ui| {
+        if let Some(e) = &m.genius_err {
+            ui.add(egui::Label::new(RichText::new(format!("Genius: {e}")).small().weak()).wrap());
+        }
+        if notes.is_empty() {
+            ui.label(RichText::new("no annotation for this line").weak());
+        }
+        for (k, n) in notes.iter().enumerate() {
+            if k > 0 {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.label(RichText::new("AI extra").small().weak());
+            }
             if !n.fragment.is_empty() {
                 ui.label(RichText::new(format!("“{}”", n.fragment)).italics().color(accent(ui)));
             }
-            ui.add(egui::Label::new(n.text).wrap());
+            let text = RichText::new(music_display::annotations::shown(&n.text, max));
+            ui.add(egui::Label::new(if k > 0 { text.italics() } else { text }).wrap());
             ui.label(RichText::new(format!("— {}", n.source)).weak());
         }
-    }
+        if mode == music_display::cli::AnnotationMode::GeniusAi {
+            match &m.ai_state {
+                Notes::Loading => drop(ui.label(RichText::new("AI extras: looking up…").small().weak())),
+                Notes::Failed(e) => drop(ui.add(egui::Label::new(RichText::new(format!("AI extras: {e}")).small().weak()).wrap())),
+                _ => {}
+            }
+        }
+    });
 }

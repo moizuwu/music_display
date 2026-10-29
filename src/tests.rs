@@ -4237,6 +4237,176 @@ async fn the_annotations_key_and_settings_rows_work_and_persist() {
     assert!(a.annotations && a.annotations_mode == cli::AnnotationMode::Ai && a.genius_token == "t");
 }
 
+#[tokio::test]
+async fn genius_ai_stacks_both_and_asks_each_service_once_per_song() {
+    let artist = "NotesTest GeniusAI Band";
+    let lines = vec!["Intro line goes here".to_string(), "We build castles in the sand".to_string()];
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (gsite, glog) = genius_site(artist);
+    // line 2 repeats Genius and must be dropped; line 1 is new
+    let reply = chat_reply(r#"["The intro was recorded in one take.", "A metaphor for fragile things people work hard on."]"#);
+    let (asite, alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, &gsite);
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite.clone();
+    let cfg = app.ai_cfg().unwrap();
+    let genius = vec![None, Some("A metaphor for fragile things people work hard on.".to_string())];
+    let extra_cache = annotations::ai_extra_cache_for_test(&cfg, artist, "Roygbiv", &lines, &genius);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert!(matches!(app.ann_state, app::AnnState::Ready));
+    // one Genius search, one referents call, one AI request for the whole song
+    assert_eq!(glog.lock().unwrap().len(), 2, "{:?}", glog.lock().unwrap());
+    assert_eq!(alog.lock().unwrap().len(), 1, "{:?}", alog.lock().unwrap());
+    assert_eq!(app.ai_notes, vec![Some("The intro was recorded in one take.".to_string()), None]);
+    // the line Genius covers: Genius only (the AI repeat was dropped)
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("fragile") && s.contains("— Genius") && !s.contains("AI extra"), "{s}");
+    // the intro: the AI note alone, labelled as AI
+    app.set_position_for_test(2.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("recorded in one") && s.contains("AI-generated"), "{s}");
+    // the next play of the song asks nobody
+    let (mut again, mut rx2) = notes_app(artist, &gsite);
+    again.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    again.args.ai_model = "tester".into();
+    again.args.ai_endpoint = asite;
+    again.ensure_annotations();
+    pump(&mut again, &mut rx2, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert_eq!(glog.lock().unwrap().len(), 2);
+    assert_eq!(alog.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn genius_ai_shows_the_ai_extra_under_the_genius_note() {
+    let artist = "NotesTest GeniusAI Stack";
+    let lines = vec!["Intro line goes here".to_string(), "We build castles in the sand".to_string()];
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (gsite, _glog) = genius_site(artist);
+    let reply = chat_reply(r#"[null, "Jimi Hendrix released a song with the same title in 1967."]"#);
+    let (asite, _alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, &gsite);
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite;
+    let genius = vec![None, Some("A metaphor for fragile things people work hard on.".to_string())];
+    let extra_cache = annotations::ai_extra_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &lines, &genius);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    app.set_position_for_test(11.0);
+    let rows = render(&mut app, 120, 40);
+    let at = |t: &str| rows.iter().position(|r| r.contains(t)).unwrap_or_else(|| panic!("{t}: {}", rows.join("\n")));
+    assert!(at("fragile") < at("AI extra") && at("AI extra") < at("Hendrix"));
+    assert!(at("Hendrix") < at("AI-generated"));
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn genius_ai_without_a_token_still_asks_the_ai() {
+    let artist = "NotesTest GeniusAI NoToken";
+    let reply = chat_reply(r#"[null, "Sand castles are a common image for impermanence."]"#);
+    let (asite, alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, "http://127.0.0.1:1");
+    app.args.genius_token.clear();
+    if app.genius_token().is_some() {
+        return; // (a developer machine with GENIUS_TOKEN set)
+    }
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite;
+    let lines = app.lyric_lines().unwrap();
+    let extra_cache = annotations::ai_extra_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &lines, &[None, None]);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert_eq!(alog.lock().unwrap().len(), 1);
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("impermanence") && s.contains("no token"), "{s}");
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn a_long_annotation_is_whole_scrolls_and_can_be_cut() {
+    let artist = "NotesTest Long Band";
+    let long = format!("Start of the note. {} End of the note.", "More context about the line. ".repeat(40));
+    let referents = serde_json::json!({"response": {"referents": [
+        {"fragment": "We build castles in the sand", "annotations": [{"body": {"plain": long}}]}
+    ]}});
+    let search = serde_json::json!({"response": {"hits": [{"result": {"id": 77, "title": "Roygbiv", "primary_artist": {"name": artist}}}]}});
+    let (site, _log) = scripted_site(vec![
+        ("/search", vec![R::Http(200, GENIUS_JSON, search.to_string())]),
+        ("/referents", vec![R::Http(200, GENIUS_JSON, referents.to_string())]),
+    ]);
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (mut app, mut rx) = notes_app(artist, &site);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    assert!(app.anns[0].text.ends_with("End of the note."), "stored whole");
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Start of the") && s.contains("more") && !s.contains("End of the note"), "{s}");
+    // e scrolls down to the end, E back up
+    use crossterm::event::KeyCode as K;
+    for _ in 0..200 {
+        app.handle(key(K::Char('e')));
+    }
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("End of the") && !s.contains("Start of the"), "{s}");
+    for _ in 0..200 {
+        app.handle(key(K::Char('E')));
+    }
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Start of the"), "{s}");
+    // a configured limit cuts it with …
+    app.args.annotation_max_chars = 60;
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains('…') && !s.contains("more"), "{s}");
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+}
+
+#[tokio::test]
+async fn the_annotation_settings_rows_cycle_and_persist() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("notes_settings2");
+    app.show_settings = true;
+    let row = |s| app::Setting::ALL.iter().position(|x| *x == s).unwrap();
+    app.settings_sel = row(app::Setting::AnnotationsMode);
+    for want in [cli::AnnotationMode::Ai, cli::AnnotationMode::GeniusAi, cli::AnnotationMode::Genius] {
+        app.handle(key(K::Enter));
+        assert_eq!(app.args.annotations_mode, want);
+    }
+    app.handle(key(K::Left));
+    assert_eq!(app.args.annotations_mode, cli::AnnotationMode::GeniusAi);
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("annotations_mode = \"genius+ai\""));
+    app.settings_sel = row(app::Setting::AnnotationMaxChars);
+    app.handle(key(K::Right));
+    assert_eq!(app.args.annotation_max_chars, 200);
+    app.settings_sel = row(app::Setting::AnnotationScroll);
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.annotation_scroll, cli::AnnotationScroll::Auto);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("annotation_max_chars = 200") && saved.contains("annotation_scroll = \"auto\""), "{saved}");
+    let (a, w) = cfg_run("annotations_mode = \"genius+ai\"\nannotation_max_chars = 500\nannotation_scroll = \"auto\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!((a.annotations_mode, a.annotation_max_chars, a.annotation_scroll), (cli::AnnotationMode::GeniusAi, 500, cli::AnnotationScroll::Auto));
+    let a = cli::Args::parse_from(["music_display", "--annotations-mode", "genius+ai"]);
+    assert_eq!(a.annotations_mode, cli::AnnotationMode::GeniusAi);
+    for n in cli::AnnotationMode::NAMES {
+        assert_eq!(cli::AnnotationMode::parse(n).unwrap().name(), *n);
+    }
+}
+
 // ── fixes: cava placement, cover above the track info, annotations next to the diagrams ──
 
 #[tokio::test]

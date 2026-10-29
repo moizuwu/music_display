@@ -61,6 +61,8 @@ pub const KEYS: &[Key] = &[
     k!("genre_lookup", Kind::Bool, "genre_lookup"),
     k!("annotations", Kind::Bool, "annotations"),
     k!("annotations_mode", Kind::Choice(crate::cli::AnnotationMode::NAMES), "annotations_mode"),
+    k!("annotation_max_chars", Kind::Int(0, 4000), "annotation_max_chars"),
+    k!("annotation_scroll", Kind::Choice(crate::cli::AnnotationScroll::NAMES), "annotation_scroll"),
     k!("genius_token", Kind::Text, "genius_token"),
     k!("translate_engine", Kind::Choice(crate::cli::TranslateEngine::NAMES), "translate_engine"),
     k!("translate_lang", Kind::Str, "translate_lang"),
@@ -164,6 +166,8 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "genre_lookup" => args.genre_lookup = b(),
         "annotations" => args.annotations = b(),
         "annotations_mode" => args.annotations_mode = crate::cli::AnnotationMode::parse(&st()).unwrap_or_default(),
+        "annotation_max_chars" => args.annotation_max_chars = i() as usize,
+        "annotation_scroll" => args.annotation_scroll = crate::cli::AnnotationScroll::parse(&st()).unwrap_or_default(),
         "genius_token" => args.genius_token = st(),
         "translate_engine" => {
             args.translate_engine = crate::cli::TranslateEngine::parse(&st()).unwrap_or_default()
@@ -426,6 +430,8 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("translate_engine", q(args.translate_engine.name()));
     line("annotations", args.annotations.to_string());
     line("annotations_mode", q(args.annotations_mode.name()));
+    line("annotation_max_chars", args.annotation_max_chars.to_string());
+    line("annotation_scroll", q(args.annotation_scroll.name()));
     if args.genius_token.is_empty() {
         line("# genius_token", "\"…\"  # or GENIUS_TOKEN in the environment; free at genius.com/api-clients".into());
     } else {

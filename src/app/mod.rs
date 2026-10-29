@@ -109,6 +109,9 @@ const PRELOAD_DELAY: Duration = Duration::ZERO;
 const PRELOAD_GAP: Duration = Duration::from_millis(150);
 
 
+/// The steps of the "Annotation length" row (0 = the whole note).
+const ANNOTATION_LENGTHS: [usize; 6] = [0, 200, 400, 800, 1500, 3000];
+
 /// Click targets recorded during the last render.
 #[derive(Default)]
 pub struct Hits {
@@ -130,6 +133,8 @@ pub struct Hits {
     pub fields: Vec<(crate::layout::MetaField, Rect)>,
     /// The borders between columns that can be dragged.
     pub borders: Vec<Border>,
+    /// The annotations panel (mouse-wheel target).
+    pub notes: Rect,
     /// The rows of the open field menu.
     pub menu_items: Vec<Rect>,
     /// Chord diagrams share the annotations column (drawn above the notes) instead of docking
@@ -292,6 +297,13 @@ pub struct App {
     pub anns: Vec<crate::annotations::Annotation>,
     pub ann_match: Vec<Option<usize>>,
     pub ai_notes: Vec<Option<String>>,
+    /// genius+ai: the AI part's own state (`ann_state` is the Genius part), and why Genius gave
+    /// nothing (shown as a line above the AI notes).
+    pub ai_state: AnnState,
+    pub genius_err: Option<String>,
+    /// How far a note that does not fit the panel is scrolled, and the line it belongs to.
+    pub ann_scroll: u16,
+    pub ann_scroll_line: Option<usize>,
     /// Test hook: another Genius API address.
     pub annotations_base: Option<String>,
     /// What MusicBrainz said for the playing track.
@@ -424,6 +436,10 @@ impl App {
             anns: Vec::new(),
             ann_match: Vec::new(),
             ai_notes: Vec::new(),
+            ai_state: AnnState::Idle,
+            genius_err: None,
+            ann_scroll: 0,
+            ann_scroll_line: None,
             annotations_base: None,
             mb_genre: None,
             customizing: false,
@@ -518,6 +534,11 @@ impl App {
                 self.realign_members();
                 self.ensure_translation();
                 self.rematch_annotations();
+                // AI notes are per line number: another lyrics version needs its own (cached
+                // per text, so the same lines cost no request)
+                if self.args.annotations_mode.uses_ai() && !matches!(self.ann_state, AnnState::Idle) {
+                    self.reset_annotations();
+                }
                 self.ensure_annotations();
                 self.dirty = true;
             }
@@ -1361,6 +1382,11 @@ impl App {
             Setting::GenreLookup => onoff(self.args.genre_lookup),
             Setting::Annotations => onoff(self.annotations_shown()),
             Setting::AnnotationsMode => format!("< {} >", self.args.annotations_mode.name()),
+            Setting::AnnotationMaxChars => match self.args.annotation_max_chars {
+                0 => "< whole note >".into(),
+                n => format!("< {n} characters >"),
+            },
+            Setting::AnnotationScroll => format!("< {} >", self.args.annotation_scroll.name()),
             Setting::GeniusToken => match &self.settings_edit {
                 Some((Setting::GeniusToken, input)) => input.shown(),
                 _ if !self.args.genius_token.is_empty() => "set (hidden)".to_string(),
@@ -1518,13 +1544,24 @@ impl App {
             Setting::GenreLookup => self.args.genre_lookup = !self.args.genre_lookup,
             Setting::Annotations => self.toggle_annotations(),
             Setting::AnnotationsMode => {
-                let next = if self.args.annotations_mode == crate::cli::AnnotationMode::Genius {
-                    crate::cli::AnnotationMode::Ai
-                } else {
-                    crate::cli::AnnotationMode::Genius
-                };
-                self.args.annotations_mode = next;
+                let mut m = self.args.annotations_mode.next();
+                if dir < 0 {
+                    m = m.next(); // three modes: two steps forward is one back
+                }
+                self.args.annotations_mode = m;
                 self.restart_annotations();
+            }
+            Setting::AnnotationMaxChars => {
+                let cur = ANNOTATION_LENGTHS.iter().position(|n| *n == self.args.annotation_max_chars).unwrap_or(0) as i32;
+                self.args.annotation_max_chars = ANNOTATION_LENGTHS[(cur + dir).rem_euclid(ANNOTATION_LENGTHS.len() as i32) as usize];
+                self.ann_scroll = 0;
+            }
+            Setting::AnnotationScroll => {
+                self.args.annotation_scroll = match self.args.annotation_scroll {
+                    crate::cli::AnnotationScroll::Manual => crate::cli::AnnotationScroll::Auto,
+                    crate::cli::AnnotationScroll::Auto => crate::cli::AnnotationScroll::Manual,
+                };
+                self.ann_scroll = 0;
             }
             Setting::GeniusToken => {
                 self.settings_edit = Some((s, TextInput::with("")));
@@ -1668,6 +1705,8 @@ impl App {
             ("genre_lookup", B(self.args.genre_lookup)),
             ("annotations", B(self.annotations_shown())),
             ("annotations_mode", S(self.args.annotations_mode.name().to_string())),
+            ("annotation_max_chars", I(self.args.annotation_max_chars as i64)),
+            ("annotation_scroll", S(self.args.annotation_scroll.name().to_string())),
             ("genius_token", S(self.args.genius_token.clone())),
             ("translate", B(self.translate_on)),
             ("translate_mode", S(self.translate_mode().name().to_string())),
@@ -1917,6 +1956,12 @@ impl App {
             }
             Event::Mouse(m)
                 if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                    && self.hits.notes.contains(Position::new(m.column, m.row)) =>
+            {
+                self.scroll_notes(if m.kind == MouseEventKind::ScrollUp { -2 } else { 2 });
+            }
+            Event::Mouse(m)
+                if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
                     && self.lyric_hits.area.contains(Position::new(m.column, m.row)) =>
             {
                 self.browse_by(if m.kind == MouseEventKind::ScrollUp { -3.0 } else { 3.0 });
@@ -1994,6 +2039,8 @@ impl App {
             Action::CapoUp => self.change_capo(1),
             Action::CapoReset => self.set_capo_override(None),
             Action::Annotations => self.toggle_annotations(),
+            Action::NotesDown => self.scroll_notes(2),
+            Action::NotesUp => self.scroll_notes(-2),
             Action::Diagrams => {
                 self.show_diagrams = !self.show_diagrams;
                 self.layout.panels.set(crate::layout::PanelId::Chords, self.show_diagrams);
