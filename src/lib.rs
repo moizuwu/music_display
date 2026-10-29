@@ -29,6 +29,7 @@ pub mod diagram;
 pub mod shutdown;
 pub mod setup;
 pub mod layout;
+pub mod guiconf;
 pub mod genre;
 pub mod ai;
 pub mod annotations;

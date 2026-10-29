@@ -1,12 +1,14 @@
 //! The GUI's state: what is playing, the lyrics, chords, translation and notes, fed by the same
 //! background tasks and `AppEvent`s as the terminal front end. No egui types in here, so it can
 //! be driven and tested without a window.
+use super::extras::Extras;
 use music_display::annotations::{self, Annotation};
 use music_display::cli::{AnnotationMode, Args, TranslateEngine, TranslateMode};
 use music_display::layout::{Layout, PanelId};
 use music_display::lyrics::Lyrics;
 use music_display::player::{Ctl, Snapshot, Status};
-use music_display::{AppEvent, ai, chords, cover, genre, genius, ug, year};
+use super::library::Spot;
+use music_display::{AppEvent, spotify, ai, chords, cover, genre, genius, ug, year};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -32,6 +34,8 @@ pub struct Model {
     pub args: Args,
     pub layout: Layout,
     pub cfg: PathBuf,
+    /// The `[gui]` look; the window loads it from the config file.
+    pub gui: music_display::guiconf::GuiConf,
     pub ctl: Ctl,
     pub tx: UnboundedSender<AppEvent>,
     pub client: reqwest::Client,
@@ -59,7 +63,7 @@ pub struct Model {
     pub translations: HashMap<(u64, String), Vec<String>>,
     pub translate_backend: String,
     pub translate_note: Option<String>,
-    translate_inflight: bool,
+    pub translate_inflight: bool,
     pub members: Vec<Vec<String>>,
     member_src: Vec<genius::Part>,
     pub notes: Notes,
@@ -70,6 +74,10 @@ pub struct Model {
     pub ai_state: Notes,
     pub genius_err: Option<String>,
     pub note: Option<(String, Instant)>,
+    /// Cava, minimal view, lyric versions and the big line (see extras.rs).
+    pub x: Extras,
+    /// The Spotify client and library (off unless `spotify = true`).
+    pub spot: Spot,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -80,6 +88,7 @@ impl Model {
             .timeout(Duration::from_secs(15))
             .build()
             .expect("http client");
+        let spot = Spot::new(&args, tx.clone(), client.clone());
         let mut m = Model {
             ctl: Ctl::new(&args.player),
             tx,
@@ -116,7 +125,10 @@ impl Model {
             ai_state: Notes::Idle,
             genius_err: None,
             note: None,
+            x: Extras::new(&args),
+            spot,
             tasks: Vec::new(),
+            gui: Default::default(),
             args,
             layout,
             cfg,
@@ -152,10 +164,34 @@ impl Model {
     // ── events ──
 
     pub fn apply(&mut self, ev: AppEvent) {
+        self.extras_event(&ev);
         match ev {
-            AppEvent::Player(Some(s)) => self.on_snapshot(s),
+            AppEvent::Player(Some(s)) => {
+                self.spot.set_mpris(true);
+                self.on_snapshot(s);
+                self.spot.check_liked(self.playing_uri());
+            }
             AppEvent::Player(None) => {
-                self.snap = None;
+                self.spot.set_mpris(false);
+                // no MPRIS player: show what the Spotify API says plays (the phone…)
+                match self.spot.remote_snapshot() {
+                    Some(s) => self.on_snapshot(s),
+                    None => self.snap = None,
+                }
+                self.spot.check_liked(self.playing_uri());
+            }
+            AppEvent::Spotify(r) => {
+                let remote = matches!(r, spotify::Reply::Remote(Ok(_)));
+                self.spot.on_reply(r);
+                self.take_spot_note();
+                if remote && !self.spot.mpris() {
+                    match self.spot.remote_snapshot() {
+                        Some(s) => self.on_snapshot(s),
+                        None if self.remote_active() => self.snap = None,
+                        None => {}
+                    }
+                    self.spot.check_liked(self.playing_uri());
+                }
             }
             AppEvent::Year { key, year } if key == self.track_key => self.year = year,
             AppEvent::Genre { key, genres } if key == self.track_key => {
@@ -342,7 +378,8 @@ impl Model {
         let (tx, a, t, c, use_ug) = (self.tx.clone(), artist.to_string(), title.to_string(), self.client.clone(), self.args.chords_ug);
         self.tasks.push(tokio::spawn(async move {
             let sheet = ug::resolve(c, dir, use_ug, a, t).await;
-            let _ = tx.send(AppEvent::Chords { key, sheet, capo: None });
+            let capo = super::extras::load_capo(key).await;
+            let _ = tx.send(AppEvent::Chords { key, sheet, capo });
         }));
     }
 
@@ -641,26 +678,63 @@ impl Model {
 
     // ── transport ──
 
+    /// What is on screen came from the Spotify API: controls go to the API.
+    pub fn remote_active(&self) -> bool {
+        self.snap.as_ref().is_some_and(|s| s.player == spotify::REMOTE)
+    }
+
+    /// The Spotify URI of the song playing, if it is a Spotify track.
+    pub fn playing_uri(&self) -> Option<String> {
+        self.snap.as_ref().and_then(|s| spotify::track_uri(&s.track_id))
+    }
+
+    /// Move a note the Spotify side wants shown to the note line.
+    pub fn take_spot_note(&mut self) {
+        if let Some(n) = self.spot.note.take() {
+            self.say(n);
+        }
+    }
+
     pub fn play_pause(&mut self) {
         let p = self.position();
+        let was_playing = self.playing();
+        if self.remote_active() {
+            self.spot.cmd(if was_playing { spotify::Cmd::Pause } else { spotify::Cmd::Resume });
+        } else {
+            self.ctl.send(&["play-pause"]);
+        }
         if let Some(s) = &mut self.snap {
             s.status = if s.status == Status::Playing { Status::Paused } else { Status::Playing };
         }
         self.set_position(p);
-        self.ctl.send(&["play-pause"]);
+        self.take_spot_note();
     }
 
     pub fn next(&mut self) {
-        self.ctl.send(&["next"]);
+        self.player_cmd(&["next"], spotify::Cmd::Next);
     }
 
     pub fn prev(&mut self) {
-        self.ctl.send(&["previous"]);
+        self.player_cmd(&["previous"], spotify::Cmd::Prev);
+    }
+
+    /// A playback command for whatever is on screen: playerctl, or the API for another device.
+    fn player_cmd(&mut self, args: &[&str], cmd: spotify::Cmd) {
+        if self.remote_active() {
+            self.spot.cmd(cmd);
+            self.take_spot_note();
+        } else {
+            self.ctl.send(args);
+        }
     }
 
     pub fn seek(&mut self, secs: f64) {
         self.set_position(secs);
-        self.ctl.seek_to(secs);
+        if self.remote_active() {
+            self.player_cmd(&[], spotify::Cmd::Seek(secs));
+        } else {
+            self.ctl.seek_to(secs);
+        }
     }
 
     pub fn set_volume(&mut self, v: f64) {
@@ -668,13 +742,14 @@ impl Model {
         if let Some(s) = &mut self.snap {
             s.volume = Some(v);
         }
-        self.ctl.send(&["volume", &format!("{v:.3}")]);
+        self.player_cmd(&["volume", &format!("{v:.3}")], spotify::Cmd::Volume(v));
     }
 
     pub fn toggle_shuffle(&mut self) {
         if let Some(s) = self.snap.as_mut().filter(|s| s.shuffle.is_some()) {
             s.shuffle = s.shuffle.map(|b| !b);
-            self.ctl.send(&["shuffle", "Toggle"]);
+            let on = s.shuffle == Some(true);
+            self.player_cmd(&["shuffle", "Toggle"], spotify::Cmd::Shuffle(on));
         }
     }
 
@@ -682,7 +757,7 @@ impl Model {
         if let Some(s) = self.snap.as_mut() {
             if let Some(r) = s.repeat.map(|r| r.next()) {
                 s.repeat = Some(r);
-                self.ctl.send(&["loop", r.arg()]);
+                self.player_cmd(&["loop", r.arg()], spotify::Cmd::Repeat(r));
             }
         }
     }
@@ -798,7 +873,33 @@ mod tests {
             key: k,
             result: Ok(vec![Annotation { fragment: "We build castles in the sand".into(), text: "About fragile things".into(), source: "Genius".into(), url: None }]),
         });
-        assert_eq!(m.note_for(0).unwrap().text, "About fragile things");
-        assert!(m.note_for(1).is_none());
+        assert_eq!(m.notes_for(0)[0].text, "About fragile things");
+        assert!(m.notes_for(1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn genius_ai_stacks_the_ai_extra_and_survives_a_missing_token() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        let k = m.track_key;
+        m.args.annotations_mode = AnnotationMode::GeniusAi;
+        m.apply(AppEvent::Lyrics { key: k, lyrics: Lyrics::Synced(vec![(0.0, "We build castles in the sand".into())]) });
+        // Genius failed: the AI part still comes, and the Genius problem is kept as a line
+        m.apply(AppEvent::Annotations { key: k, result: Err("no token".into()) });
+        assert!(matches!(m.notes, Notes::Ready) && m.genius_err.as_deref() == Some("no token"));
+        m.apply(AppEvent::AiNotes { key: k, result: Ok(vec![Some("Sand castles stand for impermanence".into())]) });
+        assert!(matches!(m.ai_state, Notes::Ready));
+        let n = m.notes_for(0);
+        assert_eq!((n.len(), n[0].source.as_str()), (1, music_display::annotations::AI_LABEL));
+        // with a Genius note too, the AI one is the labelled extra, Genius first
+        m.apply(AppEvent::Annotations {
+            key: k,
+            result: Ok(vec![Annotation { fragment: "We build castles in the sand".into(), text: "About fragile things".into(), source: "Genius".into(), url: None }]),
+        });
+        let n = m.notes_for(0);
+        assert_eq!((n.len(), n[0].source.as_str(), n[1].source.as_str()), (2, "Genius", music_display::annotations::AI_EXTRA_LABEL));
+        // a mode change starts over
+        m.restart_annotations();
+        assert!(m.anns.is_empty() && m.ai_notes.is_empty());
     }
 }

@@ -257,8 +257,8 @@ pub fn apply(
             read_ai(args, m, v, &mut |msg| problems.push((line_of(&raw, "ai"), format!("{}: {msg}", at("ai")))));
             continue;
         }
-        if name == "keys" || name == "layout" {
-            continue; // the [keys] section is read by keymap::load
+        if name == "keys" || name == "layout" || name == "gui" {
+            continue; // [keys] is read by keymap::load, [layout] by load_layout, [gui] by guiconf::load
         }
         let line = line_of(&raw, name);
         let Some(key) = KEYS.iter().find(|k| k.name == name) else {
@@ -461,5 +461,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("model", q(&args.ai_model));
     line("endpoint", q(&args.ai_endpoint));
     line("api_key_env", q(&args.ai_key_env));
+    // the --gui window's look, as the file has it (the GUI reads it itself)
+    o.push_str(&crate::guiconf::load(path, &mut |_| {}).render());
     o
 }

@@ -1,6 +1,7 @@
 //! The panels, drawn with egui. Each takes the model and reads or changes it; the same panel ids
 //! and layout config as the terminal front end decide what is shown and in which order.
 use super::model::{Chords, Model, Notes};
+use super::style::{self, Icon};
 use egui::{Align2, Color32, FontId, RichText, Sense, Stroke, Ui, Vec2};
 use music_display::cli::TranslateMode;
 use music_display::layout::{Button, MetaField};
@@ -61,14 +62,23 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
             Some((f, if v.is_empty() { "—".into() } else { v }))
         })
         .collect();
-    egui::Grid::new("meta").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+    let meta = m.gui.meta_size as f32;
+    let gap = 6.0 + m.gui.panel_spacing as f32 * 0.4;
+    egui::Grid::new("meta").num_columns(2).spacing([12.0, gap]).show(ui, |ui| {
         for (f, v) in &rows {
             let label = ui.add(egui::Label::new(RichText::new(f.label()).color(accent(ui)).strong()).sense(Sense::click()));
-            let value = ui.add(egui::Label::new(v.as_str()).wrap().sense(Sense::click()));
+            // the title is the headline of the card
+            let text = if *f == MetaField::Title { RichText::new(v.as_str()).size(meta + 4.0).strong() } else { RichText::new(v.as_str()) };
+            let value = ui.add(egui::Label::new(text).wrap().sense(Sense::click()));
             for r in [&label, &value] {
                 // clicking Key, BPM, Capo or Tuning opens the chord diagrams
-                if r.clicked() && f.opens_diagrams() {
-                    clicked_diagrams = true;
+                if f.opens_diagrams() {
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if r.clicked() {
+                        clicked_diagrams = true;
+                    }
                 }
                 r.context_menu(|ui| {
                     if ui.button("Hide").clicked() {
@@ -119,18 +129,20 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     }
 }
 
-pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>) {
+pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>, radius: u8) {
+    // square, as wide as the column allows (but never taller than the column or 480 px), centred
     let side = ui.available_width().min(ui.available_height()).clamp(64.0, 480.0);
-    match tex {
+    let radius = egui::CornerRadius::same(radius.saturating_add(2));
+    ui.vertical_centered(|ui| match tex {
         Some(t) => {
-            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(side)).corner_radius(6.0));
+            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(side)).corner_radius(radius));
         }
         None => {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(side.min(160.0)), Sense::hover());
-            ui.painter().rect_stroke(r, 6.0, Stroke::new(1.0, ui.visuals().weak_text_color()), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(r, radius, Stroke::new(1.0, ui.visuals().weak_text_color()), egui::StrokeKind::Inside);
             ui.painter().text(r.center(), Align2::CENTER_CENTER, "♪", FontId::proportional(32.0), ui.visuals().weak_text_color());
         }
-    }
+    });
 }
 
 pub fn controls(ui: &mut Ui, m: &mut Model) {
@@ -140,14 +152,18 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
     ui.horizontal(|ui| {
         ui.monospace(fmt_time(pos));
         let w = (ui.available_width() - 48.0).max(40.0);
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 14.0), Sense::click_and_drag());
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::click_and_drag());
+        let hot = resp.hovered() || resp.dragged();
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         let frac = if s.length > 0.0 { (pos / s.length).clamp(0.0, 1.0) as f32 } else { 0.0 };
         let mid = r.center().y;
         let p = ui.painter();
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(3.0, ui.visuals().widgets.inactive.bg_fill));
+        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(if hot { 5.0 } else { 3.0 }, ui.visuals().widgets.inactive.bg_fill));
         let x = r.left() + r.width() * frac;
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(3.0, accent(ui)));
-        p.circle_filled(egui::pos2(x, mid), 5.0, accent(ui));
+        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(if hot { 5.0 } else { 3.0 }, accent(ui)));
+        p.circle_filled(egui::pos2(x, mid), if hot { 7.0 } else { 5.0 }, accent(ui));
         if (resp.clicked() || resp.dragged()) && s.length > 0.0 {
             if let Some(pt) = resp.interact_pointer_pos() {
                 let f = ((pt.x - r.left()) / r.width()).clamp(0.0, 1.0) as f64;
@@ -156,6 +172,7 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
         }
         ui.monospace(fmt_time(s.length));
     });
+    ui.add_space(2.0);
     ui.horizontal(|ui| {
         let shown = m.layout.buttons.clone();
         let b = |f: Button| shown.shown(f);
@@ -178,13 +195,16 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
                 }
             }
         }
-        if b(Button::Prev) && ui.button("⏮").clicked() {
+        if b(Button::Prev) && style::icon_button(ui, Icon::Prev, false).on_hover_text("previous").clicked() {
             m.prev();
         }
-        if b(Button::Play) && ui.button(if s.status == Status::Playing { "⏸" } else { "▶" }).clicked() {
-            m.play_pause();
+        if b(Button::Play) {
+            let (icon, tip) = if s.status == Status::Playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
+            if style::icon_button(ui, icon, true).on_hover_text(tip).clicked() {
+                m.play_pause();
+            }
         }
-        if b(Button::Next) && ui.button("⏭").clicked() {
+        if b(Button::Next) && style::icon_button(ui, Icon::Next, false).on_hover_text("next").clicked() {
             m.next();
         }
         if b(Button::Volume) {
@@ -195,6 +215,7 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
                 }
             }
         }
+        super::library::transport_buttons(ui, m);
     });
 }
 
@@ -233,6 +254,7 @@ pub fn lyrics(ui: &mut Ui, m: &mut Model) {
         Some(Lyrics::Synced(l)) => (l.iter().map(|x| x.1.clone()).collect(), l.iter().map(|x| x.0).collect()),
         Some(Lyrics::Plain(l)) => (l.clone(), Vec::new()),
     };
+    let g = m.gui.clone();
     let cur = m.active_line();
     let frac = m.line_fraction() as f32;
     let tr = m.translation().cloned().filter(|t| t.len() == lines.len());
@@ -247,7 +269,6 @@ pub fn lyrics(ui: &mut Ui, m: &mut Model) {
                 _ => line.clone(),
             };
             let active = cur == Some(i);
-            let past = cur.is_some_and(|c| i < c);
             // chords sit above the words
             if m.chords_on {
                 let ch = m.chords_of(i);
@@ -261,26 +282,27 @@ pub fn lyrics(ui: &mut Ui, m: &mut Model) {
                     ui.label(RichText::new(row).monospace().color(accent(ui)).strong());
                 }
             }
-            let size = if active { 24.0 } else { 18.0 };
-            let color = if active {
-                ui.visuals().strong_text_color()
-            } else if past {
-                ui.visuals().weak_text_color()
-            } else {
-                ui.visuals().text_color()
-            };
+            let size = style::line_size(ui, &g, ui.make_persistent_id(("line", m.track_key, i)), active);
+            let font = if active { style::active_font(&g, size) } else { FontId::proportional(size) };
+            // lines fade out the further they are from the active one
+            let dist = cur.map_or(0, |c| i.abs_diff(c));
+            let color = if active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(1.0 - style::fade(&g, dist)) };
             let resp = if active && karaoke {
                 // the sung part is lit, the rest dimmer
                 let chars: Vec<char> = shown.chars().collect();
                 let lit = ((chars.len() as f32) * frac).round() as usize;
                 let (a, b): (String, String) = (chars[..lit.min(chars.len())].iter().collect(), chars[lit.min(chars.len())..].iter().collect());
                 let mut job = egui::text::LayoutJob::default();
-                job.append(&a, 0.0, egui::TextFormat { font_id: FontId::proportional(size), color: accent(ui), ..Default::default() });
-                job.append(&b, 0.0, egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
-                ui.add(egui::Label::new(job).sense(Sense::click()))
+                job.append(&a, 0.0, egui::TextFormat { font_id: font.clone(), color: accent(ui), ..Default::default() });
+                job.append(&b, 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+                style::aligned(ui, &g, |ui| ui.add(egui::Label::new(job).sense(Sense::click())))
             } else {
-                ui.add(egui::Label::new(RichText::new(shown).size(size).color(color)).sense(Sense::click()))
+                style::aligned(ui, &g, |ui| ui.add(egui::Label::new(RichText::new(shown).font(font).color(color)).sense(Sense::click())))
             };
+            if !stamps.is_empty() && resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().rect_filled(resp.rect.expand(3.0), g.corner_radius.min(8), ui.visuals().text_color().gamma_multiply(0.07));
+            }
             if both {
                 if let Some(t) = &tr {
                     ui.label(RichText::new(&t[i]).italics().weak());
@@ -318,11 +340,11 @@ pub fn diagrams(ui: &mut Ui, m: &mut Model) {
         }
         ui.separator();
         if ui.small_button("capo −").clicked() {
-            m.capo_override = Some(m.effective_capo().saturating_sub(1));
+            m.change_capo(-1);
         }
         ui.label(format!("capo {}", m.effective_capo()));
         if ui.small_button("capo +").clicked() {
-            m.capo_override = Some((m.effective_capo() + 1).min(12));
+            m.change_capo(1);
         }
     });
     match &m.chords_state {

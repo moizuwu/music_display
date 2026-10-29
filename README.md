@@ -320,7 +320,36 @@ cargo install --path . --features gui      # or: cargo build --release --feature
 music_display --gui
 ```
 
-It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Shortcuts: `space` play/pause, `←` / `→` seek 5 s, `,` / `.` lyrics 0.1 s earlier / later, `c` chords, `d` chord diagrams, `n` annotations. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** has the translation, chord and annotation switches and the layout editor.
+It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Shortcuts: `space` play/pause, `←` / `→` seek 5 s, `,` / `.` lyrics 0.1 s earlier / later, `c` chords, `d` chord diagrams, `n` annotations, `v` cava bars, `m` minimal view, `l` next lyrics version, `[` / `]` capo down / up (remembered per track), `0` back to the sheet's capo, `o` the Spotify library. With `spotify = true` (and a login, see Spotify) the transport row also gets a heart (like / unlike), **devices**, **play here** and **library** buttons; the library window has the TUI's tabs (Recent, Playlists, Liked, Albums, Artists, Search, Queue), play / open / back / `+q` (queue) / `+list` (add to a playlist) / like per row, and shows errors and rate limits in the note line. With no MPRIS player the window follows what the Spotify API says plays, and the transport buttons then control that. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** has the translation, chord and annotation switches, a View section (cava, minimal view, layout preset picker), an Appearance tab (see below: size and weight of the active line, opacity, fonts, colours) and the layout editor.
+
+### Look of the window (`[gui]`)
+
+The **Appearance** tab of the GUI's settings window (sliders, colour picker, font list, **Reset appearance**) shows every change at once and writes the `[gui]` table of `config.toml`; you can also edit it by hand. All keys are optional, numbers outside their range are clamped (with a warning), and `music_display --print-config` shows the effective table.
+
+```toml
+[gui]
+opacity = 100            # window background, 0-100 %; below 100 the window is see-through (needs a compositor)
+panel_opacity = 100      # the panel cards on top of it, 0-100 %
+theme = "system"         # system | dark | light
+accent = "cover"         # cover (taken from the album art) | a hex colour such as "#3a7bd5"
+background = "solid"     # solid | cover-blur | gradient
+font = ""                # an installed font family, e.g. "Noto Sans"; empty = built-in
+lyrics_size = 18         # 10-64 pt
+active_size = 24         # 14-72 pt, the current line
+meta_size = 14           # 8-40 pt, metadata and buttons
+active_weight = "regular" # regular | medium | bold (needs a medium / bold face of the font)
+corner_radius = 8        # 0-32 px
+panel_spacing = 8        # 0-32 px
+panel_borders = true
+lyrics_align = "left"    # left | center
+inactive_fade = 40       # 0-100 %: lines fade the further they are from the current one
+lyrics_animation = "smooth"  # smooth | instant (scrolling and size change of the current line)
+remember_window = true   # reopen at the last size and place (applies from the next start)
+always_on_top = false
+decorations = true       # false = no title bar or border
+```
+
+Window opacity, always-on-top and the decorations change while the window is open. Drawing, transparency and window placement depend on the compositor (Wayland and X11 both go through winit) and have not been checked on every one.
 
 | feature | TUI | GUI |
 | --- | :-: | :-: |
@@ -332,13 +361,15 @@ It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [doc
 | genre field, annotations panel (Genius or AI) | yes | yes |
 | settings and the layout editor (panels, fields, buttons, sizes), saved to `config.toml` | yes | yes |
 | panel order and sizes from `[layout]` | yes | yes (drag to resize) |
-| cava bars | yes | no |
-| big block-font active line | yes | no (just a large font) |
+| cava bars (`v`, same `cava` process; a note where cava is missing or on Windows) | yes | yes |
+| big block-font active line | yes | no (a large font, size and weight configurable) |
 | terminal graphics protocols, ASCII cover, window-title option | yes | no |
 | key remapping (`[keys]`, the `?` key editor) | yes | no (fixed shortcuts) |
-| minimal view, three-panel presets | yes | no (resize the panels instead) |
-| Spotify library browser, likes, queue, devices, `--setup` | yes | no (the window follows whatever the MPRIS player reports) |
-| lyric versions (`L`), per-track capo memory, chord-sheet Ultimate Guitar toggle in the menu | yes | partly (capo and transpose are per session) |
+| minimal view (`m`), layout presets (picker in settings) | yes | yes |
+| Spotify library browser, search, queue, likes, devices, play here, remote playback | yes | yes (window on `o`, buttons in the transport row; clicks instead of the browser's keys) |
+| Spotify login from the settings menu, preloading the lists, `--setup` | yes | no (log in with `--spotify-login`; lists load when the window opens) |
+| lyric versions (`l` in the window, `L` in the TUI), per-track capo memory (same files) | yes | yes |
+| chord-sheet Ultimate Guitar toggle in the menu, transpose memory | yes | partly (transpose is per session) |
 
 ## AI translation (optional)
 
