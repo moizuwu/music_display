@@ -40,7 +40,16 @@ pub struct Spot {
     relogin: bool,
     /// The keyboard moved the selection: the window scrolls to it once.
     pub nav_moved: bool,
+    /// Tabs still to load in the background, and when the next one may go.
+    preload: std::collections::VecDeque<usize>,
+    preload_at: Option<Instant>,
 }
+
+/// The library lists load in the background after the start (as in the terminal front end):
+/// the first after this, then one every `PRELOAD_GAP`.
+#[cfg_attr(test, allow(dead_code))]
+const PRELOAD_DELAY: Duration = Duration::from_secs(15);
+const PRELOAD_GAP: Duration = Duration::from_secs(4);
 
 impl Spot {
     pub fn new(args: &Args, tx: UnboundedSender<AppEvent>, client: reqwest::Client) -> Self {
@@ -63,6 +72,8 @@ impl Spot {
             login_url: None,
             relogin: false,
             nav_moved: false,
+            preload: Default::default(),
+            preload_at: None,
         };
         s.lib.queue_tab = !args.no_spotify_queue_tab;
         if args.spotify {
@@ -83,6 +94,43 @@ impl Spot {
             self.task = Some(tokio::spawn(api.clone().remote_loop(self.tx.clone())));
         }
         self.api = Some(api);
+        // logged in: the lists start loading soon, so they are there when the browser opens
+        #[cfg(not(test))]
+        if spotify::logged_in() {
+            self.start_preload();
+        }
+    }
+
+    /// Queue the lists you are most likely to open (Recent, Playlists, Albums, Artists), one at
+    /// a time, never in a burst. Nothing is written to disk.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn start_preload(&mut self) {
+        if self.api.is_none() {
+            return;
+        }
+        self.preload = [0usize, 1, 3, 4].into_iter().filter(|i| !self.lib.tabs[*i].loading && !self.lib.tabs[*i].fresh(crate::browser::FRESH)).collect();
+        self.preload_at = Some(Instant::now() + PRELOAD_DELAY);
+    }
+
+    /// Load the next queued tab when its time has come; a rate limit ends the whole thing (the
+    /// browser asks again when a tab is opened). Called every frame; cheap.
+    pub fn preload_tick(&mut self) {
+        if self.preload.is_empty() || self.preload_at.is_none_or(|t| Instant::now() < t) {
+            return;
+        }
+        if self.api.as_ref().is_none_or(|a| a.paused_for().is_some()) {
+            self.preload.clear();
+            return;
+        }
+        if let Some(i) = self.preload.pop_front() {
+            self.load_tab(i, false);
+            self.preload_at = Some(Instant::now() + PRELOAD_GAP);
+        }
+    }
+
+    /// The name of the Spotify device playing, when the API (not an MPRIS player) is shown.
+    pub fn device(&self) -> Option<&str> {
+        self.remote.as_ref().map(|(r, _)| r.device.as_str()).filter(|d| !d.is_empty())
     }
 
     /// Switch the client off: no poller, no requests, an empty library.

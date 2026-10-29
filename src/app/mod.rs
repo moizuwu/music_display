@@ -675,14 +675,8 @@ impl App {
         }
         // Several players at once (`any`, a list): stay with the one being shown while it
         // reports in, unless another one starts playing while ours doesn't.
-        if let Some(o) = &self.snap {
-            if !s.player.is_empty() && !o.player.is_empty() && s.player != o.player {
-                let ours_quiet = self.player_seen.elapsed() > Duration::from_secs(3);
-                let takeover = s.status == Status::Playing && o.status != Status::Playing;
-                if !ours_quiet && !takeover {
-                    return;
-                }
-            }
+        if crate::identity::ignore_other_player(self.snap.as_ref(), &s, self.player_seen.elapsed()) {
+            return;
         }
         self.player_seen = Instant::now();
         let mut key = s.key();
@@ -694,21 +688,8 @@ impl App {
         // is already on screen and only fill in what was missing.
         if !new_track {
             if let Some(o) = &self.snap {
-                let keep = |old: &str, new: &mut String| {
-                    if !old.is_empty() {
-                        *new = old.to_string();
-                    }
-                };
-                keep(&o.title, &mut s.title);
-                keep(&o.artist, &mut s.artist);
-                keep(&o.album, &mut s.album);
-                keep(&o.content_created, &mut s.content_created);
-                keep(&o.genre, &mut s.genre);
-                if !self.art_url.is_empty() && !matches!(self.cover, CoverState::Failed) {
-                    s.art_url = self.art_url.clone();
-                }
-                s.track_no = o.track_no.or(s.track_no);
-                s.disc_no = o.disc_no.or(s.disc_no);
+                let art = (!matches!(self.cover, CoverState::Failed)).then_some(self.art_url.as_str());
+                crate::identity::keep_known(o, &mut s, art);
             }
         }
         let new_art = s.art_url != self.art_url;
@@ -819,13 +800,13 @@ impl App {
         if let Some(v) = s.volume {
             // External changes (keyboard media keys, the Spotify app) show up here; our
             // own changes win for a moment so the poller doesn't flicker them back.
-            if self.vol_hold.elapsed() > Duration::from_millis(1500)
+            if crate::identity::volume_settled(self.vol_hold.elapsed())
                 && self.volume.is_none_or(|o| (o - v).abs() > 0.004)
             {
                 self.volume = Some(v);
                 self.dirty = true;
             }
-            if v > 0.004 && self.vol_hold.elapsed() > Duration::from_millis(1500) {
+            if v > 0.004 && crate::identity::volume_settled(self.vol_hold.elapsed()) {
                 self.vol_last = v;
             }
         } else if self.volume.is_some() {
@@ -856,19 +837,7 @@ impl App {
     }
 
     fn same_recording(&self, s: &Snapshot) -> bool {
-        let Some(o) = &self.snap else { return false };
-        if self.track_key == 0 || o.player != s.player {
-            return false;
-        }
-        if !s.track_id.is_empty() && s.track_id == o.track_id {
-            return true;
-        }
-        if !s.url.is_empty() && s.url == o.url {
-            return true;
-        }
-        let same_len = o.length > 0.0 && (o.length - s.length).abs() <= 1.0;
-        let runs_on = s.position > 2.0 && (self.position() - s.position).abs() < 1.5;
-        same_len && runs_on
+        crate::identity::same_recording(self.snap.as_ref(), self.track_key, self.position(), s)
     }
 
     /// Fill what the player left empty from the file's own tags; ask for them once.
@@ -883,22 +852,7 @@ impl App {
             }
             return;
         };
-        let fill = |dst: &mut String, src: &str| {
-            if dst.is_empty() && !src.is_empty() {
-                *dst = src.to_string();
-            }
-        };
-        // a title that is only the file name gives way to the real one
-        if !t.title.is_empty() && s.title == tags::title_from_url(&s.url) {
-            s.title = t.title.clone();
-        }
-        fill(&mut s.artist, &t.artist);
-        fill(&mut s.album, &t.album);
-        fill(&mut s.content_created, &t.year);
-        fill(&mut s.genre, &t.genre);
-        fill(&mut s.art_url, &t.art_url);
-        s.track_no = s.track_no.or(t.track);
-        s.disc_no = s.disc_no.or(t.disc);
+        crate::identity::merge_tags(s, t);
     }
 
     fn capo_path(key: u64) -> std::path::PathBuf {

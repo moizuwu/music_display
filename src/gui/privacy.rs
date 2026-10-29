@@ -58,7 +58,7 @@ impl Model {
         ack();
         self.ux.ai_ask = false;
         self.translations.clear();
-        self.translate_inflight = false;
+        self.tr.reset();
         self.ensure_translation();
         self.ensure_annotations();
     }
@@ -71,7 +71,7 @@ impl Model {
             self.args.translate_engine = TranslateEngine::Standard;
             cfg.push(("translate_engine", self.args.translate_engine.name().into()));
             self.translations.clear();
-            self.translate_inflight = false;
+            self.tr.reset();
         }
         if self.args.annotations_mode.uses_ai() {
             self.args.annotations_mode = music_display::cli::AnnotationMode::Genius;

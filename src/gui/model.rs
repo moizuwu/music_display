@@ -1,15 +1,17 @@
 //! The GUI's state: what is playing, the lyrics, chords, translation and notes, fed by the same
 //! background tasks and `AppEvent`s as the terminal front end. No egui types in here, so it can
 //! be driven and tested without a window.
+use super::browse::Browse;
 use super::extras::Extras;
+use super::translation::Tr;
 use music_display::annotations::{self, Annotation};
 use music_display::cli::{AnnotationMode, Args, TranslateEngine, TranslateMode};
 use music_display::layout::{Layout, PanelId};
 use music_display::lyrics::Lyrics;
 use music_display::player::{Ctl, Snapshot, Status};
 use super::library::Spot;
-use music_display::{AppEvent, spotify, ai, chords, cover, genre, genius, ug, year};
-use std::collections::HashMap;
+use music_display::{AppEvent, spotify, ai, chords, cover, genre, genius, identity, tags, ug, year};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
@@ -47,6 +49,8 @@ pub struct Model {
     pub cover: Option<image::DynamicImage>,
     pub cover_fresh: bool,
     pub year: Option<String>,
+    /// The year lookup has finished (so no year means "N/A", not "still looking").
+    pub year_done: bool,
     pub genre: Option<String>,
     mb_genre: Option<Vec<String>>,
     /// `None` while the lyrics are being fetched.
@@ -62,8 +66,26 @@ pub struct Model {
     pub translate_mode: TranslateMode,
     pub translations: HashMap<(u64, String), Vec<String>>,
     pub translate_backend: String,
-    pub translate_note: Option<String>,
-    pub translate_inflight: bool,
+    /// The translation request: state, what is in flight, the abortable task.
+    pub tr: Tr,
+    /// Hash of the lyric lines the translations were made from.
+    lines_hash: u64,
+    /// The lyrics panel is browsed by hand (auto-follow is suspended for a while).
+    pub browse: Browse,
+    pub line_anim: super::lyrics_view::LineAnim,
+    /// Content and viewport height of the lyrics list, last frame (for plain-lyrics scrolling).
+    pub lyric_dims: (f32, f32),
+    /// Where the progress bar would seek to while it is being dragged.
+    pub seek_preview: Option<f64>,
+    /// Another player reported in at this time (see `identity::ignore_other_player`).
+    player_seen: Instant,
+    /// The volume was changed here at this time; polls do not move the slider for a moment.
+    vol_hold: Instant,
+    /// A dragged volume not sent to the player yet, and when one was sent last.
+    vol_pending: Option<f64>,
+    vol_sent: Instant,
+    local_tags: HashMap<String, tags::Tags>,
+    tags_asked: HashSet<String>,
     pub members: Vec<Vec<String>>,
     pub(super) member_src: Vec<genius::Part>,
     pub notes: Notes,
@@ -102,6 +124,7 @@ impl Model {
             cover: None,
             cover_fresh: false,
             year: None,
+            year_done: false,
             genre: None,
             mb_genre: None,
             lyrics: None,
@@ -116,8 +139,18 @@ impl Model {
             translate_mode: args.start_translate_mode(),
             translations: HashMap::new(),
             translate_backend: String::new(),
-            translate_note: None,
-            translate_inflight: false,
+            tr: Tr::default(),
+            lines_hash: 0,
+            browse: Browse::default(),
+            line_anim: Default::default(),
+            lyric_dims: (0.0, 0.0),
+            seek_preview: None,
+            player_seen: Instant::now() - Duration::from_secs(10),
+            vol_hold: Instant::now() - Duration::from_secs(5),
+            vol_pending: None,
+            vol_sent: Instant::now() - Duration::from_secs(5),
+            local_tags: HashMap::new(),
+            tags_asked: HashSet::new(),
             members: Vec::new(),
             member_src: Vec::new(),
             notes: Notes::Idle,
@@ -171,17 +204,34 @@ impl Model {
         match ev {
             AppEvent::Player(Some(s)) => {
                 self.spot.set_mpris(true);
+                if self.remote_active() {
+                    self.player_seen = Instant::now() - Duration::from_secs(10); // MPRIS takes over
+                }
                 self.on_snapshot(s);
                 self.spot.check_liked(self.playing_uri());
             }
             AppEvent::Player(None) => {
                 self.spot.set_mpris(false);
                 // no MPRIS player: show what the Spotify API says plays (the phone…)
-                match self.spot.remote_snapshot() {
-                    Some(s) => self.on_snapshot(s),
-                    None => self.snap = None,
+                if !self.remote_active() {
+                    if self.snap.is_some() {
+                        self.snap = None;
+                        self.track_key = 0;
+                    }
+                    if let Some(s) = self.spot.remote_snapshot() {
+                        self.on_snapshot(s);
+                    }
                 }
                 self.spot.check_liked(self.playing_uri());
+            }
+            AppEvent::Tags { url, tags } => {
+                if let Some(t) = tags {
+                    self.local_tags.insert(url.clone(), t);
+                }
+                // re-run the current snapshot with the tags merged in
+                if let Some(s) = self.snap.clone().filter(|s| s.url == url) {
+                    self.on_snapshot(s);
+                }
             }
             AppEvent::Spotify(r) => {
                 let remote = matches!(r, spotify::Reply::Remote(Ok(_)));
@@ -196,13 +246,16 @@ impl Model {
                     self.spot.check_liked(self.playing_uri());
                 }
             }
-            AppEvent::Year { key, year } if key == self.track_key => self.year = year,
+            AppEvent::Year { key, year } if key == self.track_key => {
+                self.year = year;
+                self.year_done = true;
+            }
             AppEvent::Genre { key, genres } if key == self.track_key => {
                 self.mb_genre = genres;
                 self.refresh_genre();
             }
             AppEvent::Lyrics { key, lyrics } if key == self.track_key => {
-                self.lyrics = Some(lyrics);
+                self.set_lyrics(lyrics);
                 self.realign();
                 self.realign_members();
                 self.ensure_translation();
@@ -242,19 +295,7 @@ impl Model {
                 self.member_src = parts;
                 self.realign_members();
             }
-            AppEvent::Translated { key, lang, lines } => match lines {
-                Ok((l, backend)) => {
-                    self.translations.insert((key, lang), l);
-                    self.translate_backend = backend;
-                    self.translate_inflight = false;
-                    self.translate_note = None;
-                }
-                Err(e) if key == self.track_key => {
-                    self.translate_inflight = false;
-                    self.translate_note = Some(e);
-                }
-                Err(_) => {}
-            },
+            AppEvent::Translated { key, lang, lines } => self.on_translated(key, lang, lines),
             AppEvent::Annotations { key, result } if key == self.track_key => match result {
                 Ok(a) => {
                     self.anns = a;
@@ -283,14 +324,30 @@ impl Model {
     }
 
     fn on_snapshot(&mut self, mut s: Snapshot) {
-        let key = s.key();
+        if s.url.starts_with("file://") {
+            self.merge_local_tags(&mut s);
+        }
+        // several players at once: stay with the one on screen unless another takes over
+        if identity::ignore_other_player(self.snap.as_ref(), &s, self.player_seen.elapsed()) {
+            return;
+        }
+        self.player_seen = Instant::now();
+        let mut key = s.key();
+        // the same recording under another spelling (edition, remaster) is not a new track
+        if key != self.track_key && identity::same_recording(self.snap.as_ref(), self.track_key, self.position(), &s) {
+            key = self.track_key;
+        }
         let new_track = key != self.track_key || self.snap.is_none();
-        // keep what a previous poll knew when this one lost it (same track)
-        if let (false, Some(o)) = (new_track, &self.snap) {
-            for (new, old) in [(&mut s.title, &o.title), (&mut s.artist, &o.artist), (&mut s.album, &o.album)] {
-                if new.is_empty() {
-                    *new = old.clone();
-                }
+        if !new_track {
+            if let Some(o) = &self.snap {
+                let art = self.cover.is_some().then_some(self.art_url.as_str());
+                identity::keep_known(o, &mut s, art);
+            }
+        }
+        // our own volume change wins for a moment, so the poll does not snap the slider back
+        if !identity::volume_settled(self.vol_hold.elapsed()) {
+            if let Some(v) = self.snap.as_ref().and_then(|o| o.volume) {
+                s.volume = s.volume.map(|_| v);
             }
         }
         let drift = (self.position() - s.position).abs();
@@ -304,6 +361,7 @@ impl Model {
             for t in self.tasks.drain(..) {
                 t.abort();
             }
+            self.tr.reset();
             self.offset = self.args.offset;
             self.sheet = None;
             self.aligned = None;
@@ -312,12 +370,14 @@ impl Model {
             self.member_src.clear();
             self.members.clear();
             self.lyrics = None;
+            self.lines_hash = 0;
             self.chords_state = Chords::Idle;
-            self.translate_inflight = false;
-            self.translate_note = None;
+            self.browse.follow();
+            self.seek_preview = None;
             self.reset_annotations();
             self.mb_genre = None;
             self.year = year::from_content_created(&s.content_created);
+            self.year_done = self.year.is_some();
             self.spawn_lookups(&s, key);
         }
         if new_art {
@@ -336,6 +396,34 @@ impl Model {
         }
         self.snap = Some(s);
         self.refresh_genre();
+    }
+
+    /// Fill what the player left empty from the file's own tags; ask for them once.
+    fn merge_local_tags(&mut self, s: &mut Snapshot) {
+        let Some(t) = self.local_tags.get(&s.url) else {
+            if self.tags_asked.insert(s.url.clone()) {
+                let (url, tx) = (s.url.clone(), self.tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let tags = tags::read(&url);
+                    let _ = tx.send(AppEvent::Tags { url, tags });
+                });
+            }
+            return;
+        };
+        identity::merge_tags(s, t);
+    }
+
+    /// Lyrics arrived (or another version was picked): a translation made from other lines is
+    /// stale, whatever its length.
+    fn set_lyrics(&mut self, lyrics: Lyrics) {
+        self.lyrics = Some(lyrics);
+        let h = self.lines().map_or(0, |l| music_display::util::fnv1a(&l.join("\n")));
+        if h != self.lines_hash {
+            let key = self.track_key;
+            self.translations.retain(|(k, _), _| *k != key);
+            self.tr.reset();
+            self.lines_hash = h;
+        }
     }
 
     fn spawn_lookups(&mut self, s: &Snapshot, key: u64) {
@@ -411,17 +499,46 @@ impl Model {
         }
     }
 
-    /// How far into the active line we are, 0..=1 (for the karaoke fill).
+    /// How far into the active line we are, 0..=1 (for the karaoke fill): the terminal front
+    /// end's own guess from the line times.
     pub fn line_fraction(&self) -> f64 {
         let (Some(i), Some(Lyrics::Synced(l))) = (self.active_line(), self.lyrics.as_ref()) else { return 0.0 };
-        let t = self.position() + self.offset;
-        let next = l.get(i + 1).map(|x| x.0);
-        let span = next.map_or(4.0, |n| (n - l[i].0).clamp(0.5, 12.0));
-        ((t - l[i].0) / span).clamp(0.0, 1.0)
+        if l[i].1.trim() == "♪" {
+            return 0.0;
+        }
+        crate::ui::line_progress(self.position() + self.offset, l[i].0, l.get(i + 1).map(|x| x.0), &l[i].1)
+    }
+
+    /// The synced lines with their times, if the lyrics are synced.
+    pub fn synced(&self) -> Option<&[(f64, String)]> {
+        match self.lyrics.as_ref()? {
+            Lyrics::Synced(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Line `i` as written (synced or plain), without copying.
+    pub fn line_at(&self, i: usize) -> Option<&str> {
+        match self.lyrics.as_ref()? {
+            Lyrics::Synced(l) => l.get(i).map(|x| x.1.as_str()),
+            Lyrics::Plain(l) => l.get(i).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// Scroll the lyrics away from the playing line by `rows` (negative = up) without touching
+    /// playback; auto-follow resumes after a few idle seconds or on [`Self::follow`].
+    pub fn browse_by(&mut self, rows: f32) {
+        self.browse.by(rows);
+    }
+
+    /// Hand the lyrics view back to the playing line at once.
+    pub fn follow(&mut self) {
+        self.browse.follow();
     }
 
     pub fn nudge(&mut self, d: f64) {
-        self.offset = (self.offset + d).clamp(-60.0, 60.0);
+        self.offset = (((self.offset + d) * 10.0).round() / 10.0).clamp(-60.0, 60.0);
     }
 
     pub fn translation(&self) -> Option<&Vec<String>> {
@@ -433,67 +550,14 @@ impl Model {
 
     pub fn set_translate_mode(&mut self, mode: TranslateMode) {
         self.translate_mode = mode;
+        if mode != TranslateMode::Off {
+            // a new request is allowed again (a failed or skipped one is tried afresh)
+            self.tr.state = super::translation::TrState::Idle;
+        }
         self.ensure_translation();
     }
 
-    pub fn ensure_translation(&mut self) {
-        if self.translate_mode == TranslateMode::Off || self.translation().is_some() || self.translate_inflight {
-            return;
-        }
-        // the one-time question comes before lyrics go to an AI provider (privacy.rs)
-        if self.args.translate_engine == TranslateEngine::Ai && self.ai_blocked() {
-            return;
-        }
-        let Some(lines) = self.lines().filter(|l| !l.is_empty()) else { return };
-        self.translate_inflight = true;
-        let (c, tx, key, lang) = (self.client.clone(), self.tx.clone(), self.track_key, self.args.translate_lang.clone());
-        let cfg = music_display::translate::Cfg {
-            google_base: None,
-            fallback: self.args.translate_fallback,
-            fallback_url: self.args.translate_fallback_url.clone(),
-            fallback_key: self.args.translate_fallback_key.clone(),
-            skip: self
-                .args
-                .translate_skip
-                .split(',')
-                .map(music_display::translate::base_code)
-                .filter(|c| !c.is_empty())
-                .collect(),
-        };
-        let ai = self.ai_job(&lines);
-        let keep = !self.args.no_cache_translations;
-        self.tasks.push(tokio::spawn(async move {
-            let mut failed: Option<String> = None;
-            if let Some((acfg, song)) = ai {
-                if keep {
-                    if let Some(done) = ai::cached(&acfg, &song).await {
-                        let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok((done, ai::label(&acfg))) });
-                        return;
-                    }
-                }
-                match ai::translate(&c, &acfg, &song).await {
-                    Ok((done, label)) => {
-                        if keep {
-                            ai::store(&acfg, &song, &done).await;
-                        }
-                        let _ = tx.send(AppEvent::Translated { key, lang, lines: Ok((done, label)) });
-                        return;
-                    }
-                    Err(why) => failed = Some(why),
-                }
-            }
-            let r = music_display::translate::lines(&c, &cfg, &lang, &lines).await.map(|(l, b)| {
-                let b = match &failed {
-                    Some(why) => format!("fallback: {b}; AI failed: {why}"),
-                    None => b.to_string(),
-                };
-                (l, b)
-            });
-            let _ = tx.send(AppEvent::Translated { key, lang, lines: r });
-        }));
-    }
-
-    fn ai_job(&mut self, lines: &[String]) -> Option<(ai::Cfg, ai::Song)> {
+    pub(super) fn ai_job(&mut self, lines: &[String]) -> Option<(ai::Cfg, ai::Song)> {
         if self.args.translate_engine != TranslateEngine::Ai {
             return None;
         }
@@ -568,16 +632,6 @@ impl Model {
                 self.fetch_chords(key, &s.artist, &s.title);
             }
         }
-    }
-
-    /// The chord names of line `i`, shifted for the capo and `transpose`, with their text columns.
-    pub fn chords_of(&self, i: usize) -> Vec<(usize, String)> {
-        let Some(a) = self.aligned.as_ref().filter(|a| a.usable_at(self.args.chords_match)) else { return Vec::new() };
-        let (n, flats) = (self.chord_shift(), self.use_flats());
-        a.per_line
-            .get(i)
-            .map(|v| v.iter().map(|(c, name)| (*c, chords::transpose(name, n, flats))).collect())
-            .unwrap_or_default()
     }
 
     /// Every distinct chord of the song in the order it first appears, shifted.
@@ -739,6 +793,8 @@ impl Model {
     }
 
     pub fn seek(&mut self, secs: f64) {
+        let max = self.snap.as_ref().map_or(0.0, |s| s.length);
+        let secs = if max > 0.0 { secs.clamp(0.0, max) } else { secs.max(0.0) };
         self.set_position(secs);
         if self.remote_active() {
             self.player_cmd(&[], spotify::Cmd::Seek(secs));
@@ -747,11 +803,42 @@ impl Model {
         }
     }
 
+    /// Set the volume now (a key press).
+    #[allow(dead_code)] // for the volume / mute keys
     pub fn set_volume(&mut self, v: f64) {
+        self.show_volume(v);
+        self.vol_pending = None;
+        self.send_volume(v);
+    }
+
+    /// The slider moves: show the value at once, send it at most every 150 ms (and on release,
+    /// see [`Self::flush_volume`]), so a drag is not a process or an API call per frame.
+    pub fn drag_volume(&mut self, v: f64) {
+        let v = self.show_volume(v);
+        self.vol_pending = Some(v);
+        self.flush_volume(false);
+    }
+
+    /// Send the last dragged volume, when the debounce time has passed (or `force`).
+    pub fn flush_volume(&mut self, force: bool) {
+        let Some(v) = self.vol_pending else { return };
+        if force || self.vol_sent.elapsed() >= Duration::from_millis(150) {
+            self.vol_pending = None;
+            self.send_volume(v);
+        }
+    }
+
+    fn show_volume(&mut self, v: f64) -> f64 {
         let v = v.clamp(0.0, 1.0);
         if let Some(s) = &mut self.snap {
             s.volume = Some(v);
         }
+        self.vol_hold = Instant::now();
+        v
+    }
+
+    fn send_volume(&mut self, v: f64) {
+        self.vol_sent = Instant::now();
         self.player_cmd(&["volume", &format!("{v:.3}")], spotify::Cmd::Volume(v));
     }
 
@@ -819,7 +906,10 @@ mod tests {
         m.apply(AppEvent::Lyrics { key: k ^ 1, lyrics: Lyrics::NotFound });
         assert!(matches!(m.lyrics, Some(Lyrics::Synced(_))));
         // the next track starts clean
-        m.apply(AppEvent::Player(Some(snap("Other", "Tune"))));
+        let mut other = snap("Other", "Tune");
+        other.track_id = "other-id".into();
+        other.position = 0.5;
+        m.apply(AppEvent::Player(Some(other)));
         assert!(m.lyrics.is_none() && m.sheet.is_none() && m.transpose == 0);
     }
 
@@ -833,12 +923,69 @@ mod tests {
         m.snap.as_mut().unwrap().status = Status::Paused;
         assert_eq!(m.active_line(), Some(1));
         let f = m.line_fraction();
-        assert!((f - 0.25).abs() < 0.01, "{f}");
+        // the terminal front end's guess: a 1-character line takes ~2 s, lit a little early
+        assert!((f - 0.859).abs() < 0.01, "{f}");
         m.nudge(-3.0);
         assert_eq!(m.active_line(), Some(0));
         m.seek(0.0);
         m.offset = 0.0;
         assert_eq!(m.active_line(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_respelled_snapshot_of_the_same_recording_keeps_the_track_and_the_volume_hold() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        let k = m.track_key;
+        m.apply(AppEvent::Lyrics { key: k, lyrics: Lyrics::Plain(vec!["a".into()]) });
+        // same player id, new edition name: still the same song, lyrics stay
+        m.apply(AppEvent::Player(Some(snap("Band", "Song (2011 Remaster)"))));
+        assert_eq!(m.track_key, k);
+        assert!(m.lyrics.is_some());
+        assert_eq!(m.snap.as_ref().unwrap().title, "Song", "what was known is kept");
+        // our volume wins over a poll for a moment
+        m.set_volume(0.9);
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        assert_eq!(m.snap.as_ref().unwrap().volume, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn a_second_player_does_not_take_over_while_ours_reports() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        let mut other = snap("Other", "Tune");
+        other.player = "mpv".into();
+        other.status = Status::Paused;
+        m.apply(AppEvent::Player(Some(other)));
+        assert_eq!(m.snap.as_ref().unwrap().title, "Song");
+    }
+
+    #[tokio::test]
+    async fn the_volume_slider_sends_at_most_one_command_per_debounce() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        m.vol_sent = Instant::now();
+        m.drag_volume(0.3);
+        m.drag_volume(0.4);
+        assert_eq!(m.vol_pending, Some(0.4), "held back, not sent per frame");
+        assert_eq!(m.snap.as_ref().unwrap().volume, Some(0.4), "but shown at once");
+        m.flush_volume(true);
+        assert_eq!(m.vol_pending, None);
+    }
+
+    #[tokio::test]
+    async fn seeks_are_clamped_and_nudges_round_to_a_tenth() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        m.snap.as_mut().unwrap().status = Status::Paused;
+        m.seek(9999.0);
+        assert_eq!(m.position(), 200.0);
+        m.seek(-5.0);
+        assert_eq!(m.position(), 0.0);
+        for _ in 0..3 {
+            m.nudge(0.1);
+        }
+        assert_eq!(m.offset, 0.3);
     }
 
     #[tokio::test]

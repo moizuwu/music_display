@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 // and has no terminal code; re-imported here so the TUI modules keep addressing it as `crate::x`.
 use music_display::{
     AppEvent, ai, annotations, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
-    spotifyd, tags, translate, ug, util, year, layout, genre,
+    spotifyd, tags, translate, ug, util, year, layout, genre, identity,
 };
 
 // ════════════════════════════════════════════════════════════════════════════

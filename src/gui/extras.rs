@@ -165,9 +165,8 @@ impl Model {
         let key = self.track_key;
         // the next time this song plays it opens with the version picked here
         lyrics::remember(&s.artist, &s.title, &s.album, s.length, &kind, &text);
-        // a translation belongs to the lines it was made from
-        self.translations.retain(|(k, _), _| *k != key);
-        self.translate_inflight = false;
+        // a translation belongs to the lines it was made from: `apply` compares the lyrics'
+        // content, and drops the translations and stops the request when it differs
         self.apply(AppEvent::Lyrics { key, lyrics: lyrics::to_lyrics(&kind, &text) });
         self.say(format!("lyrics version {} of {n}", next + 1));
     }
@@ -196,13 +195,20 @@ impl Model {
     // ── lines ──
 
     /// Line `i` as the lyrics panel shows it: the translation when it replaces the original.
-    pub fn shown_line(&self, i: usize) -> Option<String> {
-        let lines = self.lines()?;
-        let line = lines.get(i)?;
+    pub fn shown_line(&self, i: usize) -> Option<&str> {
+        let line = self.line_at(i)?;
         let replaced = self.translate_mode == music_display::cli::TranslateMode::Translated;
-        match self.translation().filter(|t| t.len() == lines.len()) {
-            Some(t) if replaced && !t[i].trim().is_empty() => Some(t[i].clone()),
-            _ => Some(line.clone()),
+        match self.translation().filter(|t| Some(t.len()) == self.lines_len()) {
+            Some(t) if replaced && !t[i].trim().is_empty() => Some(t[i].as_str()),
+            _ => Some(line),
+        }
+    }
+
+    fn lines_len(&self) -> Option<usize> {
+        match self.lyrics.as_ref()? {
+            lyrics::Lyrics::Synced(l) => Some(l.len()),
+            lyrics::Lyrics::Plain(l) => Some(l.len()),
+            _ => None,
         }
     }
 }
@@ -235,7 +241,7 @@ pub fn cava_panel(ui: &mut Ui, m: &Model) {
 /// it. Plain (unsynced) lyrics have no active line and fall back to the normal list.
 pub fn teleprompter(ui: &mut Ui, m: &mut Model) {
     let Some(i) = m.active_line() else {
-        super::view::lyrics(ui, m);
+        super::lyrics_view::lyrics(ui, m);
         return;
     };
     let size = m.gui.active_size as f32 * 1.6;
@@ -243,6 +249,12 @@ pub fn teleprompter(ui: &mut Ui, m: &mut Model) {
     let strong = ui.visuals().strong_text_color();
     let accent = ui.visuals().hyperlink_color;
     let (prev, now, next) = (i.checked_sub(1).and_then(|p| m.shown_line(p)), m.shown_line(i).unwrap_or_default(), m.shown_line(i + 1));
+    // original + translation: the translation sits under the original line
+    let sub = m
+        .translation()
+        .filter(|_| m.translate_mode == music_display::cli::TranslateMode::Both)
+        .and_then(|t| t.get(i))
+        .filter(|t| !t.trim().is_empty() && t.trim() != now.trim());
     let frac = m.line_fraction() as f32;
     let karaoke = m.args.karaoke;
     ui.vertical_centered(|ui| {
@@ -260,6 +272,9 @@ pub fn teleprompter(ui: &mut Ui, m: &mut Model) {
         job.append(&a, 0.0, egui::TextFormat { font_id: font.clone(), color: accent, ..Default::default() });
         job.append(&b, 0.0, egui::TextFormat { font_id: font, color: strong, ..Default::default() });
         ui.add(egui::Label::new(job));
+        if let Some(t) = sub {
+            ui.label(egui::RichText::new(t).italics().size(size * 0.6).color(weak));
+        }
         ui.add_space(size * 0.3);
         if let Some(n) = next {
             ui.label(egui::RichText::new(n).size(size * 0.5).color(weak));

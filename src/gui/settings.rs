@@ -140,14 +140,6 @@ impl Model {
         self.persist("Member parts", &[("member_parts", on.into())]);
     }
 
-    /// Old translations were made with other settings: drop them and ask again.
-    pub fn reset_translation(&mut self) {
-        self.translations.clear();
-        self.translate_inflight = false;
-        self.translate_note = None;
-        self.ensure_translation();
-    }
-
     /// An AI feature is on: the one-time question comes before anything is sent.
     fn check_ai_notice(&mut self) {
         if self.args.translate_engine == TranslateEngine::Ai || (self.annotations_shown() && self.args.annotations_mode.uses_ai()) {
@@ -211,13 +203,9 @@ impl Model {
             return;
         }
         self.args.translate_lang = lang.to_string();
-        self.translate_inflight = false;
+        self.tr.reset();
         self.ensure_translation();
         self.persist("Language", &[("translate_lang", lang.into())]);
-    }
-
-    pub fn skip_langs(&self) -> Vec<String> {
-        self.args.translate_skip.split(',').map(music_display::translate::base_code).filter(|c| !c.is_empty()).collect()
     }
 
     /// Add / remove one language from the never-translate list.
@@ -978,7 +966,7 @@ mod tests {
         m.translate_mode = TranslateMode::Both;
         m.apply(AppEvent::Lyrics { key: m.track_key, lyrics: music_display::lyrics::Lyrics::Plain(vec!["a".into()]) });
         m.ensure_translation();
-        assert!(!m.translate_inflight, "no request before the answer");
+        assert!(m.tr.inflight.is_none(), "no request before the answer");
         m.ai_decline();
         assert!(!m.ux.ai_ask && m.args.translate_engine == TranslateEngine::Standard);
         assert_eq!(saved(&p)["translate_engine"].as_str(), Some("standard"));

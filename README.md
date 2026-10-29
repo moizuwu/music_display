@@ -354,8 +354,12 @@ Window opacity, always-on-top and the decorations change while the window is ope
 | feature | TUI | GUI |
 | --- | :-: | :-: |
 | metadata (all fields, order and visibility from `[layout]`), cover, progress, transport, volume | yes | yes |
-| synced lyrics, offset nudging, click to seek, karaoke fill, member tags | yes | yes |
-| chords above the lyrics, transpose, capo, key / BPM / tuning | yes | yes |
+| synced lyrics, offset nudging, click to seek, karaoke fill, member tags, `[ Instrumental / Solo ]` countdown | yes | yes |
+| browsing the lyrics by hand (scroll; the view follows the playing line again after 6 s) | yes | yes (mouse wheel, scrollbar or drag; the title says `browsing`) |
+| footer line: offset, chord status, Spotify device, notes | yes | yes |
+| `window_title` option | yes | yes (sets the window title) |
+| `layout.direction = "vertical"` | yes | yes |
+| chords above the lyrics (placed over the word, remapped for translated lines, `chords_context`, intro and solo chords), transpose, capo, key / BPM / tuning | yes | yes |
 | chord diagrams | yes (text) | yes (drawn) |
 | translation: `off` / `both` / `translated`, AI engine with fallback, never-translate list in the config | yes | yes |
 | genre field, annotations panel (Genius or AI) | yes | yes |
@@ -363,15 +367,16 @@ Window opacity, always-on-top and the decorations change while the window is ope
 | panel order and sizes from `[layout]` | yes | yes (drag to resize) |
 | cava bars (`c`, same `cava` process; a note where cava is missing or on Windows) | yes | yes |
 | big block-font active line | yes | no (a large font, size and weight configurable) |
-| terminal graphics protocols, ASCII cover, window-title option | yes | no |
+| terminal graphics protocols, ASCII cover | yes | no |
 | the same keys, `[keys]` remaps, a help window from the key table | yes | yes (no in-app key editor) |
 | minimal view (`M`), layout presets (picker in settings) | yes | yes |
 | Spotify library browser, search, queue, likes, devices, play here, remote playback | yes | yes (window on `o`, buttons in the transport row; clicks instead of the browser's keys) |
-| Spotify login from the settings, `--setup` | yes | login yes (Spotify tab); no preloading of the lists, no `--setup` |
+| Spotify login from the settings, `--setup` | yes | login yes (Spotify tab), lists preloaded in the background; no `--setup` |
 | lyric versions (`L`), per-track capo memory (same files) | yes | yes |
 | chord-sheet Ultimate Guitar toggle in the menu, transpose memory | yes | yes (transpose is per session) |
 | `transparent` / `cover_theme` of the main config | yes | `transparent` sets `[gui] opacity` to 85 % when `[gui]` has none; the accent follows the cover by default |
-| `chords_context`, keyboard / wheel browsing of the lyrics | yes | not yet (see docs/gui-design.md) |
+| one front-end-independent set of track-identity rules (same recording under another spelling, a second player, tags read from the file, volume hold) | yes | yes (`src/identity.rs`) |
+| `use_spotifyd` start / stop (`no_kill_spotifyd`), SIGTERM / SIGHUP ends the program cleanly | yes | yes |
 
 ## AI translation (optional)
 

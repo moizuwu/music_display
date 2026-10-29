@@ -181,11 +181,11 @@ impl Model {
                     self.say("Spotify is off (settings → Spotify)");
                 }
             }
-            Action::BrowseUp => self.ux.browse_by(-1.0),
-            Action::BrowseDown => self.ux.browse_by(1.0),
-            Action::BrowsePageUp => self.ux.browse_by(-8.0),
-            Action::BrowsePageDown => self.ux.browse_by(8.0),
-            Action::BrowseEnd => self.ux.browse_end(),
+            Action::BrowseUp => self.browse_by(-1.0),
+            Action::BrowseDown => self.browse_by(1.0),
+            Action::BrowsePageUp => self.browse_by(-8.0),
+            Action::BrowsePageDown => self.browse_by(8.0),
+            Action::BrowseEnd => self.follow(),
         }
         Flow::Stay
     }
@@ -429,7 +429,7 @@ mod tests {
         }
         assert_eq!(m.args.lyric_pad, 0, "2, 4, 6, 8, 10, then round to 0");
         m.run_action(Action::TransposeDown);
-        assert_eq!((m.transpose, super::super::ux::signed_transpose(m.transpose)), (11, -1));
+        assert_eq!((m.transpose, super::super::footer::signed_transpose(m.transpose)), (11, -1));
         m.run_action(Action::TranslateBoth);
         assert_eq!(m.translate_mode, TranslateMode::Both);
         m.run_action(Action::TranslateBoth);
@@ -439,9 +439,9 @@ mod tests {
         m.run_action(Action::Help);
         assert!(m.ux.help);
         m.run_action(Action::BrowseDown);
-        assert!(m.ux.browsing());
+        assert!(m.browse.active());
         m.run_action(Action::BrowseEnd);
-        assert!(!m.ux.browsing());
+        assert!(!m.browse.active());
     }
 
     #[tokio::test]

@@ -1,26 +1,33 @@
 //! `--gui`: a window with the same panels, config file and layout as the terminal front end.
 //! Built only with `--features gui`. The terminal-only parts (the big block font, graphics
-//! protocols) are not in it; see the parity table in the README.
+//! protocols, key remapping) are not in it; see the parity table in the README.
+mod browse;
+mod controls;
 mod extras;
+mod footer;
 mod keys;
 mod library;
+mod lyrics_view;
 mod model;
 mod privacy;
 mod settings;
 mod style;
 mod ux;
+mod translation;
 mod view;
+mod window;
 
 use anyhow::Result;
 use model::Model;
 use music_display::cli::Args;
 use music_display::layout::{Item, Layout, PanelId};
-use music_display::{AppEvent, config};
+use music_display::AppEvent;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
-    let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
+    // every event the background tasks send also wakes the window
+    let (tx, rx, wake) = window::channel();
     let mut model = Model::new(args, layout, cfg_path.clone(), tx.clone());
     // the look of the window: `[gui]` of the config file
     model.gui = music_display::guiconf::load(&cfg_path, &mut |w| eprintln!("music_display: {w}"));
@@ -33,6 +40,9 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
     // the same pollers as the terminal front end
     tokio::spawn(model.ctl.clone().poll_loop(tx.clone()));
     tokio::spawn(model.ctl.clone().follow_loop(tx));
+    // SIGTERM / SIGHUP close the window like its close button; spotifyd (use_spotifyd) is
+    // stopped when `daemon` is dropped, whichever way the window ends
+    window::close_on_signal(wake.clone());
     let native = eframe::NativeOptions {
         viewport: style::viewport(&model.gui),
         persist_window: model.gui.remember_window,
@@ -44,7 +54,15 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
             "music_display",
             native,
             Box::new(move |cc| {
-                Ok(Box::new(Gui { m: model, rx, cover: None, look: style::Look::default(), repaint: cc.egui_ctx.clone() }) as Box<dyn eframe::App>)
+                let _ = wake.set(cc.egui_ctx.clone());
+                Ok(Box::new(Gui {
+                    m: model,
+                    rx,
+                    cover: None,
+                    look: style::Look::default(),
+                    repaint: cc.egui_ctx.clone(),
+                    title_sent: None,
+                }) as Box<dyn eframe::App>)
             }),
         )
     })
@@ -57,6 +75,8 @@ struct Gui {
     cover: Option<egui::TextureHandle>,
     look: style::Look,
     repaint: egui::Context,
+    /// The window title last sent (`window_title`).
+    title_sent: Option<String>,
 }
 
 impl Gui {
@@ -85,17 +105,22 @@ impl Gui {
         match id {
             PanelId::Metadata => {
                 let l = self.m.layout.clone();
-                // the now-playing column: cover, metadata and controls in the order listed
-                for p in l.now_playing() {
-                    match p {
-                        PanelId::Cover => view::cover(ui, self.cover.as_ref(), self.m.gui.corner_radius),
-                        PanelId::Metadata => view::metadata(ui, &mut self.m),
-                        PanelId::Controls => view::controls(ui, &mut self.m),
-                        _ => {}
+                // the now-playing column: cover, metadata and controls in the order listed; it
+                // is the one column that scrolls (the others scroll their own content)
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for p in l.now_playing() {
+                        match p {
+                            PanelId::Cover => view::cover(ui, self.cover.as_ref(), self.m.gui.corner_radius),
+                            PanelId::Metadata => view::metadata(ui, &mut self.m),
+                            PanelId::Controls => controls::controls(ui, &mut self.m),
+                            _ => {}
+                        }
+                        ui.add_space(self.m.gui.panel_spacing as f32);
                     }
-                    ui.add_space(self.m.gui.panel_spacing as f32);
-                }
+                });
             }
+            // the diagrams on their own, when no lyrics or notes column is there to hold them
+            PanelId::Chords => view::diagrams(ui, &mut self.m),
             PanelId::Lyrics => {
                 // cava docked under the lyrics
                 if self.m.cava_wanted() && self.m.layout.cava_under_lyrics {
@@ -105,7 +130,7 @@ impl Gui {
                 if self.m.show_diagrams && !self.m.annotations_shown() {
                     egui::Panel::right("diagrams").default_size(280.0).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
                 }
-                view::lyrics(ui, &mut self.m);
+                lyrics_view::lyrics(ui, &mut self.m);
             }
             PanelId::Cava => extras::cava_panel(ui, &self.m),
             PanelId::Annotations => {
@@ -126,6 +151,14 @@ impl eframe::App for Gui {
         self.pump();
         self.m.ux_tick();
         self.m.sync_cava();
+        self.m.flush_volume(false);
+        self.m.spot.preload_tick();
+        // the window title follows the song when `window_title` says so
+        let want = window::window_title(&self.m.args.window_title, self.m.snap.as_ref());
+        if want != self.title_sent {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want.clone().unwrap_or_else(|| "music_display".into())));
+            self.title_sent = want;
+        }
         // the clock moves the lyrics: redraw about 30 times a second while playing
         let fast = self.m.playing() || self.m.cava_wanted();
         ctx.request_repaint_after(std::time::Duration::from_millis(if fast { 33 } else { 250 }));
@@ -155,12 +188,10 @@ impl eframe::App for Gui {
                     if ui.button("settings").on_hover_text("settings (s)").clicked() {
                         self.m.ux.s.open = !self.m.ux.s.open;
                     }
-                    if let Some((n, _)) = &self.m.note {
-                        ui.label(egui::RichText::new(n.as_str()).weak());
-                    }
                 });
             });
         });
+        egui::Panel::bottom("footer").frame(style::gutter(&g)).show(ui, |ui| footer::footer(ui, &mut self.m));
         // the terminal UI's keys (not while typing in a field)
         self.handle_keys(ui.ctx());
         if self.m.x.minimal {
@@ -181,21 +212,28 @@ impl eframe::App for Gui {
                 _ => true,
             })
             .collect();
+        // the diagrams are docked beside the lyrics or the notes; with neither shown they get a column
+        let mut cols = cols;
+        if self.m.show_diagrams && !self.m.layout.panels.shown(PanelId::Lyrics) && !self.m.annotations_shown() {
+            cols.push(PanelId::Chords);
+        }
+        let vertical = self.m.layout.direction == music_display::layout::Split::Vertical;
         let (last, rest) = match cols.split_last() {
             Some((l, r)) => (*l, r.to_vec()),
             None => (PanelId::Metadata, Vec::new()),
         };
-        let total = ui.available_width();
+        // layout.direction: columns side by side, or stacked top to bottom
+        let total = if vertical { ui.available_height() } else { ui.available_width() };
         for (i, id) in rest.iter().enumerate() {
             let pct = self.m.layout.size_of(*id).map(f32::from).unwrap_or(if *id == PanelId::Metadata { 34.0 } else { 25.0 });
-            let panel = egui::Panel::left(format!("col{i}")).frame(style::gutter(&g)).resizable(true).default_size(total * pct / 100.0).min_size(160.0);
+            let panel = if vertical { egui::Panel::top(format!("col{i}")) } else { egui::Panel::left(format!("col{i}")) };
+            let panel = panel.frame(style::gutter(&g)).resizable(true).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
             let resp = panel.show(ui, |ui| {
-                style::card(ui, &g, |ui| {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.panel(ui, *id));
-                });
+                style::card(ui, &g, |ui| self.panel(ui, *id));
             });
             // dragging the border stores the new share
-            let new = (resp.response.rect.width() / total.max(1.0) * 100.0).round() as u16;
+            let extent = if vertical { resp.response.rect.height() } else { resp.response.rect.width() };
+            let new = (extent / total.max(1.0) * 100.0).round() as u16;
             if resp.response.drag_stopped() && self.m.layout.size_of(*id) != Some(new) {
                 self.m.layout.set_size(*id, new);
                 self.m.save_layout();
@@ -250,10 +288,6 @@ impl Gui {
     }
 }
 
-#[allow(dead_code)]
-fn _config_is_shared() -> PathBuf {
-    config::default_path()
-}
 
 /// The window stops the spotifyd it started when it closes (`kill_spotifyd_on_exit`).
 impl Drop for Gui {

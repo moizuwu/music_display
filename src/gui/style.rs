@@ -3,7 +3,7 @@
 //! the settings window. The settings themselves are plain data in `guiconf`, so they are tested
 //! without a window; nothing in this file has been checked visually on a real compositor.
 use super::model::Model;
-use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 use music_display::color::{self, Rgb};
 use music_display::guiconf::{Accent, Align as LAlign, Animation, Background, GuiConf, Theme, Weight};
 
@@ -15,6 +15,9 @@ const BOLD: &str = "md-bold";
 pub struct Look {
     applied: Option<(GuiConf, Option<Rgb>)>,
     fonts_for: Option<(String, Weight)>,
+    /// The font collection is built on a background thread (scanning the system fonts takes
+    /// a while); its answer arrives here.
+    fonts_rx: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
     /// Accent taken from the current cover.
     accent: Option<Rgb>,
     /// A tiny copy of the cover, stretched smooth, for `background = "cover-blur"`.
@@ -64,6 +67,12 @@ impl Look {
 
     /// Bring the egui styles, fonts and window flags in line with `g` (only when it changed).
     pub fn apply(&mut self, ctx: &egui::Context, g: &GuiConf) {
+        if let Some(rx) = &self.fonts_rx {
+            if let Ok(defs) = rx.try_recv() {
+                ctx.set_fonts(defs);
+                self.fonts_rx = None;
+            }
+        }
         let key = (g.clone(), self.accent);
         if self.applied.as_ref() == Some(&key) {
             return;
@@ -76,7 +85,18 @@ impl Look {
             Theme::Light => egui::ThemePreference::Light,
         });
         if self.fonts_for.as_ref() != Some(&(g.font.clone(), g.active_weight)) {
-            ctx.set_fonts(fonts(&g.font, g.active_weight));
+            // the bold family must exist at once (the active line asks for it); the real fonts
+            // replace this when the scan is done
+            if self.fonts_for.is_none() {
+                ctx.set_fonts(base_fonts());
+            }
+            let (family, weight, c) = (g.font.clone(), g.active_weight, ctx.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.fonts_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(fonts(&family, weight));
+                c.request_repaint();
+            });
             self.fonts_for = Some((g.font.clone(), g.active_weight));
         }
         for th in [egui::Theme::Dark, egui::Theme::Light] {
@@ -179,6 +199,14 @@ fn style(g: &GuiConf, cover: Option<Rgb>, dark: bool) -> egui::Style {
 
 /// egui's default fonts, with the chosen system family in front, and the bold family the
 /// active line can use. An unknown family just leaves the defaults.
+fn base_fonts() -> egui::FontDefinitions {
+    use egui::{FontDefinitions, FontFamily};
+    let mut defs = FontDefinitions::default();
+    let prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    defs.families.insert(FontFamily::Name(BOLD.into()), prop);
+    defs
+}
+
 fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
     use egui::{FontData, FontDefinitions};
     use fontique::{Attributes, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, QueryFamily, QueryStatus, SourceCache, SourceCacheOptions};
@@ -258,20 +286,6 @@ pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
 /// How strongly a lyric line at `dist` lines from the active one is faded, 0 (none) to 1.
 pub fn fade(g: &GuiConf, dist: usize) -> f32 {
     g.inactive_fade as f32 / 100.0 * (dist.min(5) as f32 / 5.0) * 0.85
-}
-
-/// The line's text size, eased between the plain and the active size when `smooth`.
-pub fn line_size(ui: &Ui, g: &GuiConf, id: egui::Id, active: bool) -> f32 {
-    let t = if g.lyrics_animation == Animation::Smooth { ui.ctx().animate_bool_with_time(id, active, 0.18) } else { active as u8 as f32 };
-    g.lyrics_size as f32 + (g.active_size as f32 - g.lyrics_size as f32) * t
-}
-
-/// Centered or left, as `lyrics_align` says.
-pub fn aligned<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
-    match g.lyrics_align {
-        LAlign::Left => add(ui),
-        LAlign::Center => ui.with_layout(egui::Layout::top_down(Align::Center), add).inner,
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
