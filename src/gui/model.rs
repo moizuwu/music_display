@@ -65,7 +65,7 @@ pub struct Model {
     pub translate_note: Option<String>,
     pub translate_inflight: bool,
     pub members: Vec<Vec<String>>,
-    member_src: Vec<genius::Part>,
+    pub(super) member_src: Vec<genius::Part>,
     pub notes: Notes,
     pub anns: Vec<Annotation>,
     pub ann_match: Vec<Option<usize>>,
@@ -78,7 +78,9 @@ pub struct Model {
     pub x: Extras,
     /// The Spotify client and library (off unless `spotify = true`).
     pub spot: Spot,
-    tasks: Vec<JoinHandle<()>>,
+    pub(super) tasks: Vec<JoinHandle<()>>,
+    /// Key table, open windows and the settings window's own state (see ux.rs).
+    pub ux: super::ux::Ux,
 }
 
 impl Model {
@@ -128,6 +130,7 @@ impl Model {
             x: Extras::new(&args),
             spot,
             tasks: Vec::new(),
+            ux: super::ux::Ux::new(Default::default()),
             gui: Default::default(),
             args,
             layout,
@@ -437,6 +440,10 @@ impl Model {
         if self.translate_mode == TranslateMode::Off || self.translation().is_some() || self.translate_inflight {
             return;
         }
+        // the one-time question comes before lyrics go to an AI provider (privacy.rs)
+        if self.args.translate_engine == TranslateEngine::Ai && self.ai_blocked() {
+            return;
+        }
         let Some(lines) = self.lines().filter(|l| !l.is_empty()) else { return };
         self.translate_inflight = true;
         let (c, tx, key, lang) = (self.client.clone(), self.tx.clone(), self.track_key, self.args.translate_lang.clone());
@@ -624,6 +631,9 @@ impl Model {
 
     pub fn ensure_annotations(&mut self) {
         if !self.annotations_shown() || !matches!(self.notes, Notes::Idle) {
+            return;
+        }
+        if self.args.annotations_mode.uses_ai() && self.ai_blocked() {
             return;
         }
         let Some(lines) = self.lines().filter(|l| !l.is_empty()) else { return };

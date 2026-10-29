@@ -4,7 +4,7 @@
 use super::model::Model;
 use egui::{Align, Sense, Ui, Vec2};
 use music_display::cli::Args;
-use music_display::layout::{Layout, PRESETS, PanelId};
+use music_display::layout::{Layout, PanelId};
 use music_display::lyrics;
 use music_display::{AppEvent, cava};
 use std::path::PathBuf;
@@ -265,35 +265,6 @@ pub fn teleprompter(ui: &mut Ui, m: &mut Model) {
             ui.label(egui::RichText::new(n).size(size * 0.5).color(weak));
         }
     });
-}
-
-/// The settings of this file, as a section of the settings window. Changed config keys go to
-/// `cfg`.
-pub fn settings(ui: &mut Ui, m: &mut Model, cfg: &mut Vec<(&'static str, toml::Value)>) {
-    ui.heading("View");
-    let mut cava_on = m.layout.panels.shown(PanelId::Cava);
-    if ui.checkbox(&mut cava_on, "Cava bars (needs cava installed)").changed() {
-        m.toggle_cava();
-        cfg.push(("cava", cava_on.into()));
-    }
-    let mut minimal = m.x.minimal;
-    if ui.checkbox(&mut minimal, "Minimal view (lyrics only, large centred line)").changed() {
-        m.set_minimal(minimal);
-        cfg.push(("minimal_view", minimal.into()));
-    }
-    let mut chosen: Option<&str> = None;
-    egui::ComboBox::from_label("Layout preset").selected_text("choose…").show_ui(ui, |ui| {
-        for name in PRESETS {
-            if ui.selectable_label(false, *name).clicked() {
-                chosen = Some(name);
-            }
-        }
-    });
-    if let Some(name) = chosen {
-        m.apply_preset(name);
-        cfg.push(("minimal_view", m.x.minimal.into()));
-    }
-    ui.separator();
 }
 
 #[cfg(test)]

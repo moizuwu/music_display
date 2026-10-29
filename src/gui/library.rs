@@ -29,6 +29,17 @@ pub struct Spot {
     /// A message for the note line, taken by the model.
     pub note: Option<String>,
     tx: UnboundedSender<AppEvent>,
+    client: reqwest::Client,
+    /// The poller of `/me/player`, stopped when Spotify is switched off or rebuilt.
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// A browser login in progress, what it last said, and the link to open by hand.
+    login: Option<tokio::task::JoinHandle<()>>,
+    pub login_msg: Option<String>,
+    pub login_url: Option<String>,
+    /// A login finished: the model rebuilds the client so it reads the new token.
+    relogin: bool,
+    /// The keyboard moved the selection: the window scrolls to it once.
+    pub nav_moved: bool,
 }
 
 impl Spot {
@@ -45,6 +56,13 @@ impl Spot {
             mpris: false,
             note: None,
             tx,
+            client: client.clone(),
+            task: None,
+            login: None,
+            login_msg: None,
+            login_url: None,
+            relogin: false,
+            nav_moved: false,
         };
         s.lib.queue_tab = !args.no_spotify_queue_tab;
         if args.spotify {
@@ -61,8 +79,103 @@ impl Spot {
         self.status = (!spotify::logged_in()).then(|| "not logged in: run music_display --spotify-login".to_string());
         // the poller only runs in the real program: tests drive the client by hand
         #[cfg(not(test))]
-        tokio::spawn(api.clone().remote_loop(self.tx.clone()));
+        {
+            self.task = Some(tokio::spawn(api.clone().remote_loop(self.tx.clone())));
+        }
         self.api = Some(api);
+    }
+
+    /// Switch the client off: no poller, no requests, an empty library.
+    pub fn stop(&mut self) {
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+        self.api = None;
+        self.remote = None;
+        self.liked = None;
+        self.liked_uri.clear();
+        self.status = None;
+        self.devices = None;
+        self.open = false;
+        self.lib = Library::new();
+    }
+
+    /// Build the client again from the flags (`spotify`, Client ID, device name, spotifyd, queue
+    /// tab): `Spot::new` only reads them at start, so a changed setting goes through here.
+    pub fn rebuild(&mut self, args: &Args) {
+        self.stop();
+        self.lib.queue_tab = !args.no_spotify_queue_tab;
+        if args.spotify {
+            let c = self.client.clone();
+            self.start(args, c);
+        }
+    }
+
+    /// "Log in": the browser login without blocking the window. Calling it again cancels.
+    pub fn toggle_login(&mut self, client_id: &str) {
+        if let Some(t) = self.login.take() {
+            t.abort();
+            self.login_msg = Some("login cancelled".into());
+            self.login_url = None;
+            return;
+        }
+        let id = client_id.trim().to_string();
+        if id.is_empty() {
+            self.login_msg = Some("set the Client ID first".into());
+            return;
+        }
+        self.login_msg = Some("waiting for the browser…".into());
+        self.login_url = None;
+        let tx = self.tx.clone();
+        self.login = Some(tokio::spawn(async move {
+            use spotify::LoginMsg;
+            let said = tx.clone();
+            let say = move |step| {
+                let _ = said.send(AppEvent::Spotify(Reply::Login(LoginMsg::Step(step))));
+            };
+            let r = spotify::login(&id, &say).await.map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::Spotify(Reply::Login(LoginMsg::Done(r))));
+        }));
+    }
+
+    pub fn logging_in(&self) -> bool {
+        self.login.is_some()
+    }
+
+    /// Forget the token (and any login in progress).
+    pub fn logout(&mut self) {
+        if let Some(t) = self.login.take() {
+            t.abort();
+        }
+        self.login_url = None;
+        self.login_msg = Some(if spotify::logout() { "logged out" } else { "not logged in" }.into());
+        self.relogin = true;
+    }
+
+    pub fn take_relogin(&mut self) -> bool {
+        std::mem::take(&mut self.relogin)
+    }
+
+    fn on_login(&mut self, msg: spotify::LoginMsg) {
+        use spotify::{LoginMsg, LoginStep};
+        match msg {
+            LoginMsg::Step(LoginStep::Url(u)) => self.login_url = Some(u),
+            LoginMsg::Step(LoginStep::Opened(false)) => {
+                self.login_msg = Some("the browser did not open: open the link below by hand".into());
+            }
+            LoginMsg::Step(LoginStep::Opened(true)) => {}
+            LoginMsg::Done(r) => {
+                self.login = None;
+                self.login_url = None;
+                match r {
+                    Ok(()) => {
+                        self.login_msg = Some("logged in".into());
+                        self.relogin = true;
+                    }
+                    Err(e) => self.login_msg = Some(e),
+                }
+            }
+        }
     }
 
     pub fn on(&self) -> bool {
@@ -157,6 +270,11 @@ impl Spot {
 
     /// An answer from a background task (the same ones the terminal front end handles).
     pub fn on_reply(&mut self, r: Reply) {
+        // a login can finish while the client is off
+        let r = match r {
+            Reply::Login(msg) => return self.on_login(msg),
+            r => r,
+        };
         // answers of a client that was never started
         if self.api.is_none() {
             return;
@@ -529,7 +647,8 @@ pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
     if ui.button("play here").on_hover_text("move playback to this computer").clicked() {
         m.spot.cmd(Cmd::Transfer);
     }
-    if ui.selectable_label(m.spot.open, "library").on_hover_text("Spotify library (o)").clicked() {
+    // `spotify_button = false` hides it (the `o` key still opens the library)
+    if !m.args.no_spotify_button && ui.selectable_label(m.spot.open, "library").on_hover_text("Spotify library (o)").clicked() {
         toggle(m);
     }
     m.take_spot_note();
@@ -543,6 +662,47 @@ pub fn toggle(m: &mut Model) {
         m.spot.open_library();
     }
     m.take_spot_note();
+}
+
+/// Keys while the library window is open (the terminal browser's): ↑ ↓ PgUp PgDn move, Enter
+/// plays, → opens, ← goes back, Tab switches tab. True when the key was used.
+pub fn key(m: &mut Model, code: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode as K;
+    if !m.spot.open || m.spot.lib.picker.is_some() {
+        return false;
+    }
+    let l = m.spot.lib.level_mut();
+    let last = l.items.len().saturating_sub(1);
+    match code {
+        K::Up => l.sel = l.sel.saturating_sub(1),
+        K::Down => l.sel = (l.sel + 1).min(last),
+        K::PageUp => l.sel = l.sel.saturating_sub(8),
+        K::PageDown => l.sel = (l.sel + 8).min(last),
+        K::Enter => {
+            let i = l.sel;
+            m.spot.play_item(i);
+            return true;
+        }
+        K::Right => {
+            if let Some(it) = l.items.get(l.sel).filter(|it| it.openable).cloned() {
+                m.spot.open_item(it);
+            }
+            return true;
+        }
+        K::Left => {
+            m.spot.lib.stack.pop();
+            return true;
+        }
+        K::Tab => {
+            let tabs = m.spot.lib.visible_tabs();
+            let at = tabs.iter().position(|t| *t == m.spot.lib.tab).unwrap_or(0);
+            m.spot.switch_tab(tabs[(at + 1) % tabs.len()]);
+            return true;
+        }
+        _ => return false,
+    }
+    m.spot.nav_moved = true;
+    true
 }
 
 /// The library window and the device list, when they are open.
@@ -559,6 +719,7 @@ pub fn windows(ctx: &egui::Context, m: &mut Model) {
 fn library_window(ctx: &egui::Context, m: &mut Model) {
     let mut open = true;
     let mut acts: Vec<Act> = Vec::new();
+    let moved = std::mem::take(&mut m.spot.nav_moved);
     let s = &mut m.spot;
     egui::Window::new("Spotify library").open(&mut open).default_size([460.0, 520.0]).show(ctx, |ui| {
         if let Some(e) = s.limited().or_else(|| s.status.clone()) {
@@ -618,7 +779,8 @@ fn library_window(ctx: &egui::Context, m: &mut Model) {
                     }
                     ListRow::Item(i) => {
                         let it = &l.items[i];
-                        ui.horizontal(|ui| {
+                        let bg = ui.painter().add(egui::Shape::Noop);
+                        let row = ui.horizontal(|ui| {
                             if picking {
                                 if ui.button("add").clicked() {
                                     acts.push(Act::Pick(i));
@@ -650,6 +812,14 @@ fn library_window(ctx: &egui::Context, m: &mut Model) {
                                 ui.label(RichText::new(mmss(it.duration)).weak().monospace());
                             }
                         });
+                        // the keyboard's row
+                        if i == l.sel {
+                            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);
+                            ui.painter().set(bg, egui::Shape::rect_filled(row.response.rect.expand(1.0), 3.0, fill));
+                            if moved {
+                                row.response.scroll_to_me(None);
+                            }
+                        }
                     }
                 }
             }

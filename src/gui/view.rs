@@ -209,10 +209,8 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
         }
         if b(Button::Volume) {
             if let Some(v) = s.volume {
-                let mut pct = (v * 100.0) as f32;
-                if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(true)).changed() {
-                    m.set_volume(pct as f64 / 100.0);
-                }
+                // mute button, wheel over the slider, click the % to mute (ux.rs)
+                super::ux::volume(ui, m, v);
             }
         }
         super::library::transport_buttons(ui, m);
@@ -334,7 +332,7 @@ pub fn diagrams(ui: &mut Ui, m: &mut Model) {
         if ui.small_button("t −").clicked() {
             m.transpose = (m.transpose - 1).rem_euclid(12);
         }
-        ui.label(format!("transpose {:+}", m.transpose));
+        ui.label(format!("transpose {:+}", super::ux::signed_transpose(m.transpose)));
         if ui.small_button("t +").clicked() {
             m.transpose = (m.transpose + 1).rem_euclid(12);
         }
@@ -349,7 +347,7 @@ pub fn diagrams(ui: &mut Ui, m: &mut Model) {
     });
     match &m.chords_state {
         Chords::Idle if !m.chords_on => {
-            ui.label(RichText::new("chords are off (settings → Chords)").weak());
+            ui.label(RichText::new("chords are off: press g, or tick them in settings").weak());
         }
         Chords::Fetching => {
             ui.label(RichText::new("looking for a chord sheet…").weak());
@@ -434,7 +432,22 @@ pub fn annotations(ui: &mut Ui, m: &mut Model) {
     let notes = m.notes_for(i);
     let max = m.args.annotation_max_chars;
     // a long note scrolls; back to the top when the line changes
-    egui::ScrollArea::vertical().id_salt(("notes", m.track_key, i)).auto_shrink([false, true]).show(ui, |ui| {
+    // e / E scroll by hand; `annotation_scroll = "auto"` follows the song through the line instead
+    let auto = m.args.annotation_scroll == music_display::cli::AnnotationScroll::Auto;
+    let by = m.ux.take_ann_rows();
+    let progress = m.note_line_progress(i);
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    // (the overflow of the last frame is what auto scroll maps the progress onto)
+    let over_id = ui.make_persistent_id(("notes-over", m.track_key, i));
+    let over: f32 = ui.data(|d| d.get_temp(over_id)).unwrap_or(0.0);
+    let mut area = egui::ScrollArea::vertical().id_salt(("notes", m.track_key, i)).auto_shrink([false, true]);
+    if auto {
+        area = area.vertical_scroll_offset(progress as f32 * over);
+    }
+    let out = area.show(ui, |ui| {
+        if by != 0.0 && !auto {
+            ui.scroll_with_delta(Vec2::new(0.0, -by * line));
+        }
         if let Some(e) = &m.genius_err {
             ui.add(egui::Label::new(RichText::new(format!("Genius: {e}")).small().weak()).wrap());
         }
@@ -462,4 +475,5 @@ pub fn annotations(ui: &mut Ui, m: &mut Model) {
             }
         }
     });
+    ui.data_mut(|d| d.insert_temp(over_id, (out.content_size.y - out.inner_rect.height()).max(0.0)));
 }

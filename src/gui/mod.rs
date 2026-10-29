@@ -1,15 +1,19 @@
 //! `--gui`: a window with the same panels, config file and layout as the terminal front end.
 //! Built only with `--features gui`. The terminal-only parts (the big block font, graphics
-//! protocols, key remapping) are not in it; see the parity table in the README.
+//! protocols) are not in it; see the parity table in the README.
 mod extras;
+mod keys;
 mod library;
 mod model;
+mod privacy;
+mod settings;
 mod style;
+mod ux;
 mod view;
 
 use anyhow::Result;
 use model::Model;
-use music_display::cli::{AnnotationMode, Args, TranslateEngine, TranslateMode};
+use music_display::cli::Args;
 use music_display::layout::{Item, Layout, PanelId};
 use music_display::{AppEvent, config};
 use std::path::PathBuf;
@@ -20,6 +24,12 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
     let mut model = Model::new(args, layout, cfg_path.clone(), tx.clone());
     // the look of the window: `[gui]` of the config file
     model.gui = music_display::guiconf::load(&cfg_path, &mut |w| eprintln!("music_display: {w}"));
+    settings::main_flags_into_gui(&mut model.gui, model.args.transparent, settings::gui_sets(&cfg_path, "opacity"));
+    // the terminal UI's key table, `[keys]` included
+    model.ux.keys = crate::keymap::load(&cfg_path, &mut |_| {});
+    if model.args.use_spotifyd {
+        model.ux.spotifyd = music_display::spotifyd::start();
+    }
     // the same pollers as the terminal front end
     tokio::spawn(model.ctl.clone().poll_loop(tx.clone()));
     tokio::spawn(model.ctl.clone().follow_loop(tx));
@@ -34,7 +44,7 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
             "music_display",
             native,
             Box::new(move |cc| {
-                Ok(Box::new(Gui { m: model, rx, cover: None, settings: false, customize: false, look: style::Look::default(), repaint: cc.egui_ctx.clone() }) as Box<dyn eframe::App>)
+                Ok(Box::new(Gui { m: model, rx, cover: None, look: style::Look::default(), repaint: cc.egui_ctx.clone() }) as Box<dyn eframe::App>)
             }),
         )
     })
@@ -45,8 +55,6 @@ struct Gui {
     m: Model,
     rx: mpsc::UnboundedReceiver<AppEvent>,
     cover: Option<egui::TextureHandle>,
-    settings: bool,
-    customize: bool,
     look: style::Look,
     repaint: egui::Context,
 }
@@ -116,6 +124,7 @@ impl Gui {
 impl eframe::App for Gui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        self.m.ux_tick();
         self.m.sync_cava();
         // the clock moves the lyrics: redraw about 30 times a second while playing
         let fast = self.m.playing() || self.m.cava_wanted();
@@ -140,11 +149,11 @@ impl eframe::App for Gui {
             ui.horizontal(|ui| {
                 ui.strong("music_display");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("?").clicked() {
-                        self.m.say("keys: space play/pause · ←/→ seek · , . lyrics offset · c chords · d diagrams · n notes · v cava · m minimal · l lyrics version · [ ] capo · 0 reset capo · o Spotify library");
+                    if ui.button("?").on_hover_text("keys (?)").clicked() {
+                        self.m.ux.help = !self.m.ux.help;
                     }
-                    if ui.button("settings").clicked() {
-                        self.settings = !self.settings;
+                    if ui.button("settings").on_hover_text("settings (s)").clicked() {
+                        self.m.ux.s.open = !self.m.ux.s.open;
                     }
                     if let Some((n, _)) = &self.m.note {
                         ui.label(egui::RichText::new(n.as_str()).weak());
@@ -152,92 +161,11 @@ impl eframe::App for Gui {
                 });
             });
         });
-        // shortcuts (not while typing in a field)
-        if !ui.ctx().egui_wants_keyboard_input() {
-            let (space, left, right, comma, dot, c, d, n, o) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::Space),
-                    i.key_pressed(egui::Key::ArrowLeft),
-                    i.key_pressed(egui::Key::ArrowRight),
-                    i.key_pressed(egui::Key::Comma),
-                    i.key_pressed(egui::Key::Period),
-                    i.key_pressed(egui::Key::C),
-                    i.key_pressed(egui::Key::D),
-                    i.key_pressed(egui::Key::N),
-                    i.key_pressed(egui::Key::O),
-                )
-            });
-            if o {
-                library::toggle(&mut self.m);
-            }
-            if space {
-                self.m.play_pause();
-            }
-            if left {
-                let p = self.m.position();
-                self.m.seek((p - 5.0).max(0.0));
-            }
-            if right {
-                let p = self.m.position();
-                self.m.seek(p + 5.0);
-            }
-            if comma {
-                self.m.nudge(-0.1);
-            }
-            if dot {
-                self.m.nudge(0.1);
-            }
-            if c {
-                self.m.toggle_chords();
-            }
-            if d {
-                self.m.show_diagrams = !self.m.show_diagrams;
-                let on = self.m.show_diagrams;
-                self.m.layout.panels.set(PanelId::Chords, on);
-            }
-            let (v, mm, l, cb_open, cb_close, zero) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::V),
-                    i.key_pressed(egui::Key::M),
-                    i.key_pressed(egui::Key::L),
-                    i.key_pressed(egui::Key::OpenBracket),
-                    i.key_pressed(egui::Key::CloseBracket),
-                    i.key_pressed(egui::Key::Num0),
-                )
-            });
-            if v {
-                let on = self.m.toggle_cava();
-                self.m.save_settings(&[("cava", on.into())]);
-            }
-            if mm {
-                let on = !self.m.x.minimal;
-                self.m.set_minimal(on);
-                self.m.save_settings(&[("minimal_view", on.into())]);
-            }
-            if l {
-                self.m.next_lyrics();
-            }
-            if cb_open {
-                self.m.change_capo(-1);
-            }
-            if cb_close {
-                self.m.change_capo(1);
-            }
-            if zero {
-                self.m.set_capo_override(None);
-            }
-            if n {
-                let on = !self.m.annotations_shown();
-                self.m.layout.panels.set(PanelId::Annotations, on);
-                self.m.args.annotations = on;
-                self.m.ensure_annotations();
-            }
-        }
+        // the terminal UI's keys (not while typing in a field)
+        self.handle_keys(ui.ctx());
         if self.m.x.minimal {
             egui::CentralPanel::default().show(ui, |ui| extras::teleprompter(ui, &mut self.m));
-            if self.settings {
-                self.settings_window(ui.ctx());
-            }
+            self.popups(ui.ctx());
             return;
         }
         // columns in the layout's order; the first one gets a side panel, the last fills the rest
@@ -274,132 +202,11 @@ impl eframe::App for Gui {
             }
         }
         egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| style::card(ui, &g, |ui| self.panel(ui, last)));
-        library::windows(ui.ctx(), &mut self.m);
-        if self.settings {
-            self.settings_window(ui.ctx());
-        }
+        self.popups(ui.ctx());
     }
 }
 
 impl Gui {
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = true;
-        let mut cfg: Vec<(&str, toml::Value)> = Vec::new();
-        egui::Window::new("Settings").open(&mut open).default_width(380.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.look.tab_appearance, false, "General");
-                    ui.selectable_value(&mut self.look.tab_appearance, true, "Appearance");
-                });
-                ui.separator();
-                if self.look.tab_appearance {
-                    style::appearance(ui, &mut self.m, &mut self.look);
-                    return;
-                }
-                ui.heading("Lyrics");
-                let mut mode = self.m.translate_mode;
-                egui::ComboBox::from_label("Translation shown as")
-                    .selected_text(mode.name())
-                    .show_ui(ui, |ui| {
-                        for name in TranslateMode::NAMES {
-                            let v = TranslateMode::parse(name).unwrap_or_default();
-                            ui.selectable_value(&mut mode, v, *name);
-                        }
-                    });
-                if mode != self.m.translate_mode {
-                    self.m.set_translate_mode(mode);
-                    cfg.push(("translate_mode", mode.name().into()));
-                    cfg.push(("translate", (mode != TranslateMode::Off).into()));
-                }
-                let mut karaoke = self.m.args.karaoke;
-                if ui.checkbox(&mut karaoke, "Light up the line word by word").changed() {
-                    self.m.args.karaoke = karaoke;
-                    cfg.push(("karaoke", karaoke.into()));
-                }
-                let mut lang = self.m.args.translate_lang.clone();
-                ui.horizontal(|ui| {
-                    ui.label("Translate into");
-                    if ui.text_edit_singleline(&mut lang).lost_focus() && lang != self.m.args.translate_lang && !lang.trim().is_empty() {
-                        self.m.args.translate_lang = lang.trim().to_string();
-                        cfg.push(("translate_lang", self.m.args.translate_lang.clone().into()));
-                        self.m.ensure_translation();
-                    }
-                });
-                let mut engine_ai = self.m.args.translate_engine == TranslateEngine::Ai;
-                if ui.checkbox(&mut engine_ai, "Translate with an AI model (see README: Ollama is free)").changed() {
-                    self.m.args.translate_engine = if engine_ai { TranslateEngine::Ai } else { TranslateEngine::Standard };
-                    cfg.push(("translate_engine", self.m.args.translate_engine.name().into()));
-                    self.m.translations.clear();
-                    self.m.ensure_translation();
-                }
-                if engine_ai {
-                    let mut model = self.m.args.ai_model.clone();
-                    ui.horizontal(|ui| {
-                        ui.label("AI model");
-                        if ui.text_edit_singleline(&mut model).lost_focus() && model != self.m.args.ai_model {
-                            self.m.args.ai_model = model.trim().to_string();
-                            cfg.push(("ai.model", self.m.args.ai_model.clone().into()));
-                        }
-                    });
-                    ui.label(
-                        egui::RichText::new(format!("Lyrics and song info go to the AI provider ({}).", self.m.args.ai_provider))
-                            .small()
-                            .weak(),
-                    );
-                }
-                ui.separator();
-                ui.heading("Chords and notes");
-                let mut chords = self.m.chords_on;
-                if ui.checkbox(&mut chords, "Chords above the lyrics").changed() {
-                    self.m.toggle_chords();
-                    cfg.push(("chords", self.m.chords_on.into()));
-                }
-                let mut notes = self.m.annotations_shown();
-                if ui.checkbox(&mut notes, "Annotations panel (experimental)").changed() {
-                    self.m.layout.panels.set(PanelId::Annotations, notes);
-                    self.m.args.annotations = notes;
-                    self.m.ensure_annotations();
-                    cfg.push(("annotations", notes.into()));
-                }
-                let mut mode = self.m.args.annotations_mode;
-                egui::ComboBox::from_label("Annotations from")
-                    .selected_text(mode.label())
-                    .show_ui(ui, |ui| {
-                        for m in [AnnotationMode::Genius, AnnotationMode::Ai, AnnotationMode::GeniusAi] {
-                            ui.selectable_value(&mut mode, m, m.label());
-                        }
-                    });
-                if mode != self.m.args.annotations_mode {
-                    self.m.args.annotations_mode = mode;
-                    cfg.push(("annotations_mode", mode.name().into()));
-                    self.m.restart_annotations();
-                }
-                let mut max = self.m.args.annotation_max_chars as u32;
-                ui.horizontal(|ui| {
-                    ui.label("Annotation length");
-                    if ui.add(egui::DragValue::new(&mut max).range(0..=4000).speed(10)).changed() {
-                        self.m.args.annotation_max_chars = max as usize;
-                        cfg.push(("annotation_max_chars", (max as i64).into()));
-                    }
-                    ui.label(egui::RichText::new("0 = the whole note").small().weak());
-                });
-                ui.separator();
-                extras::settings(ui, &mut self.m, &mut cfg);
-                ui.heading("Layout");
-                if ui.button(if self.customize { "Hide the layout editor" } else { "Customize layout…" }).clicked() {
-                    self.customize = !self.customize;
-                }
-                if self.customize {
-                    self.layout_editor(ui);
-                }
-            });
-        });
-        if !cfg.is_empty() {
-            self.m.save_settings(&cfg);
-        }
-        self.settings = open;
-    }
-
     /// Panels, metadata fields and buttons: tick to show, arrows to reorder, saved at once.
     fn layout_editor(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
@@ -446,4 +253,15 @@ impl Gui {
 #[allow(dead_code)]
 fn _config_is_shared() -> PathBuf {
     config::default_path()
+}
+
+/// The window stops the spotifyd it started when it closes (`kill_spotifyd_on_exit`).
+impl Drop for Gui {
+    fn drop(&mut self) {
+        if !self.m.args.no_kill_spotifyd {
+            if let Some(mut c) = self.m.ux.spotifyd.take() {
+                music_display::spotifyd::stop(&mut c);
+            }
+        }
+    }
 }

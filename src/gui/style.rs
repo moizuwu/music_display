@@ -21,10 +21,10 @@ pub struct Look {
     blur: Option<egui::TextureHandle>,
     families: Option<Vec<String>>,
     filter: String,
-    /// The settings window shows the Appearance tab.
-    pub tab_appearance: bool,
     /// A change not written to the file yet (written when the pointer is released).
     dirty: bool,
+    /// "Reset appearance" was pressed once and asks again.
+    pub confirm_reset: bool,
 }
 
 /// The window itself: transparent (so `opacity` can work live), with the chosen decorations.
@@ -468,9 +468,21 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     changed |= ui.checkbox(&mut g.panel_borders, "Panel borders").changed();
 
     ui.separator();
-    if ui.button("Reset appearance").clicked() {
-        *g = GuiConf::default();
-        changed = true;
+    // one press asks, the second one resets
+    if look.confirm_reset {
+        ui.horizontal(|ui| {
+            ui.label("Reset every appearance setting?");
+            if ui.button("Yes, reset").clicked() {
+                *g = GuiConf::default();
+                changed = true;
+                look.confirm_reset = false;
+            }
+            if ui.button("Cancel").clicked() {
+                look.confirm_reset = false;
+            }
+        });
+    } else if ui.button("Reset appearance").clicked() {
+        look.confirm_reset = true;
     }
     look.dirty |= changed;
     // a slider drag changes every frame: write once the pointer is up
