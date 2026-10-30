@@ -70,6 +70,8 @@ mod ui;
 
 #[cfg(feature = "gui")]
 mod gui;
+#[cfg(feature = "gui")]
+mod syscolors;
 
 // ════════════════════════════════════════════════════════════════════════════
 // main: terminal setup, worker spawn, event loop, clean teardown
@@ -213,6 +215,7 @@ async fn run(
             }
             _ = tick.tick() => {
                 app.preload_tick();
+                app.refresh_theme();
                 sync_window_title(&app, &mut title);
                 // Redraw when something changed, while the lyric scroll is easing,
                 // or ~10×/s during playback (clock, progress bar, lyric line changes).

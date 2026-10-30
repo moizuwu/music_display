@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Quit,
+    ToggleTheme,
     PlayPause,
     Next,
     Prev,
@@ -117,6 +118,7 @@ pub const BINDS: &[Bind] = &[
     bind!("Lyrics", "End", "back to the playing line", [KeyCode::End], BrowseEnd),
     bind!("Lyrics", "K", "translate lyrics on / off (translation only)", [KeyCode::Char('K')], Translate),
     bind!("Lyrics", "k", "translation under each original line on / off", [KeyCode::Char('k')], TranslateBoth),
+    bind!("View", "v", "dark / light theme (window only)", [KeyCode::Char('v')], ToggleTheme),
     bind!("View", "s / S", "settings menu", [KeyCode::Char('s'), KeyCode::Char('S')], Settings),
     bind!("View", "?", "this help", [KeyCode::Char('?')], Help),
     bind!("View", "q / Esc", "quit", [KeyCode::Char('q'), KeyCode::Esc], Quit),

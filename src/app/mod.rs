@@ -170,6 +170,10 @@ pub struct App {
     pub theme: Theme,
     /// The accent from config/CLI, restored whenever there is no cover to take one from.
     base_primary: Option<Rgb>,
+    /// The colour files the theme was read from and their modification times, and when they
+    /// were last looked at: a wallpaper tool that rewrites them changes the colours live.
+    theme_watch: Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
+    theme_polled: Instant,
     pub big_lyrics: bool,
     pub ctl: player::Ctl,
     pub client: reqwest::Client,
@@ -368,6 +372,8 @@ impl App {
             placement,
             big_lyrics: args.big_lyrics,
             base_primary: theme.primary,
+            theme_watch: crate::theme::watch_list(args.colors.as_deref()),
+            theme_polled: Instant::now(),
             args,
             theme,
             client,
@@ -765,6 +771,7 @@ impl App {
             let (c, tx) = (self.client.clone(), self.tx.clone());
             let policy = lyrics::Policy {
                 retries: self.args.lyrics_retries,
+                extra: self.args.lyrics_fallback.then(Default::default),
                 ..Default::default()
             };
             let (a, t, al, len) =
@@ -1134,7 +1141,13 @@ impl App {
                 if let (true, Ok((done, backend))) = (keep, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
-                let _ = tx.send(AppEvent::Translated { key, lang, lines: r.map(|(l, b)| (l, tag(b))) });
+                let _ = tx.send(AppEvent::Translated { key, lang, lines: r
+                    .map(|(l, b)| (l, tag(b)))
+                    // Google failing too: the reason the AI gave up is still worth knowing
+                    .map_err(|e| match &ai_failed {
+                        Some(why) if !translate::is_held(&e) => format!("{e}; AI failed: {why}"),
+                        _ => e,
+                    }) });
                 return;
             }
         }));
@@ -1350,6 +1363,7 @@ impl App {
             Setting::Minimal => onoff(self.minimal),
             Setting::Customize => "enter →".to_string(),
             Setting::GenreLookup => onoff(self.args.genre_lookup),
+            Setting::LyricsFallback => onoff(self.args.lyrics_fallback),
             Setting::Annotations => onoff(self.annotations_shown()),
             Setting::AnnotationsMode => format!("< {} >", self.args.annotations_mode.name()),
             Setting::AnnotationMaxChars => match self.args.annotation_max_chars {
@@ -1524,6 +1538,7 @@ impl App {
                 return;
             }
             Setting::GenreLookup => self.args.genre_lookup = !self.args.genre_lookup,
+            Setting::LyricsFallback => self.args.lyrics_fallback = !self.args.lyrics_fallback,
             Setting::Annotations => self.toggle_annotations(),
             Setting::AnnotationsMode => {
                 let mut m = self.args.annotations_mode.next();
@@ -1688,6 +1703,7 @@ impl App {
             ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
             ("genre_lookup", B(self.args.genre_lookup)),
+            ("lyrics_fallback", B(self.args.lyrics_fallback)),
             ("annotations", B(self.annotations_shown())),
             ("annotations_mode", S(self.args.annotations_mode.name().to_string())),
             ("annotation_max_chars", I(self.args.annotation_max_chars as i64)),
@@ -1790,6 +1806,36 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Read the colour files again when one of them changed (looked at every two seconds).
+    /// A cover accent stays while `cover_theme` is on; the configured one is updated for later.
+    pub fn refresh_theme(&mut self) {
+        if self.theme_polled.elapsed() >= Duration::from_secs(2) {
+            self.theme_polled = Instant::now();
+            self.refresh_theme_now();
+        }
+    }
+
+    /// [`refresh_theme`](Self::refresh_theme) without waiting for the next look.
+    pub fn refresh_theme_now(&mut self) {
+        if self.args.terminal_colors {
+            return;
+        }
+        let watch = crate::theme::watch_list(self.args.colors.as_deref());
+        if watch == self.theme_watch {
+            return;
+        }
+        self.theme_watch = watch;
+        let t = crate::theme::load(&self.args);
+        self.base_primary = t.primary;
+        self.theme.surface = t.surface;
+        self.theme.on_surface = t.on_surface;
+        self.theme.source = t.source;
+        if !self.args.cover_theme {
+            self.theme.primary = t.primary;
+        }
+        self.dirty = true;
     }
 
     /// Back to the configured accent (no cover to take one from).
@@ -2049,6 +2095,8 @@ impl App {
             Action::Like => self.toggle_like(),
             Action::PlayHere => self.spot_cmd(spotify::Cmd::Transfer),
             Action::Devices => self.open_devices(),
+            // (the window's own theme; a terminal has the colours of the terminal)
+            Action::ToggleTheme => self.set_note("the dark / light theme is for the window (--gui)"),
             Action::Help => {
                 self.show_help = true;
                 self.help_scroll = 0;

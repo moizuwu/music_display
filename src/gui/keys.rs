@@ -174,6 +174,7 @@ impl Model {
                     self.say("Spotify is off (settings → Spotify)");
                 }
             }
+            Action::ToggleTheme => self.toggle_theme(),
             Action::Devices => {
                 if self.spot.on() {
                     self.spot.open_devices();
@@ -200,6 +201,14 @@ impl Model {
 }
 
 impl Model {
+    /// Flip the window between dark and light, whatever look it has, and keep the choice.
+    pub fn toggle_theme(&mut self) {
+        use music_display::guiconf::Theme;
+        self.gui.theme = if self.ux.dark_now { Theme::Light } else { Theme::Dark };
+        let t = self.gui.write();
+        self.save_settings(&[("gui", toml::Value::Table(t))]);
+    }
+
     /// The key typed while the help window waits for a new key of an action.
     fn capture_key(&mut self, code: KeyCode) {
         let Some(action) = self.ux.key_capture.take() else { return };
@@ -253,12 +262,12 @@ impl super::Gui {
 impl super::Gui {
     /// Every window that floats over the panels.
     pub(super) fn popups(&mut self, ctx: &egui::Context) {
-        super::library::windows(ctx, &mut self.m);
+        super::library::windows(ctx, &mut self.m, &mut self.look);
         if self.m.ux.s.open {
             self.settings_window(ctx);
         }
-        help_window(ctx, &mut self.m);
-        super::privacy::window(ctx, &mut self.m);
+        help_window(ctx, &mut self.m, &mut self.look);
+        super::privacy::window(ctx, &mut self.m, &mut self.look);
         self.popouts(ctx);
     }
 }
@@ -285,12 +294,13 @@ const LIBRARY: &[(&str, &str)] = &[
     ("Esc", "close the library"),
 ];
 
-pub fn help_window(ctx: &egui::Context, m: &mut Model) {
+pub fn help_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     if !m.ux.help {
         return;
     }
     let mut open = true;
-    egui::Window::new("Keys").open(&mut open).default_width(420.0).default_height(520.0).show(ctx, |ui| {
+    let g = m.gui.clone();
+    super::floating::window(ctx, look, &g, "keys", "Keys", [440.0, 560.0], &mut open, |ui, _| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.label(egui::RichText::new("The same keys as the terminal UI (saved in [keys] of config.toml). Not while typing in a field.").small().weak());
             ui.checkbox(&mut m.ux.key_edit, "Change keys");
@@ -465,6 +475,23 @@ mod tests {
         m.ux.key_capture = Some(Action::ToggleLyrics);
         m.capture_key(KeyCode::Esc);
         assert_eq!(m.ux.key_note.as_deref(), Some("cancelled"));
+        let _ = std::fs::remove_file(&m.cfg);
+    }
+
+    #[tokio::test]
+    async fn the_theme_key_flips_dark_and_light_and_saves_it() {
+        use music_display::guiconf::Theme;
+        let (mut m, _rx) = model();
+        m.cfg = std::env::temp_dir().join(format!("md-gui-theme-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&m.cfg);
+        m.ux.dark_now = true;
+        assert_eq!(act(text("v")), Some(Action::ToggleTheme));
+        m.run_action(Action::ToggleTheme);
+        assert_eq!(m.gui.theme, Theme::Light);
+        assert!(std::fs::read_to_string(&m.cfg).unwrap().contains("theme = \"light\""));
+        m.ux.dark_now = false;
+        m.run_action(Action::ToggleTheme);
+        assert_eq!(m.gui.theme, Theme::Dark);
         let _ = std::fs::remove_file(&m.cfg);
     }
 

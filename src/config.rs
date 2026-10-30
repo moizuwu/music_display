@@ -62,6 +62,7 @@ pub const KEYS: &[Key] = &[
     k!("translate", Kind::Bool, "translate"),
     k!("translate_mode", Kind::Choice(crate::cli::TranslateMode::NAMES), "translate_mode"),
     k!("genre_lookup", Kind::Bool, "genre_lookup"),
+    k!("lyrics_fallback", Kind::Bool, "lyrics_fallback"),
     k!("annotations", Kind::Bool, "annotations"),
     k!("annotations_mode", Kind::Choice(crate::cli::AnnotationMode::NAMES), "annotations_mode"),
     k!("annotation_max_chars", Kind::Int(0, 4000), "annotation_max_chars"),
@@ -170,6 +171,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "translate" => args.translate = b(),
         "translate_mode" => args.translate_mode = crate::cli::TranslateMode::parse(&st()),
         "genre_lookup" => args.genre_lookup = b(),
+        "lyrics_fallback" => args.lyrics_fallback = b(),
         "annotations" => args.annotations = b(),
         "annotations_mode" => args.annotations_mode = crate::cli::AnnotationMode::parse(&st()).unwrap_or_default(),
         "annotation_max_chars" => args.annotation_max_chars = i() as usize,
@@ -436,6 +438,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("translate", args.translate.to_string());
     line("translate_mode", q(args.start_translate_mode().name()));
     line("genre_lookup", args.genre_lookup.to_string());
+    line("lyrics_fallback", args.lyrics_fallback.to_string());
     line("translate_engine", q(args.translate_engine.name()));
     line("annotations", args.annotations.to_string());
     line("annotations_mode", q(args.annotations_mode.name()));

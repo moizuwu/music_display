@@ -1,6 +1,9 @@
-//! Backgrounds that move: rising embers, drifting fog and bats. Everything is drawn with the
-//! painter from the clock, so there are no files and no state; `alpha` is the window opacity.
-//! Nothing here has been looked at on a real compositor.
+//! What is drawn behind and over the panels besides flat colour: the sky, grass and flowers of
+//! the scenery backgrounds, and the effects that move (embers, fog, bats, snow, lights, leaves,
+//! dandelion seeds, wind, pollen, eggs). Everything is drawn with the painter from the clock, so
+//! there are no files and no state; `alpha` is the window opacity and `scale` the effect
+//! intensity (1.0 = the usual amount of pieces). Nothing here has been looked at on a real
+//! compositor.
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke};
 
 /// A stable pseudo-random number in 0..1 for `(i, k)`.
@@ -12,14 +15,19 @@ fn rnd(i: u32, k: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
+/// `base` pieces at the usual intensity, more or fewer with `scale` (at least one).
+fn count(base: u32, scale: f32) -> u32 {
+    ((base as f32 * scale).round() as u32).max(1)
+}
+
 fn tone(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
 /// Small glowing specks that rise and fade out near the top.
-pub fn embers(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
+pub fn embers(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    for i in 0..70u32 {
+    for i in 0..count(70, scale) {
         let speed = 14.0 + rnd(i, 1) * 34.0;
         let rise = (t as f32 * speed + rnd(i, 2) * h) % h;
         let y = r.bottom() - rise;
@@ -33,10 +41,10 @@ pub fn embers(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
 }
 
 /// Large soft blobs that wander slowly; each is a few stacked discs, fainter toward the edge.
-pub fn fog(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
+pub fn fog(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
     let reach = w.max(h);
-    for i in 0..7u32 {
+    for i in 0..count(7, scale) {
         let (sx, sy) = (0.02 + rnd(i, 1) * 0.05, 0.02 + rnd(i, 2) * 0.05);
         let phase = rnd(i, 3) * std::f32::consts::TAU;
         let c = Pos2::new(
@@ -52,9 +60,9 @@ pub fn fog(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
 }
 
 /// Bats crossing the window, wings flapping.
-pub fn bats(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
+pub fn bats(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    for i in 0..6u32 {
+    for i in 0..count(6, scale) {
         let size = 9.0 + rnd(i, 1) * 13.0;
         let speed = 38.0 + rnd(i, 2) * 55.0;
         let span = w + size * 8.0;
@@ -94,9 +102,9 @@ fn rot(c: Pos2, p: Pos2, a: f32) -> Pos2 {
 }
 
 /// Falling snow in two depths (small and slow behind, larger and quicker in front).
-pub fn snow(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
+pub fn snow(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    for i in 0..110u32 {
+    for i in 0..count(110, scale) {
         let near = i % 3 == 0;
         let size = if near { 2.2 + rnd(i, 1) * 2.2 } else { 0.9 + rnd(i, 1) * 1.3 };
         let speed = if near { 38.0 + rnd(i, 2) * 30.0 } else { 14.0 + rnd(i, 2) * 14.0 };
@@ -143,10 +151,10 @@ const EGG_COLORS: [Color32; 6] = [
     Color32::from_rgb(255, 196, 150),
 ];
 
-/// Painted eggs drifting slowly down, with a row of grass at the bottom.
-pub fn eggs(p: &Painter, r: Rect, t: f64, alpha: f32) {
+/// Painted eggs drifting slowly down.
+pub fn eggs(p: &Painter, r: Rect, t: f64, alpha: f32, scale: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    for i in 0..9u32 {
+    for i in 0..count(9, scale) {
         let s = 16.0 + rnd(i, 1) * 16.0;
         let span = h + s * 3.0;
         let y = r.top() - s * 1.5 + (t as f32 * (7.0 + rnd(i, 2) * 9.0) + rnd(i, 3) * span) % span;
@@ -167,11 +175,10 @@ pub fn eggs(p: &Painter, r: Rect, t: f64, alpha: f32) {
         p.circle_filled(Pos2::new(x - s * 0.18, y + s * 0.62), s * 0.06, band);
         p.circle_filled(Pos2::new(x + s * 0.2, y - s * 0.62), s * 0.06, band);
     }
-    grass(p, r, t, Color32::from_rgb(120, 190, 110), alpha * 0.8);
 }
 
 /// Blades of grass along the bottom edge, swaying in the wind.
-fn grass(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
+pub fn grass(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
     let step = 9.0;
     let n = (r.width() / step) as u32 + 1;
     for k in 0..n {
@@ -188,10 +195,10 @@ fn grass(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32) {
     }
 }
 
-/// A warm sky: a low sun glow, pollen drifting up and daisies and cornflowers in the grass.
-pub fn meadow(p: &Painter, r: Rect, t: f64, dark: bool, alpha: f32) {
+/// A warm sky from a pale blue at the top to a haze at the horizon, with a low sun that
+/// breathes slowly.
+pub fn sky(p: &Painter, r: Rect, t: f64, dark: bool, alpha: f32) {
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    // the sky: from a pale blue at the top to a warm haze at the horizon
     let (top, bottom) = if dark { (Color32::from_rgb(10, 22, 40), Color32::from_rgb(34, 40, 30)) } else { (Color32::from_rgb(190, 224, 246), Color32::from_rgb(252, 244, 200)) };
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(r.left_top(), tone(top, alpha));
@@ -201,21 +208,28 @@ pub fn meadow(p: &Painter, r: Rect, t: f64, dark: bool, alpha: f32) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     p.add(Shape::mesh(mesh));
-    // the sun, low on the right, breathing slowly
     let sun = Pos2::new(r.left() + w * 0.82, r.top() + h * 0.78);
     let breathe = 1.0 + 0.04 * (t as f32 * 0.5).sin();
     for j in 0..8 {
         let f = 1.0 - j as f32 / 8.0;
         p.circle_filled(sun, w.min(h) * 0.5 * f * breathe, tone(Color32::from_rgb(255, 214, 90), alpha * 0.07));
     }
-    // pollen
-    for i in 0..48u32 {
+}
+
+/// Specks of pollen drifting up, glinting.
+pub fn pollen(p: &Painter, r: Rect, t: f64, alpha: f32, scale: f32) {
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    for i in 0..count(48, scale) {
         let rise = (t as f32 * (6.0 + rnd(i, 1) * 10.0) + rnd(i, 2) * h) % h;
         let at = Pos2::new(r.left() + rnd(i, 3) * w + (t as f32 * 0.5 + i as f32).sin() * 16.0, r.bottom() - rise);
         let glint = 0.5 + 0.5 * (t as f32 * 1.7 + i as f32 * 2.1).sin();
         p.circle_filled(at, 1.0 + rnd(i, 4) * 1.6, tone(Color32::from_rgb(255, 226, 120), alpha * 0.6 * glint));
     }
-    // flowers on stems along the bottom
+}
+
+/// Daisies and cornflowers on stems along the bottom, swaying.
+pub fn flowers(p: &Painter, r: Rect, t: f64, alpha: f32) {
+    let w = r.width().max(1.0);
     let n = (w / 64.0) as u32 + 1;
     for k in 0..n {
         let x = r.left() + (k as f32 + rnd(k, 11) * 0.6) * 64.0;
@@ -231,6 +245,80 @@ pub fn meadow(p: &Painter, r: Rect, t: f64, dark: bool, alpha: f32) {
         }
         let heart = if k % 3 == 1 { Color32::from_rgb(40, 40, 120) } else { Color32::from_rgb(240, 170, 20) };
         p.circle_filled(head, 3.6, tone(heart, alpha));
+    }
+}
+
+const LEAF_COLORS: [Color32; 5] = [
+    Color32::from_rgb(201, 94, 24),
+    Color32::from_rgb(224, 140, 30),
+    Color32::from_rgb(168, 52, 28),
+    Color32::from_rgb(196, 168, 52),
+    Color32::from_rgb(122, 78, 34),
+];
+
+/// Autumn leaves tumbling down: each swings from side to side and turns as it falls.
+pub fn leaves(p: &Painter, r: Rect, t: f64, alpha: f32, scale: f32) {
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    for i in 0..count(26, scale) {
+        let s = 6.0 + rnd(i, 1) * 8.0;
+        let span = h + s * 4.0;
+        let fall = (t as f32 * (22.0 + rnd(i, 2) * 26.0) + rnd(i, 3) * span) % span;
+        let sway = (t as f32 * (0.7 + rnd(i, 4) * 0.8) + i as f32 * 1.9).sin();
+        let c = Pos2::new(r.left() + w * (0.03 + rnd(i, 5) * 0.94) + sway * (24.0 + s * 2.0), r.top() - s * 2.0 + fall);
+        let a = sway * 0.9 + t as f32 * (0.5 + rnd(i, 6)) + i as f32;
+        let col = tone(LEAF_COLORS[i as usize % LEAF_COLORS.len()], alpha * 0.8);
+        // a pointed oval (two triangles meeting at the middle rib) and a short stem
+        let pts = |v: &[(f32, f32)]| v.iter().map(|(x, y)| rot(c, c + egui::vec2(x * s, y * s), a)).collect::<Vec<_>>();
+        p.add(Shape::convex_polygon(pts(&[(0.0, -1.0), (0.62, -0.1), (0.0, 1.0)]), col, Stroke::NONE));
+        p.add(Shape::convex_polygon(pts(&[(0.0, -1.0), (-0.62, -0.1), (0.0, 1.0)]), tone(LEAF_COLORS[(i as usize + 1) % LEAF_COLORS.len()], alpha * 0.8), Stroke::NONE));
+        p.add(Shape::line(pts(&[(0.0, 1.0), (0.0, 1.5)]), Stroke::new(1.0, col)));
+    }
+}
+
+/// Dandelion seeds on the breeze: a fine stem under a round tuft of hairs, drifting up and
+/// across, slowly turning.
+pub fn seeds(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    for i in 0..count(16, scale) {
+        let s = 7.0 + rnd(i, 1) * 8.0;
+        let span = w + s * 8.0;
+        let run = (t as f32 * (10.0 + rnd(i, 2) * 14.0) + rnd(i, 3) * span) % span;
+        let x = r.left() - s * 4.0 + run;
+        let y = r.top() + h * (0.15 + rnd(i, 4) * 0.7) - run * (0.08 + rnd(i, 5) * 0.12) + (t as f32 * 0.9 + i as f32 * 2.3).sin() * 12.0;
+        let c = Pos2::new(x, y.rem_euclid(h) + r.top());
+        let a = (t as f32 * 0.4 + i as f32).sin() * 0.6 - 0.5;
+        let line = tone(color, alpha * 0.7);
+        // the tuft: fine hairs fanning out from the top of the stem
+        let top = rot(c, c + egui::vec2(0.0, -s), a);
+        for k in 0..9 {
+            let f = (k as f32 / 8.0 - 0.5) * 2.6;
+            let tip = rot(c, c + egui::vec2(f * s * 0.9, -s * 1.9 + f.abs() * s * 0.5), a);
+            p.add(Shape::line(vec![top, tip], Stroke::new(0.8, line)));
+            p.circle_filled(tip, 0.9, line);
+        }
+        p.add(Shape::line(vec![c, top], Stroke::new(1.1, line)));
+        p.circle_filled(c, 1.4, tone(color, alpha * 0.9));
+    }
+}
+
+/// Gusts of wind: long thin curved streaks that sweep across and fade at both ends.
+pub fn wind(p: &Painter, r: Rect, t: f64, color: Color32, alpha: f32, scale: f32) {
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    for i in 0..count(7, scale) {
+        let len = w * (0.18 + rnd(i, 1) * 0.2);
+        let span = w + len * 2.0;
+        let run = (t as f32 * (90.0 + rnd(i, 2) * 90.0) + rnd(i, 3) * span) % span;
+        let x0 = r.left() - len + run;
+        let y0 = r.top() + h * (0.1 + rnd(i, 4) * 0.8);
+        let amp = 6.0 + rnd(i, 5) * 16.0;
+        let n = 14;
+        // (the streak is drawn in pieces so that it can fade towards both ends)
+        for k in 0..n {
+            let (f0, f1) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
+            let at = |f: f32| Pos2::new(x0 + len * f, y0 + amp * (f * 5.0 + t as f32 * 0.8 + i as f32).sin() * (f * std::f32::consts::PI).sin());
+            let fade = (f0 * std::f32::consts::PI).sin();
+            p.add(Shape::line(vec![at(f0), at(f1)], Stroke::new(1.2, tone(color, alpha * 0.35 * fade))));
+        }
     }
 }
 
@@ -276,17 +364,32 @@ mod tests {
     #[test]
     fn every_drawing_paints_something_at_any_time() {
         for t in [0.0, 1.3, 250.0] {
-            assert!(painted(|p, r| embers(p, r, t, Color32::GOLD, 1.0)) > 10);
-            assert!(painted(|p, r| fog(p, r, t, Color32::GRAY, 1.0)) > 10);
-            assert!(painted(|p, r| bats(p, r, t, Color32::BLACK, 1.0)) > 5);
-            assert!(painted(|p, r| snow(p, r, t, Color32::WHITE, 1.0)) > 50);
+            assert!(painted(|p, r| embers(p, r, t, Color32::GOLD, 1.0, 1.0)) > 10);
+            assert!(painted(|p, r| fog(p, r, t, Color32::GRAY, 1.0, 1.0)) > 10);
+            assert!(painted(|p, r| bats(p, r, t, Color32::BLACK, 1.0, 1.0)) > 5);
+            assert!(painted(|p, r| snow(p, r, t, Color32::WHITE, 1.0, 1.0)) > 50);
             assert!(painted(|p, r| lights(p, r, t, 1.0)) > 5);
-            assert!(painted(|p, r| eggs(p, r, t, 1.0)) > 20);
-            assert!(painted(|p, r| meadow(p, r, t, false, 1.0)) > 20);
-            assert!(painted(|p, r| meadow(p, r, t, true, 1.0)) > 20);
+            assert!(painted(|p, r| eggs(p, r, t, 1.0, 1.0)) > 10);
+            assert!(painted(|p, r| grass(p, r, t, Color32::GREEN, 1.0)) > 10);
+            assert!(painted(|p, r| pollen(p, r, t, 1.0, 1.0)) > 20);
+            assert!(painted(|p, r| flowers(p, r, t, 1.0)) > 10);
+            assert!(painted(|p, r| leaves(p, r, t, 1.0, 1.0)) > 20);
+            assert!(painted(|p, r| seeds(p, r, t, Color32::WHITE, 1.0, 1.0)) > 50);
+            assert!(painted(|p, r| wind(p, r, t, Color32::WHITE, 1.0, 1.0)) > 20);
+            assert!(painted(|p, r| sky(p, r, t, false, 1.0)) > 5);
+            assert!(painted(|p, r| sky(p, r, t, true, 1.0)) > 5);
             assert!(painted(|p, r| figure(p, r, 1.0)) > 5);
         }
         // a degenerate window must not panic either
-        let _ = painted(|p, _| snow(p, Rect::from_min_size(Pos2::ZERO, egui::vec2(0.0, 0.0)), 1.0, Color32::WHITE, 1.0));
+        let _ = painted(|p, _| snow(p, Rect::from_min_size(Pos2::ZERO, egui::vec2(0.0, 0.0)), 1.0, Color32::WHITE, 1.0, 1.0));
+        let _ = painted(|p, _| wind(p, Rect::from_min_size(Pos2::ZERO, egui::vec2(0.0, 0.0)), 1.0, Color32::WHITE, 1.0, 1.0));
+    }
+
+    #[test]
+    fn the_scale_changes_how_many_pieces_there_are() {
+        let few = painted(|p, r| snow(p, r, 3.0, Color32::WHITE, 1.0, 0.3));
+        let many = painted(|p, r| snow(p, r, 3.0, Color32::WHITE, 1.0, 1.6));
+        assert!(few < many, "{few} {many}");
+        assert!(count(10, 0.0) >= 1, "never zero pieces for a non-zero effect");
     }
 }

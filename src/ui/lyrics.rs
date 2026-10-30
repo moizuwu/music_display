@@ -452,7 +452,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         if *is_tag {
             if let Some(m) = app.members.get(*li) {
                 f.render_widget(
-                    Paragraph::new(Line::from(member_tag_line(m, width))).alignment(Alignment::Center),
+                    Paragraph::new(Line::from(member_tag_line(m, width, current == Some(*li)))).alignment(Alignment::Center),
                     Rect { y: inner.y + y, height: 1, ..inner },
                 );
             }
@@ -535,8 +535,9 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             None => Style::new().fg(th.fade(0.55)),
         };
         // the translation under an original line is italic and not bold
+        // (the active line's translation keeps the bold: it lights up with the line)
         let style = if sub_rows.contains(&(idx as usize)) {
-            style.remove_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC)
+            if current == Some(*li) { style.add_modifier(Modifier::ITALIC) } else { style.remove_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC) }
         } else {
             style
         };
@@ -549,7 +550,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                     && !sub_rows.contains(&(idx as usize))
                     && (starts[*li]..idx as usize).all(|j| rows[j].chord_x.is_some() || sub_rows.contains(&j))
             })
-            .map(|m| member_tag(m, width, crate::util::width(text.as_str())))
+            .map(|m| member_tag(m, width, crate::util::width(text.as_str()), current == Some(*li)))
             .filter(|t| !t.is_empty());
         if let Some(tag) = tag {
             // the tag is part of the row: widen its clickable span to cover it

@@ -3,10 +3,11 @@
 //! the settings window. The settings themselves are plain data in `guiconf`, so they are tested
 //! without a window; nothing in this file has been checked visually on a real compositor.
 use super::backdrop;
+use crate::syscolors::Colors;
 use super::model::Model;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
-use music_display::color::{self, Rgb};
-use music_display::guiconf::{Accent, Align as LAlign, Animation, Background, GuiConf, Preset, Theme, Weight};
+use music_display::color::{self, luminance, Rgb};
+use music_display::guiconf::{ColorsFrom, Effects, Fx, Accent, Align as LAlign, Animation, Background, GuiConf, Preset, Theme, Weight};
 
 /// The family the active line uses when `active_weight` is medium or bold.
 const BOLD: &str = "md-bold";
@@ -14,13 +15,15 @@ const BOLD: &str = "md-bold";
 /// What the window has applied so far, so the (costly) restyle only runs when something changed.
 #[derive(Default)]
 pub struct Look {
-    applied: Option<(GuiConf, Option<Rgb>)>,
+    applied: Option<(GuiConf, Option<Rgb>, Option<Colors>)>,
     fonts_for: Option<(String, Weight)>,
     /// The font collection is built on a background thread (scanning the system fonts takes
     /// a while); its answer arrives here.
     fonts_rx: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
     /// Accent taken from the current cover.
     accent: Option<Rgb>,
+    /// The colours of the system, when `colors` asked for them and a source had some.
+    sys: Option<Colors>,
     /// A tiny copy of the cover, stretched smooth, for `background = "cover-blur"`.
     blur: Option<egui::TextureHandle>,
     /// The picture of `background = "image"`, with the path it was loaded from (and whether that failed).
@@ -29,6 +32,8 @@ pub struct Look {
     filter: String,
     /// The picture path being typed (written to the settings when the field loses focus).
     image_edit: Option<String>,
+    /// The colour file path being typed, likewise.
+    colors_edit: Option<String>,
     /// A change not written to the file yet (written when the pointer is released).
     dirty: bool,
     /// "Reset appearance" was pressed once and asks again.
@@ -55,20 +60,53 @@ fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
-/// The window colour for a theme (a named look can have its own dark one).
-fn base(g: &GuiConf, dark: bool) -> Rgb {
-    g.theme_preset.base(dark).unwrap_or(if dark { (27, 27, 31) } else { (243, 243, 246) })
+fn sys_id() -> egui::Id {
+    egui::Id::unique("system-colours")
 }
 
-/// The colour the moving backgrounds are drawn in.
-fn effect_color(g: &GuiConf, cover: Option<Rgb>) -> Color32 {
-    match (g.accent, cover) {
-        (Accent::Fixed(c), _) | (Accent::Cover, Some(c)) => rgb32(c),
-        (Accent::Cover, None) => Color32::from_rgb(170, 130, 230),
-    }
+/// The system colours the window was last given (kept in the context so that the helpers that
+/// only have a `Ui` can reach them).
+fn system(ctx: &egui::Context) -> Option<Colors> {
+    ctx.data(|d| d.get_temp::<Option<Colors>>(sys_id())).flatten()
+}
+
+/// The system colours, for a window in the mode they were made for.
+fn for_mode(sys: Option<&Colors>, dark: bool) -> Option<&Colors> {
+    sys.filter(|c| c.dark.is_none_or(|d| d == dark))
+}
+
+/// The window colour for a theme: the system's, else the look's (a named look can have its own).
+fn base(g: &GuiConf, sys: Option<&Colors>, dark: bool) -> Rgb {
+    for_mode(sys, dark)
+        .and_then(|c| c.surface)
+        .or_else(|| g.theme_preset.base(dark))
+        .unwrap_or(if dark { (27, 27, 31) } else { (243, 243, 246) })
+}
+
+/// The accent: the system's when it has one, else the chosen one, else the cover's.
+fn accent_of(g: &GuiConf, cover: Option<Rgb>, sys: Option<&Colors>) -> Option<Rgb> {
+    sys.and_then(|c| c.primary).or(match g.accent {
+        Accent::Fixed(c) => Some(c),
+        Accent::Cover => cover,
+    })
+}
+
+/// The colour the moving effects are drawn in.
+fn effect_color(g: &GuiConf, cover: Option<Rgb>, sys: Option<&Colors>) -> Color32 {
+    accent_of(g, cover, sys).map_or(Color32::from_rgb(170, 130, 230), rgb32)
 }
 
 impl Look {
+    /// The colours the system gave (or `None`): the window restyles when they change.
+    pub fn set_system(&mut self, c: Option<Colors>) {
+        self.sys = c;
+    }
+
+    /// Where the system colours in use came from, for the settings window.
+    pub fn system_source(&self) -> Option<&str> {
+        self.sys.as_ref().map(|c| c.source.as_str())
+    }
+
     /// A new cover: take its accent and a small blurred copy for the background.
     pub fn set_cover(&mut self, ctx: &egui::Context, img: Option<&image::DynamicImage>) {
         self.accent = img.and_then(music_display::cover::dominant_accent);
@@ -99,9 +137,41 @@ impl Look {
         self.picture = Some((path.to_string(), tex));
     }
 
-    /// Is something on the background moving (so the window should redraw about 30 times a second)?
+    /// Is something moving (so the window should redraw about 30 times a second): an effect, or
+    /// the sun and the grass of a scenery background?
     pub fn animated(g: &GuiConf) -> bool {
-        matches!(g.background, Background::Particles | Background::Fog | Background::Bats | Background::Snow | Background::Eggs | Background::Meadow)
+        !g.active_effects().is_empty() || matches!(g.background, Background::Sky | Background::Meadow | Background::Lawn)
+    }
+
+    /// What moves over the background (`effects`): meant to be called right after
+    /// `paint_background`, so the panels are drawn over it.
+    pub fn paint_effects(&self, ui: &Ui, g: &GuiConf) {
+        let fx = g.active_effects();
+        if fx.is_empty() {
+            return;
+        }
+        let r = ui.ctx().content_rect();
+        let dark = ui.visuals().dark_mode;
+        // the intensity: 60 % is the usual amount of pieces; the strength follows it up to that
+        let scale = g.effects_intensity as f32 / 60.0;
+        let a = g.opacity as f32 / 100.0 * (0.4 + 0.6 * scale.min(1.0));
+        let time = ui.input(|i| i.time);
+        let accent = effect_color(g, self.accent, self.sys.as_ref());
+        let p = ui.painter();
+        for f in fx {
+            match f {
+                Fx::Snow => backdrop::snow(p, r, time, if dark { Color32::from_rgb(236, 246, 255) } else { Color32::from_rgb(110, 145, 190) }, a, scale),
+                Fx::Lights => backdrop::lights(p, r, time, a),
+                Fx::Leaves => backdrop::leaves(p, r, time, a, scale),
+                Fx::Seeds => backdrop::seeds(p, r, time, if dark { Color32::from_rgb(236, 236, 224) } else { Color32::from_rgb(120, 120, 108) }, a, scale),
+                Fx::Wind => backdrop::wind(p, r, time, if dark { Color32::from_rgb(200, 222, 238) } else { Color32::from_rgb(90, 124, 156) }, a, scale),
+                Fx::Embers => backdrop::embers(p, r, time, accent, a * 0.7, scale),
+                Fx::Fog => backdrop::fog(p, r, time, if g.theme_preset == Preset::Halloween { Color32::from_rgb(110, 50, 170) } else { accent }, a, scale),
+                Fx::Bats => backdrop::bats(p, r, time, if dark { Color32::from_rgb(8, 4, 12) } else { Color32::from_rgb(52, 30, 70) }, a, scale),
+                Fx::Pollen => backdrop::pollen(p, r, time, a, scale),
+                Fx::Eggs => backdrop::eggs(p, r, time, a, scale),
+            }
+        }
     }
 
     /// Bring the egui styles, fonts and window flags in line with `g` (only when it changed).
@@ -112,16 +182,20 @@ impl Look {
                 self.fonts_rx = None;
             }
         }
-        let key = (g.clone(), self.accent);
+        ctx.data_mut(|d| d.insert_temp(sys_id(), self.sys.clone()));
+        let key = (g.clone(), self.accent, self.sys.clone());
         if self.applied.as_ref() == Some(&key) {
             return;
         }
         let first = self.applied.is_none();
-        let prev = self.applied.replace(key).map(|(p, _)| p);
-        ctx.set_theme(match g.theme {
-            Theme::System => egui::ThemePreference::System,
-            Theme::Dark => egui::ThemePreference::Dark,
-            Theme::Light => egui::ThemePreference::Light,
+        let prev = self.applied.replace(key).map(|(p, _, _)| p);
+        ctx.set_theme(match (g.theme, self.sys.as_ref().and_then(|c| c.dark)) {
+            // the desktop says it is dark or light: follow it
+            (Theme::System, Some(true)) => egui::ThemePreference::Dark,
+            (Theme::System, Some(false)) => egui::ThemePreference::Light,
+            (Theme::System, None) => egui::ThemePreference::System,
+            (Theme::Dark, _) => egui::ThemePreference::Dark,
+            (Theme::Light, _) => egui::ThemePreference::Light,
         });
         if self.fonts_for.as_ref() != Some(&(g.font.clone(), g.active_weight)) {
             // the bold family must exist at once (the active line asks for it); the real fonts
@@ -139,7 +213,7 @@ impl Look {
             self.fonts_for = Some((g.font.clone(), g.active_weight));
         }
         for th in [egui::Theme::Dark, egui::Theme::Light] {
-            ctx.set_style_of(th, style(g, self.accent, th == egui::Theme::Dark));
+            ctx.set_style_of(th, style(g, self.accent, self.sys.as_ref(), th == egui::Theme::Dark));
         }
         // window flags that can change while it is open
         if first || prev.as_ref().is_some_and(|p| p.always_on_top != g.always_on_top) {
@@ -162,10 +236,10 @@ impl Look {
         let r = ui.ctx().content_rect();
         let dark = ui.visuals().dark_mode;
         let a = g.opacity as f32 / 100.0;
-        let b = rgb32(base(g, dark));
+        let sys = system(ui.ctx());
+        let b = rgb32(base(g, sys.as_ref(), dark));
         let p = ui.painter();
         let time = ui.input(|i| i.time);
-        let fx = effect_color(g, self.accent);
         match (g.background, &self.blur, self.accent) {
             (Background::Image, _, _) => {
                 p.rect_filled(r, 0.0, with_alpha(b, a));
@@ -174,29 +248,14 @@ impl Look {
                     p.rect_filled(r, 0.0, with_alpha(b, a * 0.35));
                 }
             }
-            (Background::Particles, _, _) => {
-                p.rect_filled(r, 0.0, with_alpha(b, a));
-                backdrop::embers(p, r, time, fx, a);
+            (Background::Sky, _, _) => backdrop::sky(p, r, time, dark, a),
+            (Background::Meadow, _, _) => {
+                backdrop::sky(p, r, time, dark, a);
+                backdrop::flowers(p, r, time, a);
             }
-            (Background::Fog, _, _) => {
+            (Background::Lawn, _, _) => {
                 p.rect_filled(r, 0.0, with_alpha(b, a));
-                backdrop::fog(p, r, time, fx, a);
-            }
-            (Background::Snow, _, _) => {
-                p.rect_filled(r, 0.0, with_alpha(b, a));
-                backdrop::snow(p, r, time, Color32::from_rgb(236, 246, 255), a);
-                backdrop::lights(p, r, time, a);
-            }
-            (Background::Eggs, _, _) => {
-                p.rect_filled(r, 0.0, with_alpha(b, a));
-                backdrop::eggs(p, r, time, a);
-            }
-            (Background::Meadow, _, _) => backdrop::meadow(p, r, time, dark, a),
-            (Background::Bats, _, _) => {
-                p.rect_filled(r, 0.0, with_alpha(b, a));
-                backdrop::fog(p, r, time, Color32::from_rgb(110, 50, 170), a);
-                backdrop::embers(p, r, time, fx, a * 0.7);
-                backdrop::bats(p, r, time, Color32::from_rgb(8, 4, 12), a);
+                backdrop::grass(p, r, time, Color32::from_rgb(120, 190, 110), a * 0.8);
             }
             (Background::CoverBlur, Some(t), _) => {
                 let uv = cover_uv(r, Vec2::splat(1.0));
@@ -206,8 +265,8 @@ impl Look {
             }
             (Background::Gradient, _, acc) => {
                 let top = match acc {
-                    Some(c) => rgb32(color::mix(base(g, dark), c, 0.28)),
-                    None => rgb32(color::mix(base(g, dark), if dark { (255, 255, 255) } else { (0, 0, 0) }, 0.10)),
+                    Some(c) => rgb32(color::mix(base(g, sys.as_ref(), dark), c, 0.28)),
+                    None => rgb32(color::mix(base(g, sys.as_ref(), dark), if dark { (255, 255, 255) } else { (0, 0, 0) }, 0.10)),
                 };
                 let mut mesh = egui::Mesh::default();
                 let (ct, cb) = (with_alpha(top, a), with_alpha(b, a));
@@ -236,14 +295,22 @@ fn cover_uv(r: Rect, size: Vec2) -> Rect {
 
 /// The egui style for one theme: neutral egui defaults plus the user's accent, radius, spacing
 /// and text sizes. Panels are see-through; the background and the cards are painted by us.
-fn style(g: &GuiConf, cover: Option<Rgb>, dark: bool) -> egui::Style {
+fn style(g: &GuiConf, cover: Option<Rgb>, sys: Option<&Colors>, dark: bool) -> egui::Style {
     let mut s = egui::Style { visuals: if dark { egui::Visuals::dark() } else { egui::Visuals::light() }, ..Default::default() };
-    let acc = match g.accent {
-        Accent::Fixed(c) => Some(c),
-        Accent::Cover => cover.map(|c| color::readable(c, Some(base(g, dark)))),
+    // (an accent from the cover or the system is made readable on the window colour)
+    let acc = match (sys.and_then(|c| c.primary), g.accent) {
+        (Some(c), _) => Some(color::readable(c, Some(base(g, sys, dark)))),
+        (None, Accent::Fixed(c)) => Some(c),
+        (None, Accent::Cover) => cover.map(|c| color::readable(c, Some(base(g, sys, dark)))),
     };
     let v = &mut s.visuals;
     v.panel_fill = Color32::TRANSPARENT;
+    // the system's text colour, when it is there and stands out from the window colour
+    if let Some(text) = for_mode(sys, dark).and_then(|c| c.text) {
+        if (luminance(text) - luminance(base(g, sys, dark))).abs() > 0.35 {
+            v.override_text_color = Some(rgb32(text));
+        }
+    }
     let r = CornerRadius::same(g.corner_radius);
     v.window_corner_radius = CornerRadius::same(g.corner_radius.saturating_add(4));
     v.menu_corner_radius = r;
@@ -285,6 +352,11 @@ fn base_fonts() -> egui::FontDefinitions {
     defs
 }
 
+/// A family the program carries itself: used when no installed font has the name.
+pub const BUILT_IN_FAMILY: &str = "Mountains of Christmas";
+static BUILT_IN_REGULAR: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Regular.ttf");
+static BUILT_IN_BOLD: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Bold.ttf");
+
 fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
     use egui::{FontData, FontDefinitions};
     use fontique::{Attributes, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, QueryFamily, QueryStatus, SourceCache, SourceCacheOptions};
@@ -309,8 +381,11 @@ fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
             FontData::from_blob(blob, f.index)
         })
     };
-    let normal = if family.is_empty() { None } else { pick(family, FontWeight::NORMAL) };
-    let bold = pick(family, if weight == Weight::Medium { FontWeight::MEDIUM } else { FontWeight::BOLD });
+    let built_in = family.eq_ignore_ascii_case(BUILT_IN_FAMILY);
+    let normal = if family.is_empty() { None } else { pick(family, FontWeight::NORMAL) }
+        .or_else(|| built_in.then(|| FontData::from_static(BUILT_IN_REGULAR)));
+    let bold = pick(family, if weight == Weight::Medium { FontWeight::MEDIUM } else { FontWeight::BOLD })
+        .or_else(|| built_in.then(|| FontData::from_static(BUILT_IN_BOLD)));
     let prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut bold_list = Vec::new();
     if let Some(d) = bold {
@@ -343,10 +418,13 @@ pub fn gutter(g: &GuiConf) -> Frame {
 /// A rounded card behind a panel's content: `panel_opacity` fill, optional border.
 pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
     let dark = ui.visuals().dark_mode;
-    let fill = match g.theme_preset.card(dark) {
-        Some(c) => rgb32(c),
-        None if dark => Color32::from_rgb(40, 40, 47),
-        None => Color32::WHITE,
+    let sys = system(ui.ctx());
+    let fill = match (for_mode(sys.as_ref(), dark).and_then(|c| c.surface), g.theme_preset.card(dark)) {
+        // a little lighter (or darker) than the window colour the system gave
+        (Some(s), _) => rgb32(color::mix(s, if dark { (255, 255, 255) } else { (0, 0, 0) }, if dark { 0.07 } else { 0.04 })),
+        (None, Some(c)) => rgb32(c),
+        (None, None) if dark => Color32::from_rgb(40, 40, 47),
+        (None, None) => Color32::WHITE,
     };
     let alpha = g.panel_opacity as f32 / 100.0 * (g.opacity as f32 / 100.0).max(0.0);
     let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
@@ -497,14 +575,32 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
             (Background::CoverBlur, "cover blur"),
             (Background::Gradient, "gradient"),
             (Background::Image, "picture"),
-            (Background::Particles, "embers"),
-            (Background::Fog, "fog"),
-            (Background::Bats, "fog and bats"),
-            (Background::Snow, "snow and lights"),
-            (Background::Eggs, "eggs"),
+            (Background::Sky, "sky"),
             (Background::Meadow, "meadow"),
+            (Background::Lawn, "lawn"),
         ],
     );
+    let fx_opts = [
+        (Effects::Auto, "automatic (the look's own)"),
+        (Effects::None, "none"),
+        (Effects::Snow, "snow"),
+        (Effects::Winter, "snow and lights"),
+        (Effects::Leaves, "autumn leaves"),
+        (Effects::Seeds, "dandelion seeds"),
+        (Effects::Wind, "wind"),
+        (Effects::Embers, "embers"),
+        (Effects::Fog, "fog"),
+        (Effects::Bats, "bats"),
+        (Effects::Haunt, "fog, embers and bats"),
+        (Effects::Pollen, "pollen"),
+        (Effects::Eggs, "eggs"),
+    ];
+    changed |= choice(ui, "Effects", &mut g.effects, &fx_opts);
+    let mut v = g.effects_intensity as u32;
+    if slider(ui, "Effect intensity", &mut v, 0..=100, "%") {
+        g.effects_intensity = v as u8;
+        changed = true;
+    }
     if g.background == Background::Image {
         ui.horizontal(|ui| {
             ui.label("Picture file");
@@ -530,6 +626,36 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
 
     ui.separator();
     ui.heading("Colour");
+    changed |= choice(
+        ui,
+        "Colours from",
+        &mut g.colors,
+        &[
+            (ColorsFrom::Off, "the look and the cover"),
+            (ColorsFrom::File, "a colour file (matugen, noctalia…)"),
+            (ColorsFrom::Gtk, "the GTK theme"),
+            (ColorsFrom::Auto, "a colour file, then the GTK theme"),
+        ],
+    );
+    if g.colors != ColorsFrom::Off {
+        if matches!(g.colors, ColorsFrom::File | ColorsFrom::Auto) {
+            ui.horizontal(|ui| {
+                ui.label("Colour file");
+                let buf = look.colors_edit.get_or_insert_with(|| g.colors_file.clone());
+                let r = ui.add(egui::TextEdit::singleline(buf).hint_text("empty = the usual places").desired_width(260.0));
+                if r.lost_focus() && buf.trim() != g.colors_file {
+                    g.colors_file = buf.trim().to_string();
+                    changed = true;
+                } else if !r.has_focus() && *buf != g.colors_file {
+                    *buf = g.colors_file.clone();
+                }
+            });
+        }
+        match look.system_source() {
+            Some(s) => ui.label(egui::RichText::new(format!("in use: {s} (its window colour, text and accent replace the look's)")).small().weak()),
+            None => ui.label(egui::RichText::new("nothing found yet; the look's colours are used").small().weak()),
+        };
+    }
     ui.horizontal(|ui| {
         ui.label("Accent");
         let mut cover = g.accent == Accent::Cover;
@@ -653,5 +779,48 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
         m.gui.clamp();
         let t = m.gui.write();
         m.save_settings(&[("gui", toml::Value::Table(t))]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sys(dark: Option<bool>) -> Colors {
+        Colors { surface: Some((20, 22, 30)), primary: Some((10, 200, 10)), text: Some((230, 230, 240)), dark, source: "test".into() }
+    }
+
+    #[test]
+    fn system_colours_replace_the_look_in_their_own_mode_only() {
+        let mut g = GuiConf::default();
+        g.apply_preset(music_display::guiconf::Preset::Christmas);
+        let c = sys(Some(true));
+        assert_eq!(base(&g, Some(&c), true), (20, 22, 30));
+        // the light mode keeps the look's own palette
+        assert_eq!(Some(base(&g, Some(&c), false)), g.theme_preset.base(false));
+        assert_eq!(Some(base(&g, None, true)), g.theme_preset.base(true));
+        // a source that does not say whether it is dark serves both
+        assert_eq!(base(&g, Some(&sys(None)), false), (20, 22, 30));
+        // the system accent beats the look's fixed one and the cover's; without it they stay
+        assert_eq!(accent_of(&g, Some((1, 2, 3)), Some(&c)), Some((10, 200, 10)));
+        assert_eq!(accent_of(&g, Some((1, 2, 3)), None), Some((242, 201, 76)));
+        let plain = GuiConf::default();
+        assert_eq!(accent_of(&plain, Some((1, 2, 3)), None), Some((1, 2, 3)));
+        assert_eq!(accent_of(&plain, None, None), None);
+        // a colour source with a surface and no accent leaves the accent alone
+        let only_surface = Colors { primary: None, ..sys(Some(true)) };
+        assert_eq!(accent_of(&g, None, Some(&only_surface)), Some((242, 201, 76)));
+    }
+
+    #[test]
+    fn the_built_in_family_is_there_when_no_installed_font_has_the_name() {
+        let defs = fonts(BUILT_IN_FAMILY, Weight::Bold);
+        assert!(defs.font_data.contains_key("md-user"));
+        assert!(defs.font_data.contains_key(BOLD));
+        let first = defs.families.get(&FontFamily::Proportional).and_then(|f| f.first()).cloned();
+        assert_eq!(first.as_deref(), Some("md-user"));
+        // another unknown family still just leaves the defaults
+        let defs = fonts("No Such Family Anywhere", Weight::Regular);
+        assert!(!defs.font_data.contains_key("md-user"));
     }
 }

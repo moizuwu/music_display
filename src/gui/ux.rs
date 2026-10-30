@@ -23,6 +23,8 @@ pub struct Ux {
     ann_rows: f32,
     /// The one-time "where do the lyrics go" question is waiting for an answer.
     pub ai_ask: bool,
+    /// The window is dark right now (what `System` resolved to, or the chosen theme).
+    pub dark_now: bool,
     /// What was saved last, for the brief "saved" feedback.
     pub saved: Option<(String, Instant)>,
     /// spotifyd started by this window (`use_spotifyd`).
@@ -42,6 +44,7 @@ impl Ux {
             vol_last: 0.5,
             ann_rows: 0.0,
             ai_ask: false,
+            dark_now: true,
             saved: None,
             spotifyd: None,
             logged_in: None,

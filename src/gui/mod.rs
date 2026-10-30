@@ -5,6 +5,7 @@ mod backdrop;
 mod browse;
 mod controls;
 mod extras;
+mod floating;
 mod footer;
 mod keys;
 mod library;
@@ -65,6 +66,10 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
                     repaint: cc.egui_ctx.clone(),
                     title_sent: None,
                     zoom_seen: 1.0,
+                    colors_rx: None,
+                    colors_watch: Vec::new(),
+                    colors_asked: None,
+                    colors_polled: std::time::Instant::now(),
                 }) as Box<dyn eframe::App>)
             }),
         )
@@ -82,6 +87,12 @@ struct Gui {
     title_sent: Option<String>,
     /// The zoom factor last seen, to notice the zoom keys.
     zoom_seen: f32,
+    /// The colours of the system (`colors`): the answer being fetched off the UI thread, the
+    /// files the last answer came from, and when they were asked and last looked at.
+    colors_rx: Option<std::sync::mpsc::Receiver<crate::syscolors::Found>>,
+    colors_watch: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    colors_asked: Option<(std::time::Instant, music_display::guiconf::ColorsFrom, String)>,
+    colors_polled: std::time::Instant,
 }
 
 impl Gui {
@@ -112,6 +123,52 @@ impl Gui {
         }
     }
 
+    /// Keep the system colours current: ask when the setting changes, look at the files the last
+    /// answer came from every few seconds (a wallpaper tool rewrites them), and ask again when one
+    /// changed or every 20 seconds (the desktop settings are not files).
+    fn refresh_colors(&mut self, ctx: &egui::Context) {
+        use music_display::guiconf::ColorsFrom;
+        use std::time::{Duration, Instant};
+        if let Some(rx) = &self.colors_rx {
+            if let Ok(found) = rx.try_recv() {
+                self.colors_rx = None;
+                self.colors_watch = found.watch;
+                self.look.set_system(found.colors);
+            }
+        }
+        let (mode, file) = (self.m.gui.colors, self.m.gui.colors_file.clone());
+        if mode == ColorsFrom::Off {
+            if self.look.system_source().is_some() {
+                self.look.set_system(None);
+            }
+            self.colors_asked = None;
+            return;
+        }
+        if self.colors_rx.is_some() {
+            return;
+        }
+        let due = match &self.colors_asked {
+            None => true,
+            Some((_, m, f)) if *m != mode || *f != file => true,
+            Some((at, _, _)) if self.colors_polled.elapsed() >= Duration::from_secs(3) => {
+                self.colors_polled = Instant::now();
+                at.elapsed() >= Duration::from_secs(20) || crate::syscolors::changed(&self.colors_watch)
+            }
+            _ => false,
+        };
+        if due {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.colors_rx = Some(rx);
+            self.colors_asked = Some((Instant::now(), mode, file.clone()));
+            self.colors_polled = Instant::now();
+            let c = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::syscolors::resolve(mode, &file));
+                c.request_repaint();
+            });
+        }
+    }
+
     fn pump(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             self.m.apply(ev);
@@ -130,6 +187,21 @@ impl Gui {
         }
         if self.m.note.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs() > 6) {
             self.m.note = None;
+        }
+    }
+
+    /// A panel inside a column starts at the size it was dragged to last time.
+    fn inner_size(&self, key: &str, default: f32) -> f32 {
+        self.m.gui.inner_sizes.get(key).map_or(default, |v| *v as f32)
+    }
+
+    /// Remember a dragged size: when the pointer is let go and the panel is not the size it
+    /// started with, the new size goes to `[gui] inner_sizes`.
+    fn remember_size(&mut self, ui: &egui::Ui, key: &str, default: f32, extent: f32) {
+        if ui.input(|i| i.pointer.any_released()) && (self.inner_size(key, default) - extent).abs() >= 2.0 {
+            self.m.gui.inner_sizes.insert(key.to_string(), extent.round().clamp(40.0, 4000.0) as u16);
+            let t = self.m.gui.write();
+            self.m.save_settings(&[("gui", toml::Value::Table(t))]);
         }
     }
 
@@ -156,11 +228,19 @@ impl Gui {
             PanelId::Lyrics => {
                 // cava docked under the lyrics
                 if self.m.cava_wanted() && self.m.layout.cava_under_lyrics && !self.is_popped(PanelId::Cava) {
-                    egui::Panel::bottom("cava_under").default_size(120.0).resizable(true).show(ui, |ui| extras::cava_panel(ui, &self.m));
+                    let r = egui::Panel::bottom("cava_under")
+                        .default_size(self.inner_size("cava", 120.0))
+                        .resizable(!self.m.gui.lock_layout)
+                        .show(ui, |ui| extras::cava_panel(ui, &self.m));
+                    self.remember_size(ui, "cava", 120.0, r.response.rect.height());
                 }
                 // with the annotations column open the diagrams live in it (above the notes)
                 if self.m.show_diagrams && !self.m.annotations_shown() && !self.is_popped(PanelId::Chords) {
-                    egui::Panel::right("diagrams").default_size(280.0).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
+                    let r = egui::Panel::right("diagrams")
+                        .default_size(self.inner_size("diagrams", 280.0))
+                        .resizable(!self.m.gui.lock_layout)
+                        .show(ui, |ui| view::diagrams(ui, &mut self.m));
+                    self.remember_size(ui, "diagrams", 280.0, r.response.rect.width());
                 }
                 lyrics_view::lyrics(ui, &mut self.m);
             }
@@ -169,7 +249,11 @@ impl Gui {
                 if self.m.show_diagrams && !self.is_popped(PanelId::Chords) {
                     // one column, two panels: the diagrams take the top half, the notes the rest
                     let half = ui.available_height() / 2.0;
-                    egui::Panel::top("diagrams_stack").default_size(half).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
+                    let r = egui::Panel::top("diagrams_stack")
+                        .default_size(self.inner_size("stack", half))
+                        .resizable(!self.m.gui.lock_layout)
+                        .show(ui, |ui| view::diagrams(ui, &mut self.m));
+                    self.remember_size(ui, "stack", half, r.response.rect.height());
                 }
                 view::annotations(ui, &mut self.m);
             }
@@ -193,6 +277,7 @@ impl eframe::App for Gui {
         }
         // the clock moves the lyrics: redraw about 30 times a second while playing
         self.window_keys(ctx);
+        self.refresh_colors(ctx);
         // a moving background only runs while the window has the focus
         let moving = style::Look::animated(&self.m.gui) && ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let fast = self.m.playing() || self.m.cava_wanted() || moving;
@@ -212,7 +297,9 @@ impl eframe::App for Gui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let g = self.m.gui.clone();
         self.look.apply(ui.ctx(), &g);
+        self.m.ux.dark_now = ui.visuals().dark_mode;
         self.look.paint_background(ui, &g);
+        self.look.paint_effects(ui, &g);
         if g.theme_preset == music_display::guiconf::Preset::Christmas {
             let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("look-extra"));
             backdrop::figure(&ui.ctx().layer_painter(layer), ui.ctx().content_rect(), g.opacity as f32 / 100.0);
@@ -230,6 +317,9 @@ impl eframe::App for Gui {
                             }
                         }
                     });
+                    if ui.button(if self.m.ux.dark_now { "light" } else { "dark" }).on_hover_text("dark / light theme (v)").clicked() {
+                        self.m.toggle_theme();
+                    }
                     if ui.button("?").on_hover_text("keys (?)").clicked() {
                         self.m.ux.help = !self.m.ux.help;
                     }
@@ -285,7 +375,9 @@ impl eframe::App for Gui {
             // dragging the border stores the new share
             let extent = if vertical { resp.response.rect.height() } else { resp.response.rect.width() };
             let new = (extent / total.max(1.0) * 100.0).round() as u16;
-            if resp.response.drag_stopped() && self.m.layout.size_of(*id) != Some(new) {
+            let shown = self.m.layout.size_of(*id).unwrap_or(if *id == PanelId::Metadata { 34 } else { 25 });
+            let released = ui.input(|i| i.pointer.any_released());
+            if (resp.response.drag_stopped() || released) && new.abs_diff(shown) >= 1 && self.m.layout.size_of(*id) != Some(new) {
                 self.m.layout.set_size(*id, new);
                 self.m.save_layout();
             }

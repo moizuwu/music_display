@@ -520,7 +520,10 @@ fn ai_provider_name(args: &Args) -> String {
 impl super::Gui {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.m.ux.s.open;
-        egui::Window::new("Settings").open(&mut open).default_width(440.0).default_height(520.0).show(ctx, |ui| {
+        let g = self.m.gui.clone();
+        // the window draws with the look too, so it is lent to it for the time being
+        let mut look = std::mem::take(&mut self.look);
+        super::floating::window(ctx, &mut look, &g, "settings", "Settings", [480.0, 600.0], &mut open, |ui, look| {
             ui.horizontal_wrapped(|ui| {
                 for (t, name) in Tab::ALL {
                     ui.selectable_value(&mut self.m.ux.s.tab, t, name);
@@ -538,7 +541,7 @@ impl super::Gui {
                     Tab::Spotify => spotify(ui, &mut self.m),
                     Tab::Appearance => {
                         weak(ui, &format!("Only the window's own look lives in [gui] of config.toml. `transparent` in the main config sets the opacity to {TRANSPARENT_OPACITY} % when [gui] has none; the accent follows the cover unless you pick a fixed colour. Read at start (restart needed): {}.", RESTART_KEYS.join(", ")));
-                        style_tab(ui, self);
+                        super::style::appearance(ui, &mut self.m, look);
                     }
                     Tab::Layout => {
                         self.layout_editor(ui);
@@ -553,12 +556,9 @@ impl super::Gui {
                 };
             });
         });
+        self.look = look;
         self.m.ux.s.open = open;
     }
-}
-
-fn style_tab(ui: &mut Ui, g: &mut super::Gui) {
-    super::style::appearance(ui, &mut g.m, &mut g.look);
 }
 
 fn general(ui: &mut Ui, m: &mut Model) {
@@ -661,6 +661,20 @@ fn lyrics(ui: &mut Ui, m: &mut Model) {
     if done {
         m.save_lyric_numbers();
     }
+    let places = [
+        (MemberPosition::Auto, "automatic (under the line)"),
+        (MemberPosition::Below, "under the line"),
+        (MemberPosition::Above, "above the line"),
+        (MemberPosition::Inline, "in front of the line"),
+    ];
+    if let Some(v) = combo(ui, "mpos", "Place the member parts", &m.args.member_position, &places) {
+        m.set_member_position(v);
+    }
+    weak(ui, "\"In front\" needs left-aligned lyrics. The size is in the Appearance tab.");
+    if let Some(v) = check(ui, "Try other lyric sites (NetEase, lyrics.ovh, Genius) when lrclib has none", m.args.lyrics_fallback) {
+        m.args.lyrics_fallback = v;
+        m.persist("Other lyric sites", &[("lyrics_fallback", v.into())]);
+    }
     let mut off = m.args.offset;
     let (och, odone) = slider(ui, "Default lyric offset", &mut off, -10.0..=10.0, " s");
     if och {
@@ -731,16 +745,6 @@ fn chords(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = check(ui, "Member parts: who sings which line (experimental)", m.args.member_parts) {
         m.set_member_parts(v);
     }
-    let places = [
-        (MemberPosition::Auto, "automatic (under the line)"),
-        (MemberPosition::Below, "under the line"),
-        (MemberPosition::Above, "above the line"),
-        (MemberPosition::Inline, "in front of the line"),
-    ];
-    if let Some(v) = combo(ui, "mpos", "Place the member parts", &m.args.member_position, &places) {
-        m.set_member_position(v);
-    }
-    weak(ui, "\"In front\" needs left-aligned lyrics. The size is in the Appearance tab.");
 }
 
 fn translation(ui: &mut Ui, m: &mut Model) {

@@ -1306,7 +1306,7 @@ fn scripted_site(routes: Vec<(&'static str, Vec<R>)>) -> (String, std::sync::Arc
 }
 
 fn fast() -> lyrics::Policy {
-    lyrics::Policy { retries: 3, backoff: Duration::from_millis(1) }
+    lyrics::Policy { retries: 3, backoff: Duration::from_millis(1), extra: None }
 }
 
 fn run_lyrics(base: &str, policy: lyrics::Policy) -> lyrics::Lyrics {
@@ -4021,6 +4021,21 @@ async fn ai_that_keeps_failing_falls_back_to_the_standard_engine_and_says_so() {
 }
 
 #[tokio::test]
+async fn when_google_fails_after_the_ai_the_error_still_names_the_ai_reason() {
+    let (site, _log) = scripted_site(vec![
+        ("/chat/completions", vec![chat_reply(r#"["only one"]"#)]),
+        ("/g/dict", vec![R::Http(429, "", String::new())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+    ]);
+    let (mut app, mut rx) = ai_app(&site, "ai_both_fail");
+    app.translate_base = Some(format!("{site}/g"));
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| matches!(a.translate_state, app::TranslateState::Failed(_))).await;
+    let app::TranslateState::Failed(e) = &app.translate_state else { unreachable!() };
+    assert!(e.contains("AI failed") && e.contains("translation failed"), "{e}");
+}
+
+#[tokio::test]
 async fn ai_without_a_model_uses_the_standard_engine_with_a_note() {
     let (site, _log) = scripted_site(vec![("/g", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["x","y"]],null,"sv"]"#.into())])]);
     let (mut app, _rx) = ai_app(&site, "ai_nomodel");
@@ -4602,4 +4617,88 @@ async fn translation_and_member_tag_go_where_the_settings_say() {
     app.args.translation_position = TP::Above;
     let screen = render(&mut app, 60, 20);
     assert!(screen.iter().any(|r| r.contains("[Jimin") && r.contains("hello there")), "{screen:#?}");
+}
+
+/// The lyric sites of a test server (the strings live as long as the process, like the real ones).
+fn extra_at(base: &str) -> lyrics::Policy {
+    let leak: &'static str = Box::leak(base.to_string().into_boxed_str());
+    lyrics::Policy { extra: Some(music_display::lyricsrc::Extra { netease: leak, ovh: leak, genius: leak }), ..fast() }
+}
+
+const NETEASE_FOUND: &str = r#"{"result":{"songs":[{"id":77,"name":"Enter Sandman","artists":[{"name":"Metallica"}],"duration":331000}]}}"#;
+const NETEASE_LRC: &str = r#"{"lrc":{"lyric":"[00:01.00]Say your prayers little one\n[00:05.00]Dont forget my son\n[00:09.00]To include everyone\n[00:12.00]Tuck you in warm and tight"}}"#;
+const JSON_CT: &str = "Content-Type: application/json\r\n";
+
+#[test]
+fn another_site_is_asked_when_lrclib_has_nothing() {
+    let (base, log) = scripted_site(vec![
+        ("/api/search/get/web", vec![R::Http(200, JSON_CT, NETEASE_FOUND.into())]),
+        ("/api/song/lyric", vec![R::Http(200, JSON_CT, NETEASE_LRC.into())]),
+    ]);
+    // without the setting nothing else is asked
+    assert!(matches!(run_lyrics(&base, fast()), lyrics::Lyrics::NotFound));
+    assert!(!log.lock().unwrap().iter().any(|l| l.contains("netease") || l.contains("song/lyric")));
+    // with it, the synced lyrics of the other site
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Synced(ref v) if v.len() == 4), "{l:?}");
+}
+
+#[test]
+fn lrclib_failing_more_often_than_allowed_still_falls_through() {
+    let body = r#"{"lyrics":"Exit light\nEnter night\nTake my hand\nWe're off to never-never land\nMore here"}"#;
+    let (base, log) = scripted_site(vec![
+        ("/api/", vec![R::Http(503, "", String::new())]),
+        ("/v1/Metallica/", vec![R::Http(200, JSON_CT, body.into())]),
+    ]);
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Plain(ref v) if v.len() == 5 && v[0] == "Exit light"), "{l:?}");
+    // lrclib was asked (and retried) first
+    assert!(log.lock().unwrap().iter().filter(|l| l.contains("/api/get")).count() >= 4);
+}
+
+#[test]
+fn a_different_song_from_another_site_is_not_taken() {
+    let wrong = r#"{"result":{"songs":[{"id":1,"name":"Nothing Else Matters","artists":[{"name":"Metallica"}],"duration":388000},{"id":2,"name":"Enter Sandman","artists":[{"name":"Somebody Else"}],"duration":331000},{"id":3,"name":"Enter Sandman","artists":[{"name":"Metallica"}],"duration":120000}]}}"#;
+    let (base, log) = scripted_site(vec![("/api/search/get/web", vec![R::Http(200, JSON_CT, wrong.into())])]);
+    assert!(matches!(run_lyrics(&base, extra_at(&base)), lyrics::Lyrics::NotFound));
+    assert!(!log.lock().unwrap().iter().any(|l| l.contains("song/lyric")), "no lyrics were fetched for a wrong match");
+}
+
+#[test]
+fn the_genius_page_is_the_last_resort_and_loses_its_section_headers() {
+    let search = r#"{"response":{"sections":[{"hits":[{"type":"song","result":{"title":"Enter Sandman","path":"/Metallica-enter-sandman-lyrics","primary_artist":{"name":"Metallica"}}}]}]}}"#;
+    let page = r#"<div data-lyrics-container="true">[Verse 1]<br/>Say your prayers little one<br/>Dont forget my son<br/>To include everyone<br/>Tuck you in warm and tight</div>"#;
+    let (base, _log) = scripted_site(vec![
+        ("/api/search/multi", vec![R::Http(200, JSON_CT, search.into())]),
+        ("/Metallica-enter-sandman-lyrics", vec![R::Http(200, "", page.into())]),
+    ]);
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Plain(ref v) if v.len() == 4 && v[0].starts_with("Say your prayers")), "{l:?}");
+}
+
+#[tokio::test]
+async fn the_terminal_ui_follows_a_colour_file_that_changes() {
+    use clap::Parser;
+    util::enter_test_mode();
+    let dir = std::env::temp_dir().join(format!("md-theme-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("colors.json");
+    std::fs::write(&file, r##"{"mSurface":"#101010","mPrimary":"#ff0000"}"##).unwrap();
+    let args = cli::Args::parse_from(["music_display", "--colors", file.to_str().unwrap()]);
+    let theme = theme::load(&args);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    assert_eq!(app.theme.primary, Some((255, 0, 0)));
+    // nothing changed: nothing is read again
+    app.dirty = false;
+    app.refresh_theme_now();
+    assert!(!app.dirty);
+    // a wallpaper tool writes new colours
+    std::fs::write(&file, r##"{"mSurface":"#f0f0f0","mPrimary":"#0000ff"}"##).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+    app.refresh_theme_now();
+    assert!(app.dirty);
+    assert_eq!((app.theme.surface, app.theme.primary), (Some((240, 240, 240)), Some((0, 0, 255))));
+    std::fs::remove_dir_all(&dir).ok();
 }

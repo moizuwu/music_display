@@ -8,6 +8,12 @@ which turns the `Unreleased` section into that version.
 ## [Unreleased]
 
 ### Added
+- `colors` (`off`, `file`, `gtk`, `auto`) and `colors_file` in `[gui]`: the window can take its base colour, text and accent from a colour file (matugen / noctalia, the files the terminal UI reads) or the GTK theme, and follows them when they change; the terminal UI re-reads its colour file when it changes.
+- `effects` and `effects_intensity` in `[gui]`: snow, autumn leaves, dandelion seeds, wind, pollen, embers, fog, bats and eggs as a layer of their own over any background and look (`auto` = the look's own); the backgrounds are now `solid`, `cover-blur`, `gradient`, `image`, `sky`, `meadow` and `lawn`, and files with the old moving backgrounds keep working.
+- `lyrics_fallback` (on by default): when lrclib has no lyrics, or fails more often than `lyrics_retries` allows, NetEase (synced), lyrics.ovh and the plain lyrics of the Genius page are tried; a find from them is looked up again after a day. Config key, flag, settings row.
+- A dark / light toggle for the window (`v`, a top-bar button) that works with every look; Halloween has a light palette now, picking a look keeps the theme.
+- The settings, keys, library, devices and AI-question windows are windows of their own with the window's background and opacity; the sizes of panels inside a column are remembered.
+- The translated line and the member tag of the active line light up with it, and the glow covers all three.
 - GUI looks Christmas, Easter and Midsummer next to Halloween, with the backgrounds `snow`, `eggs` and `meadow`; the light looks also work in the dark theme.
 - Placement and size of the translated line and of the member tag: `translation_position` (`below`, `above`), `member_position` (`auto`, `below`, `above`, `inline`) in the terminal UI and the window, and `translation_size` / `member_size` in `[gui]`.
 - `auto_zero_capo`: a sheet that says "capo 2" is shown with capo 0 (the sounding chords); your own capo for a track still wins. Config key, `--auto-zero-capo`, settings row and GUI checkbox.

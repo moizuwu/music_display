@@ -451,7 +451,11 @@ impl Model {
         }
         {
             let (c, tx, a, t, al) = (c.clone(), tx.clone(), a.clone(), t.clone(), al.clone());
-            let policy = music_display::lyrics::Policy { retries: self.args.lyrics_retries, ..Default::default() };
+            let policy = music_display::lyrics::Policy {
+                retries: self.args.lyrics_retries,
+                extra: self.args.lyrics_fallback.then(Default::default),
+                ..Default::default()
+            };
             self.tasks.push(tokio::spawn(async move {
                 let lyrics = music_display::lyrics::fetch(c, a, t, al, len, policy).await;
                 let _ = tx.send(AppEvent::Lyrics { key, lyrics });

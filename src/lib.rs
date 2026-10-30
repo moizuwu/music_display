@@ -17,6 +17,7 @@ pub mod smtc;
 pub mod spotify;
 pub mod spotifyd;
 pub mod lyrics;
+pub mod lyricsrc;
 pub mod translate;
 pub mod chords;
 pub mod ug;

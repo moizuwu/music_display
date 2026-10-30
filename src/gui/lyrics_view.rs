@@ -410,42 +410,45 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             _ => accent.gamma_multiply(0.7),
         });
         let lit = (active && karaoke && text.trim() != "♪").then(|| (m.line_fraction(), accent));
+        // the translation and the member tag of the active line light up with the line itself
+        let part_color = if active { strong } else { weak_c };
         let has_tr = both && trans.is_some_and(|t| t.trim() != orig.trim());
         let member_tag = cur
             .filter(|c| i.abs_diff(*c) <= 2)
             .and_then(|_| m.members.get(i))
             .filter(|x| !x.is_empty())
             .map(|mem| {
-                let tag = RichText::new(format!("[{}]", mem.join(" · "))).color(weak_c);
+                let tag = RichText::new(format!("[{}]", mem.join(" · "))).color(part_color);
                 if g.member_size > 0 { tag.size(g.member_size as f32) } else { tag.small() }
             });
         let (parts, inline) = line_parts(m.args.translation_position, m.args.member_position, has_tr, member_tag.is_some(), center);
         let mut line_resp = None;
+        // the halo goes behind all parts of the active line: its slot is reserved first, the
+        // rectangle is what the parts took
+        let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
+        let mut group: Option<egui::Rect> = None;
+        let mut grow = |r: &egui::Response| group = Some(group.map_or(r.rect, |g| g.union(r.rect)));
         for part in parts {
             match part {
                 Part::Member => {
                     if let Some(tag) = member_tag.clone() {
-                        if center {
-                            ui.vertical_centered(|ui| ui.label(tag));
-                        } else {
-                            ui.label(tag);
-                        }
+                        let r = if center { ui.vertical_centered(|ui| ui.label(tag)).inner } else { ui.label(tag) };
+                        grow(&r);
                     }
                 }
                 Part::Translation => {
                     if let Some(tr_text) = trans {
-                        let txt = RichText::new(tr_text).italics().color(weak_c);
+                        let txt = RichText::new(tr_text).italics().color(part_color);
                         let txt = if g.translation_size > 0 { txt.size(g.translation_size as f32) } else { txt };
-                        if center {
-                            ui.vertical_centered(|ui| ui.add(egui::Label::new(txt).wrap()));
+                        let r = if center {
+                            ui.vertical_centered(|ui| ui.add(egui::Label::new(txt).wrap())).inner
                         } else {
-                            ui.add(egui::Label::new(txt).wrap());
-                        }
+                            ui.add(egui::Label::new(txt).wrap())
+                        };
+                        grow(&r);
                     }
                 }
                 Part::Line => {
-                    // a halo behind the active line (`lyrics_glow`): the slot is reserved first so it paints under the text
-                    let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
                     let spec = Spec { text, chords: &line_chords, chord_color, font: font.clone(), color, chord_font: chord_font.clone(), lit, center };
                     let resp = match (inline, member_tag.clone()) {
                         // the tag in front of the line, on its first row; the line keeps its own width
@@ -456,17 +459,7 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
                         .inner,
                         _ => draw_line(ui, &spec),
                     };
-                    if let Some(slot) = halo {
-                        let k = g.lyrics_glow as f32 / 100.0;
-                        let rings = (1..=6u8)
-                            .rev()
-                            .map(|r| {
-                                let grow = r as f32 * 4.0;
-                                egui::Shape::rect_filled(resp.rect.expand(grow), egui::CornerRadius::same((g.corner_radius as f32 + grow) as u8), accent.gamma_multiply(k * 0.07))
-                            })
-                            .collect();
-                        ui.painter().set(slot, egui::Shape::Vec(rings));
-                    }
+                    grow(&resp);
                     if synced.is_some() && resp.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         ui.painter().rect_filled(resp.rect.expand(3.0), g.corner_radius.min(8), base.gamma_multiply(0.07));
@@ -476,6 +469,17 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             }
         }
         let Some(resp) = line_resp else { continue };
+        if let (Some(slot), Some(rect)) = (halo, group) {
+            let k = g.lyrics_glow as f32 / 100.0;
+            let rings = (1..=6u8)
+                .rev()
+                .map(|r| {
+                    let spread = r as f32 * 4.0;
+                    egui::Shape::rect_filled(rect.expand(spread), egui::CornerRadius::same((g.corner_radius as f32 + spread) as u8), accent.gamma_multiply(k * 0.07))
+                })
+                .collect();
+            ui.painter().set(slot, egui::Shape::Vec(rings));
+        }
         if let Some(l) = synced {
             if resp.clicked() {
                 act.seek_to = Some((l[i].0 - m.offset).max(0.0));

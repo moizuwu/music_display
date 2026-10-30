@@ -27,20 +27,37 @@ choice!(
     Theme { System = "system", Dark = "dark", Light = "light" }
 );
 choice!(
-    /// What is painted behind the panels. `Image` is the file named by `background_image`; the rest
-    /// are drawn live (no files): rising embers, drifting fog, fog with bats, falling snow with a
-    /// string of lights, painted eggs, a summer meadow.
+    /// What is painted behind the panels. `Image` is the file named by `background_image`; `Sky` is
+    /// a sky with a low sun, `Meadow` the sky with flowers and `Lawn` blades of grass. Things that
+    /// fall or drift on top of it are the `effects`.
     Background {
         Solid = "solid",
         CoverBlur = "cover-blur",
         Gradient = "gradient",
         Image = "image",
-        Particles = "particles",
+        Sky = "sky",
+        Meadow = "meadow",
+        Lawn = "lawn",
+    }
+);
+choice!(
+    /// What moves over the background (drawn live, no files). `Auto` is the effect of the look:
+    /// Halloween fog, embers and bats; Christmas snow and a string of lights; Easter dandelion
+    /// seeds and eggs; Midsummer pollen and wind; no look, nothing.
+    Effects {
+        Auto = "auto",
+        None = "none",
+        Snow = "snow",
+        Winter = "winter",
+        Leaves = "leaves",
+        Seeds = "seeds",
+        Wind = "wind",
+        Embers = "embers",
         Fog = "fog",
         Bats = "bats",
-        Snow = "snow",
+        Haunt = "haunt",
+        Pollen = "pollen",
         Eggs = "eggs",
-        Meadow = "meadow",
     }
 );
 choice!(
@@ -54,6 +71,11 @@ choice!(
         Easter = "easter",
         Midsummer = "midsummer",
     }
+);
+choice!(
+    /// Where the window takes its colours from besides the look: `File` a colour file of a
+    /// wallpaper tool (matugen, noctalia…), `Gtk` the GTK theme, `Auto` the file, then GTK.
+    ColorsFrom { Off = "off", File = "file", Gtk = "gtk", Auto = "auto" }
 );
 choice!(Align { Left = "left", Center = "center" });
 choice!(Animation { Smooth = "smooth", Instant = "instant" });
@@ -91,6 +113,14 @@ pub struct GuiConf {
     pub theme: Theme,
     pub accent: Accent,
     pub background: Background,
+    /// What moves over the background, and how much (0-100 %: how many pieces, how strong).
+    pub effects: Effects,
+    pub effects_intensity: u8,
+    /// Colours of the system (off by default): the window's base colour, text and accent
+    /// follow them, whatever look is on. `colors_file` names the colour file (empty = the usual
+    /// places the terminal UI looks at).
+    pub colors: ColorsFrom,
+    pub colors_file: String,
     /// A system font family; empty = the built-in one.
     pub font: String,
     /// Sizes in points.
@@ -122,6 +152,10 @@ pub struct GuiConf {
     pub translation_size: u16,
     /// Size of the member tag in points; 0 = small.
     pub member_size: u16,
+    /// Sizes in pixels of the panels inside a column, remembered when they are dragged:
+    /// `cava` (its height under the lyrics), `diagrams` (their width beside the lyrics) and
+    /// `stack` (the height of the diagrams above the notes).
+    pub inner_sizes: std::collections::BTreeMap<String, u16>,
     /// Panels shown in a window of their own (layout names like `lyrics`, `cava`).
     pub popped: Vec<String>,
 }
@@ -134,6 +168,10 @@ impl Default for GuiConf {
             theme: Theme::System,
             accent: Accent::Cover,
             background: Background::Solid,
+            effects: Effects::Auto,
+            effects_intensity: 60,
+            colors: ColorsFrom::Off,
+            colors_file: String::new(),
             font: String::new(),
             lyrics_size: 18,
             active_size: 24,
@@ -155,6 +193,7 @@ impl Default for GuiConf {
             lock_layout: false,
             translation_size: 0,
             member_size: 0,
+            inner_sizes: Default::default(),
             popped: Vec::new(),
         }
     }
@@ -164,8 +203,9 @@ impl Preset {
     /// The window colour this look uses instead of the plain dark / light one.
     pub fn base(self, dark: bool) -> Option<Rgb> {
         match (self, dark) {
-            (Preset::None, _) | (Preset::Halloween, false) => None,
+            (Preset::None, _) => None,
             (Preset::Halloween, true) => Some((17, 9, 24)),
+            (Preset::Halloween, false) => Some((250, 241, 230)),
             (Preset::Christmas, true) => Some((9, 23, 18)),
             (Preset::Christmas, false) => Some((236, 244, 238)),
             (Preset::Easter, true) => Some((30, 26, 38)),
@@ -178,8 +218,9 @@ impl Preset {
     /// The fill of the panel cards in this look, when it has its own.
     pub fn card(self, dark: bool) -> Option<Rgb> {
         match (self, dark) {
-            (Preset::None, _) | (Preset::Halloween, false) => None,
+            (Preset::None, _) => None,
             (Preset::Halloween, true) => Some((38, 20, 50)),
+            (Preset::Halloween, false) => Some((255, 249, 240)),
             (Preset::Christmas, true) => Some((22, 44, 36)),
             (Preset::Christmas, false) => Some((250, 253, 250)),
             (Preset::Easter, true) => Some((44, 38, 56)),
@@ -190,12 +231,72 @@ impl Preset {
     }
 }
 
-const KEYS: &str = "opacity, panel_opacity, theme, accent, background, font, lyrics_size, active_size, meta_size, \
-active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, translation_size, member_size, popped";
+/// A background of an older version: the colour/scenery it is now, and the effect it had. The
+/// meadow keeps its name and gets back its pollen.
+fn legacy_background(s: &str) -> Option<(Background, Option<Effects>)> {
+    Some(match s.trim().to_ascii_lowercase().as_str() {
+        "particles" => (Background::Solid, Some(Effects::Embers)),
+        "fog" => (Background::Solid, Some(Effects::Fog)),
+        "bats" => (Background::Solid, Some(Effects::Haunt)),
+        "snow" => (Background::Solid, Some(Effects::Winter)),
+        "eggs" => (Background::Lawn, Some(Effects::Eggs)),
+        _ => return None,
+    })
+}
+
+/// One thing that moves over the background.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fx {
+    Snow,
+    Lights,
+    Leaves,
+    Seeds,
+    Wind,
+    Embers,
+    Fog,
+    Bats,
+    Pollen,
+    Eggs,
+}
 
 impl GuiConf {
-    /// Set the values the look is made of (everything else is left as the user has it).
+    /// The effects to draw now: what `effects` says, `auto` being the look's own. Empty when the
+    /// intensity is zero.
+    pub fn active_effects(&self) -> Vec<Fx> {
+        if self.effects_intensity == 0 {
+            return Vec::new();
+        }
+        match self.effects {
+            Effects::None => vec![],
+            Effects::Snow => vec![Fx::Snow],
+            Effects::Winter => vec![Fx::Snow, Fx::Lights],
+            Effects::Leaves => vec![Fx::Leaves],
+            Effects::Seeds => vec![Fx::Seeds],
+            Effects::Wind => vec![Fx::Wind],
+            Effects::Embers => vec![Fx::Embers],
+            Effects::Fog => vec![Fx::Fog],
+            Effects::Bats => vec![Fx::Bats],
+            Effects::Haunt => vec![Fx::Fog, Fx::Embers, Fx::Bats],
+            Effects::Pollen => vec![Fx::Pollen],
+            Effects::Eggs => vec![Fx::Eggs],
+            Effects::Auto => match self.theme_preset {
+                Preset::None => vec![],
+                Preset::Halloween => vec![Fx::Fog, Fx::Embers, Fx::Bats],
+                Preset::Christmas => vec![Fx::Snow, Fx::Lights],
+                Preset::Easter => vec![Fx::Seeds, Fx::Eggs],
+                Preset::Midsummer => vec![Fx::Pollen, Fx::Wind],
+            },
+        }
+    }
+}
+
+const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, font, lyrics_size, active_size, meta_size, \
+active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
+remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, translation_size, member_size, inner_sizes, popped";
+
+impl GuiConf {
+    /// Set the values the look is made of (everything else is left as the user has it, the
+    /// dark / light theme included: every look has a palette for both).
     pub fn apply_preset(&mut self, p: Preset) {
         if self.theme_preset == Preset::Christmas && p != Preset::Christmas {
             self.font.clear();
@@ -204,9 +305,9 @@ impl GuiConf {
         match p {
             Preset::None => {}
             Preset::Halloween => {
-                self.theme = Theme::Dark;
                 self.accent = Accent::Fixed((255, 122, 24));
-                self.background = Background::Bats;
+                self.background = Background::Solid;
+                self.effects = Effects::Auto;
                 self.panel_opacity = 82;
                 self.corner_radius = 14;
                 self.panel_borders = true;
@@ -215,21 +316,21 @@ impl GuiConf {
                 self.lyrics_glow = 60;
             }
             Preset::Christmas => {
-                self.theme = Theme::Dark;
                 self.accent = Accent::Fixed((242, 201, 76));
-                self.background = Background::Snow;
+                self.background = Background::Solid;
+                self.effects = Effects::Auto;
                 self.panel_opacity = 85;
                 self.corner_radius = 12;
                 self.panel_borders = true;
                 self.active_weight = Weight::Bold;
                 self.inactive_fade = 50;
                 self.lyrics_glow = 40;
-                self.font = "Comic Sans MS".into();
+                self.font = "Mountains of Christmas".into();
             }
             Preset::Easter => {
-                self.theme = Theme::Light;
                 self.accent = Accent::Fixed((214, 92, 150));
-                self.background = Background::Eggs;
+                self.background = Background::Lawn;
+                self.effects = Effects::Auto;
                 self.panel_opacity = 88;
                 self.corner_radius = 18;
                 self.panel_borders = true;
@@ -238,9 +339,9 @@ impl GuiConf {
                 self.lyrics_glow = 0;
             }
             Preset::Midsummer => {
-                self.theme = Theme::Light;
                 self.accent = Accent::Fixed((0, 106, 167));
                 self.background = Background::Meadow;
+                self.effects = Effects::Auto;
                 self.panel_opacity = 85;
                 self.corner_radius = 16;
                 self.panel_borders = true;
@@ -264,6 +365,7 @@ impl GuiConf {
         self.inactive_fade = self.inactive_fade.min(100);
         self.ui_scale = self.ui_scale.clamp(50, 200);
         self.lyrics_glow = self.lyrics_glow.min(100);
+        self.effects_intensity = self.effects_intensity.min(100);
         // 0 means "automatic"; anything else is a size in points
         if self.translation_size != 0 {
             self.translation_size = self.translation_size.clamp(8, 64);
@@ -272,6 +374,7 @@ impl GuiConf {
             self.member_size = self.member_size.clamp(8, 40);
         }
         self.background_image = self.background_image.trim().to_string();
+        self.colors_file = self.colors_file.trim().to_string();
         self.popped.dedup();
         self.font = self.font.trim().to_string();
     }
@@ -306,7 +409,23 @@ impl GuiConf {
                 "ui_scale" => self.ui_scale = num(&mut int, 50, 200, self.ui_scale as i64) as u16,
                 "translation_size" => self.translation_size = num(&mut int, 0, 64, self.translation_size as i64) as u16,
                 "member_size" => self.member_size = num(&mut int, 0, 40, self.member_size as i64) as u16,
+                "effects_intensity" => self.effects_intensity = num(&mut int, 0, 100, self.effects_intensity as i64) as u8,
                 "lyrics_glow" => self.lyrics_glow = num(&mut int, 0, 100, self.lyrics_glow as i64) as u8,
+                "inner_sizes" => match v.as_table() {
+                    Some(t) => {
+                        self.inner_sizes = t
+                            .iter()
+                            .filter_map(|(k, v)| match v.as_integer() {
+                                Some(n) => Some((k.clone(), n.clamp(40, 4000) as u16)),
+                                None => {
+                                    warn(format!("[gui] inner_sizes.{k}: expected a whole number; ignored"));
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                    None => warn(format!("[gui] {k}: expected a table; ignored")),
+                },
                 "popped" => match v.as_array() {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
                     None => warn(format!("[gui] {k}: expected a list of panel names; ignored")),
@@ -325,7 +444,7 @@ impl GuiConf {
                     }
                 }
                 "theme" | "accent" | "background" | "font" | "active_weight" | "lyrics_align" | "lyrics_animation" | "theme_preset"
-                | "background_image" => {
+                | "background_image" | "effects" | "colors" | "colors_file" => {
                     let Some(s) = v.as_str() else {
                         warn(format!("[gui] {k}: expected a string; using the default"));
                         continue;
@@ -333,7 +452,24 @@ impl GuiConf {
                     let ok = match k.as_str() {
                         "theme" => Theme::parse(s).map(|x| self.theme = x).is_some(),
                         "accent" => Accent::parse(s).map(|x| self.accent = x).is_some(),
-                        "background" => Background::parse(s).map(|x| self.background = x).is_some(),
+                        "background" => match Background::parse(s).map(|b| (b, (b == Background::Meadow).then_some(Effects::Pollen))).or_else(|| legacy_background(s)) {
+                            // (the old moving backgrounds: the effect they had is kept, unless
+                            // the file names one of its own, which comes later in the table)
+                            Some((b, fx)) => {
+                                self.background = b;
+                                if let Some(fx) = fx {
+                                    self.effects = fx;
+                                }
+                                true
+                            }
+                            None => false,
+                        },
+                        "effects" => Effects::parse(s).map(|x| self.effects = x).is_some(),
+                        "colors" => ColorsFrom::parse(s).map(|x| self.colors = x).is_some(),
+                        "colors_file" => {
+                            self.colors_file = s.trim().to_string();
+                            true
+                        }
                         "active_weight" => Weight::parse(s).map(|x| self.active_weight = x).is_some(),
                         "lyrics_align" => Align::parse(s).map(|x| self.lyrics_align = x).is_some(),
                         "lyrics_animation" => Animation::parse(s).map(|x| self.lyrics_animation = x).is_some(),
@@ -368,6 +504,10 @@ impl GuiConf {
         put("theme", self.theme.name().into());
         put("accent", self.accent.name().into());
         put("background", self.background.name().into());
+        put("effects", self.effects.name().into());
+        put("colors", self.colors.name().into());
+        put("colors_file", self.colors_file.clone().into());
+        put("effects_intensity", (self.effects_intensity as i64).into());
         put("font", self.font.clone().into());
         put("lyrics_size", (self.lyrics_size as i64).into());
         put("active_size", (self.active_size as i64).into());
@@ -387,6 +527,10 @@ impl GuiConf {
         put("background_image", self.background_image.clone().into());
         put("lyrics_glow", (self.lyrics_glow as i64).into());
         put("lock_layout", self.lock_layout.into());
+        put(
+            "inner_sizes",
+            toml::Value::Table(self.inner_sizes.iter().map(|(k, v)| (k.clone(), toml::Value::Integer(*v as i64))).collect()),
+        );
         put("translation_size", (self.translation_size as i64).into());
         put("member_size", (self.member_size as i64).into());
         put("popped", toml::Value::Array(self.popped.iter().map(|s| s.clone().into()).collect()));
@@ -395,7 +539,10 @@ impl GuiConf {
 
     /// The `[gui]` block `--print-config` shows (valid config to paste back).
     pub fn render(&self) -> String {
-        format!("\n[gui]\n{}", toml::to_string(&self.write()).unwrap_or_default())
+        // (as a table of its own, so the nested `inner_sizes` comes out as `[gui.inner_sizes]`)
+        let mut root = toml::Table::new();
+        root.insert("gui".into(), toml::Value::Table(self.write()));
+        format!("\n{}", toml::to_string(&root).unwrap_or_default())
     }
 }
 
@@ -410,6 +557,8 @@ fn expected(key: &str) -> String {
     let list = match key {
         "theme" => Theme::NAMES.join(", "),
         "background" => Background::NAMES.join(", "),
+        "effects" => Effects::NAMES.join(", "),
+        "colors" => ColorsFrom::NAMES.join(", "),
         "active_weight" => Weight::NAMES.join(", "),
         "lyrics_align" => Align::NAMES.join(", "),
         "lyrics_animation" => Animation::NAMES.join(", "),
@@ -501,7 +650,7 @@ mod tests {
     fn the_halloween_look_sets_its_values_and_keeps_the_rest() {
         let mut g = GuiConf { opacity: 70, font: "Serif".into(), ..GuiConf::default() };
         g.apply_preset(Preset::Halloween);
-        assert_eq!((g.theme, g.background, g.theme_preset), (Theme::Dark, Background::Bats, Preset::Halloween));
+        assert_eq!((g.background, g.effects, g.theme_preset), (Background::Solid, Effects::Auto, Preset::Halloween));
         assert_eq!(g.accent, Accent::Fixed((255, 122, 24)));
         assert_eq!((g.opacity, g.font.as_str()), (70, "Serif"));
         assert!(Preset::Halloween.base(true).is_some() && Preset::None.base(true).is_none());
@@ -525,12 +674,14 @@ mod tests {
             g.apply_preset(p);
             assert_eq!(g.theme_preset, p);
             assert_ne!(g.accent, Accent::Cover, "{name}");
-            assert_ne!(g.background, Background::Solid, "{name}");
-            // a colour for the window and the cards in the look's own mode, and in the other one
+            assert!(!g.active_effects().is_empty(), "{name} moves");
+            // a colour for the window and the cards in the dark theme and in the light one
             for dark in [true, false] {
-                assert!(p.base(dark).is_some() || p == Preset::Halloween, "{name} {dark}");
-                assert_eq!(p.card(dark).is_some(), p.base(dark).is_some(), "{name} {dark}");
+                assert!(p.base(dark).is_some() && p.card(dark).is_some(), "{name} {dark}");
             }
+            // dark is dark and light is light
+            let lum = |c: (u8, u8, u8)| c.0 as u32 + c.1 as u32 + c.2 as u32;
+            assert!(lum(p.base(true).unwrap()) < 200 && lum(p.base(false).unwrap()) > 600, "{name}");
             // the name survives the file
             let mut root = toml::Table::new();
             root.insert("gui".into(), toml::Value::Table(g.write()));
@@ -538,14 +689,57 @@ mod tests {
             back.read(&root, &mut |m| panic!("{m}"));
             assert_eq!(back, g, "{name}");
         }
-        // the light looks are light, the others dark
-        let theme = |p| {
+        // picking a look keeps the dark / light theme the window has
+        let mut g = GuiConf { theme: Theme::Light, ..GuiConf::default() };
+        g.apply_preset(Preset::Halloween);
+        assert_eq!(g.theme, Theme::Light);
+    }
+
+    #[test]
+    fn auto_effects_belong_to_the_look_and_intensity_zero_stops_them() {
+        let fx = |p: Preset| {
             let mut g = GuiConf::default();
             g.apply_preset(p);
-            g.theme
+            g.active_effects()
         };
-        assert_eq!((theme(Preset::Easter), theme(Preset::Midsummer)), (Theme::Light, Theme::Light));
-        assert_eq!((theme(Preset::Christmas), theme(Preset::Halloween)), (Theme::Dark, Theme::Dark));
+        assert!(GuiConf::default().active_effects().is_empty(), "no look, no effects");
+        assert_eq!(fx(Preset::Christmas), [Fx::Snow, Fx::Lights]);
+        assert_eq!(fx(Preset::Easter), [Fx::Seeds, Fx::Eggs]);
+        assert_eq!(fx(Preset::Midsummer), [Fx::Pollen, Fx::Wind]);
+        assert_eq!(fx(Preset::Halloween), [Fx::Fog, Fx::Embers, Fx::Bats]);
+        // one chosen by hand works on any background and look
+        let g = GuiConf { effects: Effects::Leaves, theme_preset: Preset::Easter, ..GuiConf::default() };
+        assert_eq!(g.active_effects(), [Fx::Leaves]);
+        let g = GuiConf { effects_intensity: 0, ..g };
+        assert!(g.active_effects().is_empty());
+    }
+
+    #[test]
+    fn the_old_moving_backgrounds_keep_working_as_a_background_and_an_effect() {
+        let (g, w) = parse("[gui]\nbackground = \"snow\"\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((g.background, g.effects), (Background::Solid, Effects::Winter));
+        let (g, _) = parse("[gui]\nbackground = \"eggs\"\n");
+        assert_eq!((g.background, g.effects), (Background::Lawn, Effects::Eggs));
+        let (g, _) = parse("[gui]\nbackground = \"bats\"\n");
+        assert_eq!((g.background, g.effects), (Background::Solid, Effects::Haunt));
+        let (g, _) = parse("[gui]\nbackground = \"particles\"\n");
+        assert_eq!(g.effects, Effects::Embers);
+        let (g, _) = parse("[gui]\nbackground = \"fog\"\n");
+        assert_eq!(g.effects, Effects::Fog);
+        // the meadow had pollen
+        let (g, _) = parse("[gui]\nbackground = \"meadow\"\n");
+        assert_eq!((g.background, g.effects), (Background::Meadow, Effects::Pollen));
+        // an effect named in the file wins over what the old background implied
+        let (g, w) = parse("[gui]\nbackground = \"snow\"\neffects = \"leaves\"\n");
+        assert!(w.is_empty());
+        assert_eq!((g.background, g.effects), (Background::Solid, Effects::Leaves));
+        let (g, _) = parse("[gui]\nbackground = \"meadow\"\neffects = \"auto\"\n");
+        assert_eq!(g.effects, Effects::Auto);
+        // what is written is the new form, and reads back
+        let mut root = toml::Table::new();
+        root.insert("gui".into(), toml::Value::Table(g.write()));
+        assert_eq!(root["gui"]["effects"].as_str(), Some("auto"));
     }
 
     #[test]
@@ -576,6 +770,10 @@ mod tests {
             theme: Theme::Light,
             accent: Accent::Fixed((10, 200, 30)),
             background: Background::Gradient,
+            effects: Effects::Leaves,
+            effects_intensity: 33,
+            colors: ColorsFrom::Auto,
+            colors_file: "~/x/colors.json".into(),
             font: "DejaVu Sans".into(),
             active_weight: Weight::Bold,
             panel_borders: false,
@@ -589,6 +787,7 @@ mod tests {
             lock_layout: true,
             translation_size: 22,
             member_size: 12,
+            inner_sizes: [("cava".to_string(), 150u16), ("stack".to_string(), 300)].into_iter().collect(),
             popped: vec!["cava".into()],
             ..GuiConf::default()
         };

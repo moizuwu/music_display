@@ -403,6 +403,11 @@ pub struct Args {
     #[arg(long, default_value_t = DEFAULT_LYRICS_RETRIES, value_parser = clap::value_parser!(u32).range(0..=10))]
     pub lyrics_retries: u32,
 
+    /// When lrclib has no lyrics (or could not be asked often enough), try NetEase, lyrics.ovh
+    /// and the Genius page next (unofficial sites) [config: lyrics_fallback]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
+    pub lyrics_fallback: bool,
+
     /// Show lyrics translated (Google Translate, unofficial; toggle with `K`) [config: translate]
     #[arg(long)]
     pub translate: bool,

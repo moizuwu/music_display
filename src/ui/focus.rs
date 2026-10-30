@@ -189,7 +189,7 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
         // who sings it: one dim row right above the big text (or above the chord summary), or
         // right under the stage
         let y = if fc.tag_below { top as i32 + sh as i32 } else { top as i32 - 1 - has_summary as i32 };
-        let tag = member_tag_line(fc.members, width);
+        let tag = member_tag_line(fc.members, width, true);
         if tag_rows > 0 && !tag.is_empty() && y >= inner.y as i32 {
             f.render_widget(
                 Paragraph::new(Line::from(tag)).alignment(Alignment::Center),
@@ -257,14 +257,14 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
 
 /// `[Jimin] ` / `[Jimin, V] ` in each member's colour, dimmed; empty if the tag plus the
 /// text (`text_w` columns) wouldn't fit in `width`.
-pub(super) fn member_tag(members: &[String], width: usize, text_w: usize) -> Vec<Span<'static>> {
-    let dim = Style::new().add_modifier(Modifier::DIM);
+pub(super) fn member_tag(members: &[String], width: usize, text_w: usize, lit: bool) -> Vec<Span<'static>> {
+    let dim = tag_dim(lit);
     let mut spans = vec![Span::styled("[", dim)];
     for (i, m) in members.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(", ", dim));
         }
-        spans.push(Span::styled(m.clone(), Style::new().fg(member_color(m)).add_modifier(Modifier::DIM)));
+        spans.push(Span::styled(m.clone(), tag_name(m, lit)));
     }
     spans.push(Span::styled("] ", dim));
     let w: usize = spans.iter().map(|s| s.width()).sum();
@@ -273,10 +273,10 @@ pub(super) fn member_tag(members: &[String], width: usize, text_w: usize) -> Vec
 
 /// The tag for the big layout, one line that always fits `width`: `[Jimin, V]`, else
 /// `[Jimin +1]`, else the first name shortened with `…`; empty when even that doesn't fit.
-pub(super) fn member_tag_line(members: &[String], width: usize) -> Vec<Span<'static>> {
+pub(super) fn member_tag_line(members: &[String], width: usize, lit: bool) -> Vec<Span<'static>> {
     let Some(first) = members.first() else { return Vec::new() };
-    let dim = Style::new().add_modifier(Modifier::DIM);
-    let name = |m: &str, text: String| Span::styled(text, Style::new().fg(member_color(m)).add_modifier(Modifier::DIM));
+    let dim = tag_dim(lit);
+    let name = |m: &str, text: String| Span::styled(text, tag_name(m, lit));
     let fits = |s: &[Span]| s.iter().map(|s| s.width()).sum::<usize>() <= width;
     let mut full = vec![Span::styled("[", dim)];
     for (i, m) in members.iter().enumerate() {
@@ -304,6 +304,16 @@ pub(super) fn member_tag_line(members: &[String], width: usize) -> Vec<Span<'sta
         return Vec::new();
     }
     vec![Span::styled("[", dim), name(first, ellipsize(first, room)), Span::styled("]", dim)]
+}
+
+/// The brackets and commas of a tag: dimmed, but not on the active line, whose tag lights up
+/// with the line.
+fn tag_dim(lit: bool) -> Style {
+    if lit { Style::new().add_modifier(Modifier::BOLD) } else { Style::new().add_modifier(Modifier::DIM) }
+}
+
+fn tag_name(name: &str, lit: bool) -> Style {
+    Style::new().fg(member_color(name)).add_modifier(if lit { Modifier::BOLD } else { Modifier::DIM })
 }
 
 /// A stable colour per member name, from the terminal's own ANSI palette.

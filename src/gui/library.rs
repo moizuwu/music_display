@@ -780,22 +780,23 @@ pub fn key(m: &mut Model, code: crossterm::event::KeyCode) -> bool {
 }
 
 /// The library window and the device list, when they are open.
-pub fn windows(ctx: &egui::Context, m: &mut Model) {
+pub fn windows(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     if m.spot.open {
-        library_window(ctx, m);
+        library_window(ctx, m, look);
     }
     if m.spot.devices.is_some() {
-        devices_window(ctx, m);
+        devices_window(ctx, m, look);
     }
     m.take_spot_note();
 }
 
-fn library_window(ctx: &egui::Context, m: &mut Model) {
+fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     let mut open = true;
     let mut acts: Vec<Act> = Vec::new();
     let moved = std::mem::take(&mut m.spot.nav_moved);
+    let g = m.gui.clone();
     let s = &mut m.spot;
-    egui::Window::new("Spotify library").open(&mut open).default_size([460.0, 520.0]).show(ctx, |ui| {
+    super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| {
         if let Some(e) = s.limited().or_else(|| s.status.clone()) {
             ui.label(RichText::new(e).weak());
         }
@@ -928,11 +929,12 @@ fn library_window(ctx: &egui::Context, m: &mut Model) {
     }
 }
 
-fn devices_window(ctx: &egui::Context, m: &mut Model) {
+fn devices_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     let mut open = true;
     let (mut choose, mut refresh) = (None, false);
+    let g = m.gui.clone();
     let Some(d) = &m.spot.devices else { return };
-    egui::Window::new("Devices").open(&mut open).default_width(320.0).show(ctx, |ui| {
+    super::floating::window(ctx, look, &g, "devices", "Devices", [340.0, 300.0], &mut open, |ui, _| {
         if d.loading {
             ui.label(RichText::new("loading…").weak());
         }

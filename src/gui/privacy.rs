@@ -84,15 +84,18 @@ impl Model {
 }
 
 /// The question, as a window that stays until answered.
-pub fn window(ctx: &egui::Context, m: &mut Model) {
+pub fn window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     if !m.ux.ai_ask {
         return;
     }
     let text = notice(&m.args);
     let (mut allow, mut decline) = (false, false);
-    egui::Window::new("Send lyrics to an AI provider?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+    // (closing the window leaves the question open: it stays until answered)
+    let mut open = true;
+    let g = m.gui.clone();
+    super::floating::window(ctx, look, &g, "ai-question", "Send lyrics to an AI provider?", [420.0, 250.0], &mut open, |ui, _| {
         ui.set_max_width(380.0);
-        ui.add(egui::Label::new(text).wrap());
+        ui.add(egui::Label::new(text.as_str()).wrap());
         ui.label(egui::RichText::new("Asked once; the answer is shared with the terminal UI. A local endpoint (Ollama on localhost) never asks.").small().weak());
         ui.horizontal(|ui| {
             allow = ui.button("Send").clicked();

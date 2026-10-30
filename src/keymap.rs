@@ -15,6 +15,7 @@ impl Action {
     pub fn name(self) -> &'static str {
         match self {
             Action::Quit => "quit",
+            Action::ToggleTheme => "toggle_theme",
             Action::PlayPause => "play_pause",
             Action::Next => "next",
             Action::Prev => "prev",

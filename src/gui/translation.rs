@@ -232,7 +232,13 @@ impl Model {
                 if let (true, Ok((done, backend))) = (keep, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
-                let _ = tx.send(AppEvent::Translated { key, lang, lines: r.map(|(l, b)| (l, tag(b))) });
+                let _ = tx.send(AppEvent::Translated { key, lang, lines: r
+                    .map(|(l, b)| (l, tag(b)))
+                    // Google failing too: the reason the AI gave up is still worth knowing
+                    .map_err(|e| match &ai_failed {
+                        Some(why) if !translate::is_held(&e) => format!("{e}; AI failed: {why}"),
+                        _ => e,
+                    }) });
                 return;
             }
         });
