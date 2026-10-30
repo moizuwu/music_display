@@ -41,7 +41,19 @@ pub fn hypr_find(json: &str, pid: u32, title: &str) -> Option<(String, bool)> {
     })
 }
 
-/// The `hyprctl` calls that float the window, give it its size and put it in the middle.
+/// The `hyprctl` calls for Hyprland 0.55 and later, whose dispatchers are Lua calls: float the
+/// window, give it its size and put it in the middle.
+pub fn hypr_lua_commands(address: &str, size: [f32; 2]) -> Vec<Vec<String>> {
+    let (w, h) = (size[0].round() as i32, size[1].round() as i32);
+    let call = |code: String| vec!["dispatch".to_string(), code];
+    vec![
+        call(format!("hl.dsp.window.float({{ action = \"enable\", window = \"address:{address}\" }})")),
+        call(format!("hl.dsp.window.resize({{ x = {w}, y = {h}, relative = false, window = \"address:{address}\" }})")),
+        call(format!("hl.dsp.window.center({{ window = \"address:{address}\" }})")),
+    ]
+}
+
+/// The same for the older Hyprland (`hyprctl dispatch setfloating address:…`).
 pub fn hypr_commands(address: &str, size: [f32; 2]) -> Vec<Vec<String>> {
     let (w, h) = (size[0].round() as i32, size[1].round() as i32);
     vec![
@@ -90,8 +102,16 @@ fn try_once(backend: Backend, pid: u32, title: &str, size: [f32; 2]) -> bool {
             let Some(json) = run("hyprctl", &s(&["clients", "-j"])) else { return false };
             let Some((address, floating)) = hypr_find(&json, pid, title) else { return false };
             if !floating {
-                for args in hypr_commands(&address, size) {
-                    run("hyprctl", &args);
+                // the new (Lua) syntax first; a Hyprland that does not know it says "error"
+                let lua = hypr_lua_commands(&address, size);
+                if run("hyprctl", &lua[0]).is_some_and(|out| out.trim() == "ok") {
+                    for args in &lua[1..] {
+                        run("hyprctl", args);
+                    }
+                } else {
+                    for args in hypr_commands(&address, size) {
+                        run("hyprctl", &args);
+                    }
                 }
             }
             true
@@ -175,6 +195,15 @@ mod tests {
         assert_eq!(hypr_find(HYPR, 999, "music_display - Settings"), None);
         assert_eq!(hypr_find("not json", 100, "x"), None);
         assert_eq!(hypr_find("{}", 100, "x"), None);
+    }
+
+    #[test]
+    fn the_lua_calls_of_new_hyprland_float_size_and_centre_that_window() {
+        let c = hypr_lua_commands("0xaaa", [480.0, 600.4]);
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0], ["dispatch", "hl.dsp.window.float({ action = \"enable\", window = \"address:0xaaa\" })"]);
+        assert_eq!(c[1], ["dispatch", "hl.dsp.window.resize({ x = 480, y = 600, relative = false, window = \"address:0xaaa\" })"]);
+        assert_eq!(c[2], ["dispatch", "hl.dsp.window.center({ window = \"address:0xaaa\" })"]);
     }
 
     #[test]

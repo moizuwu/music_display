@@ -46,12 +46,49 @@ pub fn cover_side(avail_w: f32, window_h: f32, share: f32) -> f32 {
     avail_w.min(window_h * share).clamp(64.0, 480.0)
 }
 
+/// The buttons that go in the middle (previous, play / pause, next, in the layout's order), and
+/// the rest (shuffle, repeat, volume), also in order.
+pub fn split_trio(items: Vec<Ctl>) -> (Vec<Ctl>, Vec<Ctl>) {
+    items.into_iter().partition(|c| matches!(c, Ctl::Prev | Ctl::Play(_) | Ctl::Next))
+}
+
 pub fn controls(ui: &mut Ui, m: &mut Model) {
     let Some((length, items)) = m.snap.as_ref().map(|s| (s.length, plan(&m.layout.buttons, s))) else { return };
     progress(ui, m, length);
     ui.add_space(2.0);
+    // previous, play / pause and next sit in the middle of the row; shuffle, repeat and the
+    // volume are on a row of their own below them
+    let (trio, rest) = split_trio(items);
+    if !trio.is_empty() {
+        ui.horizontal(|ui| {
+            let n = trio.len() as f32;
+            let width = n * style::ICON_SIDE + (n - 1.0) * ui.spacing().item_spacing.x;
+            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            for c in &trio {
+                match *c {
+                    Ctl::Prev => {
+                        if style::icon_button(ui, Icon::Prev).on_hover_text("previous").clicked() {
+                            m.prev();
+                        }
+                    }
+                    Ctl::Play(playing) => {
+                        let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
+                        if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
+                            m.play_pause();
+                        }
+                    }
+                    Ctl::Next => {
+                        if style::icon_button(ui, Icon::Next).on_hover_text("next").clicked() {
+                            m.next();
+                        }
+                    }
+                    Ctl::Shuffle(_) | Ctl::Repeat(_) | Ctl::Volume(_) => {}
+                }
+            }
+        });
+    }
     ui.horizontal_wrapped(|ui| {
-        for c in items {
+        for c in rest {
             match c {
                 Ctl::Shuffle(on) => {
                     if ui.selectable_label(on, "shuffle").clicked() {
@@ -68,22 +105,7 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
                         m.cycle_repeat();
                     }
                 }
-                Ctl::Prev => {
-                    if style::icon_button(ui, Icon::Prev).on_hover_text("previous").clicked() {
-                        m.prev();
-                    }
-                }
-                Ctl::Play(playing) => {
-                    let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
-                    if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
-                        m.play_pause();
-                    }
-                }
-                Ctl::Next => {
-                    if style::icon_button(ui, Icon::Next).on_hover_text("next").clicked() {
-                        m.next();
-                    }
-                }
+                Ctl::Prev | Ctl::Play(_) | Ctl::Next => {}
                 Ctl::Volume(v) => {
                     // mute button, the slider (the wheel over it steps by `volume_step`), and
                     // the percentage, which mutes when clicked
@@ -166,6 +188,17 @@ mod tests {
             s.volume = None;
         }
         s
+    }
+
+    #[test]
+    fn previous_play_and_next_go_in_the_middle_and_the_rest_keeps_its_order() {
+        let items = vec![Ctl::Shuffle(true), Ctl::Repeat(Loop::None), Ctl::Prev, Ctl::Play(true), Ctl::Next, Ctl::Volume(0.5)];
+        let (trio, rest) = split_trio(items);
+        assert_eq!(trio, [Ctl::Prev, Ctl::Play(true), Ctl::Next]);
+        assert_eq!(rest, [Ctl::Shuffle(true), Ctl::Repeat(Loop::None), Ctl::Volume(0.5)]);
+        // a player without prev / next still has its play button alone in the middle
+        let (trio, rest) = split_trio(vec![Ctl::Play(false)]);
+        assert_eq!((trio.len(), rest.len()), (1, 0));
     }
 
     #[test]

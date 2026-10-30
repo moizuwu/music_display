@@ -197,20 +197,21 @@ impl Look {
             (Theme::Dark, _) => egui::ThemePreference::Dark,
             (Theme::Light, _) => egui::ThemePreference::Light,
         });
-        if self.fonts_for.as_ref() != Some(&(g.font.clone(), g.active_weight)) {
+        let family_now = font_of(g).to_string();
+        if self.fonts_for.as_ref() != Some(&(family_now.clone(), g.active_weight)) {
             // the bold family must exist at once (the active line asks for it); the real fonts
             // replace this when the scan is done
             if self.fonts_for.is_none() {
                 ctx.set_fonts(base_fonts());
             }
-            let (family, weight, c) = (g.font.clone(), g.active_weight, ctx.clone());
+            let (family, weight, c) = (family_now.clone(), g.active_weight, ctx.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             self.fonts_rx = Some(rx);
             std::thread::spawn(move || {
                 let _ = tx.send(fonts(&family, weight));
                 c.request_repaint();
             });
-            self.fonts_for = Some((g.font.clone(), g.active_weight));
+            self.fonts_for = Some((family_now, g.active_weight));
         }
         for th in [egui::Theme::Dark, egui::Theme::Light] {
             ctx.set_style_of(th, style(g, self.accent, self.sys.as_ref(), th == egui::Theme::Dark));
@@ -356,6 +357,12 @@ fn base_fonts() -> egui::FontDefinitions {
 pub const BUILT_IN_FAMILY: &str = "Mountains of Christmas";
 static BUILT_IN_REGULAR: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Regular.ttf");
 static BUILT_IN_BOLD: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Bold.ttf");
+
+/// The font family in use: the chosen one, or that of the look when none is chosen (so a look
+/// set in the config file by name has it too, not only one picked in the Appearance tab).
+fn font_of(g: &GuiConf) -> &str {
+    if g.font.is_empty() && g.theme_preset == Preset::Christmas { BUILT_IN_FAMILY } else { &g.font }
+}
 
 fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
     use egui::{FontData, FontDefinitions};
@@ -818,6 +825,18 @@ mod tests {
         assert_eq!(ICON_SIDE, 30.0);
         let src = include_str!("controls.rs");
         assert_eq!(src.matches("style::icon_button(ui, ").count(), 3);
+    }
+
+    #[test]
+    fn a_look_named_in_the_file_gets_its_font_without_one_being_chosen() {
+        let mut g = GuiConf { theme_preset: Preset::Christmas, ..GuiConf::default() };
+        assert!(g.font.is_empty());
+        assert_eq!(font_of(&g), BUILT_IN_FAMILY);
+        // a font chosen by hand wins, and other looks have none of their own
+        g.font = "Noto Sans".into();
+        assert_eq!(font_of(&g), "Noto Sans");
+        assert_eq!(font_of(&GuiConf { theme_preset: Preset::Easter, ..GuiConf::default() }), "");
+        assert_eq!(font_of(&GuiConf::default()), "");
     }
 
     #[test]
