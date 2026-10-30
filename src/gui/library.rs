@@ -3,7 +3,7 @@
 //! (`browser::Library`, `spotify::Api`); this file only drives them from egui. Nothing here
 //! starts, or talks to Spotify, unless `spotify = true` is set.
 use super::model::Model;
-use crate::browser::{DevicePicker, Level, ListRow, Library, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TABS};
+use crate::browser::{DevicePicker, LibLink, Level, ListRow, Library, TAB_ALBUMS, TAB_ARTISTS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TABS};
 use egui::{RichText, Ui};
 use music_display::cli::Args;
 use music_display::player::{Snapshot, Status};
@@ -264,7 +264,12 @@ impl Spot {
 
     /// The last API snapshot, its position moved on by the time since it came.
     pub fn remote_snapshot(&self) -> Option<Snapshot> {
-        let (r, at) = self.remote.as_ref()?;
+        self.remote_snapshot_within(spotify::REMOTE_MAX_AGE)
+    }
+
+    /// The same, but only when the answer is at most `max_age` old.
+    pub fn remote_snapshot_within(&self, max_age: Duration) -> Option<Snapshot> {
+        let (r, at) = self.remote.as_ref().filter(|(_, at)| at.elapsed() <= max_age)?;
         let mut s = r.snap.clone();
         if s.status == Status::Playing {
             s.position += at.elapsed().as_secs_f64();
@@ -486,6 +491,27 @@ impl Spot {
         self.lib.note = self.status.clone();
         // what is cached shows at once; a stale list is refreshed in the background
         self.load_tab(self.lib.tab, false);
+    }
+
+    /// Click on Track / Artist / Album / Genre: show it in the library. Only with Spotify on.
+    pub fn open_for(&mut self, f: music_display::layout::MetaField, snap: &Snapshot, genre: &str) {
+        if !self.on() {
+            return;
+        }
+        let remote = self.remote.as_ref().map(|(r, _)| r);
+        let Some(link) = crate::browser::library_link(f, snap, genre, remote) else { return };
+        self.open_library();
+        match link {
+            LibLink::Open(it) => {
+                self.switch_tab(if it.kind == "album" { TAB_ALBUMS } else { TAB_ARTISTS });
+                self.open_item(it);
+            }
+            LibLink::Search(q) => {
+                self.switch_tab(TAB_SEARCH);
+                self.lib.input = crate::browser::TextInput::with(&q);
+                self.run_search();
+            }
+        }
     }
 
     /// Make sure tab `i` is loaded and fresh. A fresh list costs no request; a stale one keeps

@@ -4509,3 +4509,37 @@ async fn annotations_and_diagrams_share_one_column() {
     assert!(notes_row.abs_diff(chords_row + (40 - 2) / 2) <= 3, "{chords_row} {notes_row}");
     let _ = PanelId::Chords;
 }
+
+#[test]
+fn metadata_links_use_uris_only_for_the_same_song() {
+    use browser::{library_link, LibLink};
+    use layout::MetaField as F;
+    let mut s = snap("Coldplay, BTS", "My Universe", "Music of the Spheres");
+    s.track_id = "spotify:track:abc".into();
+    let remote = |id: &str| spotify::Remote {
+        snap: {
+            let mut r = s.clone();
+            r.track_id = id.into();
+            r
+        },
+        local: true,
+        device: String::new(),
+        album_uri: "spotify:album:al".into(),
+        artist_uris: vec!["spotify:artist:co".into(), "spotify:artist:bts".into()],
+    };
+    // same song: the first artist and the album open by URI
+    let r = remote("spotify:track:abc");
+    let Some(LibLink::Open(a)) = library_link(F::Artist, &s, "", Some(&r)) else { panic!("artist") };
+    assert_eq!((a.kind.as_str(), a.uri.as_str(), a.name.as_str()), ("artist", "spotify:artist:co", "Coldplay"));
+    let Some(LibLink::Open(al)) = library_link(F::Album, &s, "", Some(&r)) else { panic!("album") };
+    assert_eq!(al.uri, "spotify:album:al");
+    // another song in the API state (stale): never its URIs
+    let old = remote("spotify:track:other");
+    assert_eq!(library_link(F::Artist, &s, "", Some(&old)), Some(LibLink::Search("Coldplay".into())));
+    // MPRIS only: searches
+    assert_eq!(library_link(F::Title, &s, "", None), Some(LibLink::Search("My Universe Coldplay".into())));
+    assert_eq!(library_link(F::Album, &s, "", None), Some(LibLink::Search("Music of the Spheres Coldplay".into())));
+    assert_eq!(library_link(F::Genre, &s, "Pop", None), Some(LibLink::Search("Pop".into())));
+    assert_eq!(library_link(F::Genre, &s, "", None), None);
+    assert_eq!(library_link(F::Key, &s, "Pop", None), None);
+}

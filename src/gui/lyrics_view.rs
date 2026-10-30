@@ -410,7 +410,20 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             _ => accent.gamma_multiply(0.7),
         });
         let lit = (active && karaoke && text.trim() != "♪").then(|| (m.line_fraction(), accent));
+        // a halo behind the active line (`lyrics_glow`): the slot is reserved first so it paints under the text
+        let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
         let resp = draw_line(ui, &Spec { text, chords: &line_chords, chord_color, font, color, chord_font: chord_font.clone(), lit, center });
+        if let Some(slot) = halo {
+            let k = g.lyrics_glow as f32 / 100.0;
+            let rings = (1..=6u8)
+                .rev()
+                .map(|r| {
+                    let grow = r as f32 * 4.0;
+                    egui::Shape::rect_filled(resp.rect.expand(grow), egui::CornerRadius::same((g.corner_radius as f32 + grow) as u8), accent.gamma_multiply(k * 0.07))
+                })
+                .collect();
+            ui.painter().set(slot, egui::Shape::Vec(rings));
+        }
         if synced.is_some() && resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             ui.painter().rect_filled(resp.rect.expand(3.0), g.corner_radius.min(8), base.gamma_multiply(0.07));

@@ -132,6 +132,11 @@ impl MetaField {
     pub fn opens_diagrams(self) -> bool {
         matches!(self, Self::Key | Self::Bpm | Self::Capo | Self::Tuning)
     }
+
+    /// Fields that jump to the matching thing in the Spotify library when clicked.
+    pub fn opens_library(self) -> bool {
+        matches!(self, Self::Title | Self::Artist | Self::Album | Self::Genre)
+    }
 }
 
 impl Button {

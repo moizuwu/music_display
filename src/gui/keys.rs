@@ -199,6 +199,29 @@ impl Model {
     }
 }
 
+impl Model {
+    /// The key typed while the help window waits for a new key of an action.
+    fn capture_key(&mut self, code: KeyCode) {
+        let Some(action) = self.ux.key_capture.take() else { return };
+        if code == KeyCode::Esc {
+            self.ux.key_note = Some("cancelled".into());
+            return;
+        }
+        self.ux.key_note = Some(match self.ux.keys.rebind(action, code) {
+            Ok(()) => self.save_key(action),
+            Err(e) => e,
+        });
+    }
+
+    /// Write what `action` is bound to into `[keys]` of the config file; the message for the editor.
+    fn save_key(&self, action: Action) -> String {
+        match music_display::config::save_key(&self.cfg, action.name(), self.ux.keys.config_value(action)) {
+            Ok(()) => format!("saved to {}", self.cfg.display()),
+            Err(e) => format!("couldn't save {}: {e}", self.cfg.display()),
+        }
+    }
+}
+
 fn on_off(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
@@ -211,6 +234,10 @@ impl super::Gui {
         }
         let codes: Vec<KeyCode> = ctx.input(|i| i.events.iter().filter_map(code_of).collect());
         for code in codes {
+            if self.m.ux.key_capture.is_some() {
+                self.m.capture_key(code);
+                continue;
+            }
             if super::library::key(&mut self.m, code) {
                 continue;
             }
@@ -232,6 +259,7 @@ impl super::Gui {
         }
         help_window(ctx, &mut self.m);
         super::privacy::window(ctx, &mut self.m);
+        self.popouts(ctx);
     }
 }
 
@@ -244,6 +272,7 @@ const MOUSE: &[(&str, &str)] = &[
     ("wheel over the volume", "volume up / down"),
     ("click the volume %", "mute / restore"),
     ("click Key / BPM / Capo / Tuning", "open the chord diagrams"),
+    ("click Track / Artist / Album / Genre", "show it in the Spotify library (with Spotify on)"),
     ("right-click a metadata field", "Hide, Move up, Move down"),
     ("drag a column border", "resize the columns (saved)"),
 ];
@@ -263,17 +292,41 @@ pub fn help_window(ctx: &egui::Context, m: &mut Model) {
     let mut open = true;
     egui::Window::new("Keys").open(&mut open).default_width(420.0).default_height(520.0).show(ctx, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(egui::RichText::new("The same keys as the terminal UI (remap them in [keys] of config.toml). Not while typing in a field.").small().weak());
+            ui.label(egui::RichText::new("The same keys as the terminal UI (saved in [keys] of config.toml). Not while typing in a field.").small().weak());
+            ui.checkbox(&mut m.ux.key_edit, "Change keys");
+            if !m.ux.key_edit {
+                m.ux.key_capture = None;
+            }
+            if let Some(a) = m.ux.key_capture {
+                let what = BINDS.iter().find(|b| b.action == a).map_or("", |b| b.desc);
+                ui.colored_label(ui.visuals().warn_fg_color, format!("Press the new key for: {what} (Esc cancels)"));
+            } else if let Some(n) = &m.ux.key_note {
+                ui.label(egui::RichText::new(n.as_str()).small().weak());
+            }
+            let mut reset: Option<Action> = None;
             for g in GROUPS {
                 ui.add_space(4.0);
                 ui.heading(g);
-                egui::Grid::new(("help", g)).num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+                egui::Grid::new(("help", g)).num_columns(if m.ux.key_edit { 4 } else { 2 }).spacing([14.0, 3.0]).show(ui, |ui| {
                     for b in BINDS.iter().filter(|b| b.group == g) {
                         ui.monospace(m.ux.keys.label(b.action));
                         ui.label(b.desc);
+                        if m.ux.key_edit {
+                            if ui.small_button("change").clicked() {
+                                m.ux.key_capture = Some(b.action);
+                                m.ux.key_note = None;
+                            }
+                            if ui.small_button("reset").clicked() {
+                                reset = Some(b.action);
+                            }
+                        }
                         ui.end_row();
                     }
                 });
+            }
+            if let Some(a) = reset {
+                m.ux.keys.reset(a);
+                m.ux.key_note = Some(m.save_key(a));
             }
             ui.add_space(4.0);
             ui.heading("Mouse");
@@ -297,6 +350,8 @@ pub fn help_window(ctx: &egui::Context, m: &mut Model) {
     });
     if !open {
         m.ux.help = false;
+        m.ux.key_edit = false;
+        m.ux.key_capture = None;
     }
 }
 
@@ -391,6 +446,26 @@ mod tests {
         let args = Args::parse_from(["music_display", "--genre-lookup", "false", "--no-cache-translations"]);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (Model::new(args, Layout::default(), std::env::temp_dir().join("md-gui-keys.toml"), tx), rx)
+    }
+
+    #[tokio::test]
+    async fn the_next_key_after_change_rebinds_and_saves_it() {
+        let (mut m, _rx) = model();
+        m.cfg = std::env::temp_dir().join(format!("md-gui-keys-edit-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&m.cfg);
+        m.ux.key_capture = Some(Action::ToggleLyrics);
+        m.capture_key(KeyCode::Char('Q'));
+        assert_eq!(m.ux.keys.action_for(KeyCode::Char('Q')), Some(Action::ToggleLyrics));
+        assert!(m.ux.key_capture.is_none());
+        assert!(std::fs::read_to_string(&m.cfg).unwrap().contains("Q"));
+        // a key another action owns is refused, Esc cancels
+        m.ux.key_capture = Some(Action::ToggleLyrics);
+        m.capture_key(KeyCode::Char('c'));
+        assert!(m.ux.key_note.as_deref().unwrap().contains("already used"));
+        m.ux.key_capture = Some(Action::ToggleLyrics);
+        m.capture_key(KeyCode::Esc);
+        assert_eq!(m.ux.key_note.as_deref(), Some("cancelled"));
+        let _ = std::fs::remove_file(&m.cfg);
     }
 
     #[tokio::test]

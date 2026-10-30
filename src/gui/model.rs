@@ -218,7 +218,8 @@ impl Model {
                         self.snap = None;
                         self.track_key = 0;
                     }
-                    if let Some(s) = self.spot.remote_snapshot() {
+                    // a blip of the MPRIS player must not bring back an old API answer
+                    if let Some(s) = self.spot.remote_snapshot_within(spotify::REMOTE_FRESH) {
                         self.on_snapshot(s);
                     }
                 }
@@ -229,8 +230,13 @@ impl Model {
                     self.local_tags.insert(url.clone(), t);
                 }
                 // re-run the current snapshot with the tags merged in
-                if let Some(s) = self.snap.clone().filter(|s| s.url == url) {
+                // (as if from the player, but it says nothing new: leave the clock and the
+                // "last heard from the player" time alone)
+                if let Some(mut s) = self.snap.clone().filter(|s| s.url == url) {
+                    let seen = self.player_seen;
+                    s.position = self.position();
                     self.on_snapshot(s);
+                    self.player_seen = seen;
                 }
             }
             AppEvent::Spotify(r) => {

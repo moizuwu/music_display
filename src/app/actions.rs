@@ -150,6 +150,7 @@ pub const MOUSE: &[(&str, &str, &str)] = &[
     ("Lyrics", "wheel over the annotations", "scroll a long note"),
     ("View", "click [ settings ] / [ ? ]", "open the settings menu / this help"),
     ("View", "click Key / BPM / Capo / Tuning", "open the chord diagrams"),
+    ("View", "click Track / Artist / Album / Genre", "show it in the Spotify library (with Spotify on)"),
     ("View", "right-click a metadata field", "menu: Hide, Move up, Move down"),
     ("View", "drag a metadata field", "drop it on another to reorder"),
     ("View", "drag a column border", "resize the columns (saved)"),

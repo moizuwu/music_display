@@ -1,6 +1,7 @@
 //! `--gui`: a window with the same panels, config file and layout as the terminal front end.
 //! Built only with `--features gui`. The terminal-only parts (the big block font, graphics
 //! protocols, key remapping) are not in it; see the parity table in the README.
+mod backdrop;
 mod browse;
 mod controls;
 mod extras;
@@ -9,6 +10,7 @@ mod keys;
 mod library;
 mod lyrics_view;
 mod model;
+mod popout;
 mod privacy;
 mod settings;
 mod style;
@@ -62,6 +64,7 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
                     look: style::Look::default(),
                     repaint: cc.egui_ctx.clone(),
                     title_sent: None,
+                    zoom_seen: 1.0,
                 }) as Box<dyn eframe::App>)
             }),
         )
@@ -77,9 +80,38 @@ struct Gui {
     repaint: egui::Context,
     /// The window title last sent (`window_title`).
     title_sent: Option<String>,
+    /// The zoom factor last seen, to notice the zoom keys.
+    zoom_seen: f32,
 }
 
 impl Gui {
+    /// The zoom keys (egui's own Ctrl and + / - / 0) are kept in `ui_scale`, and Ctrl+Shift with
+    /// Up / Down changes the window opacity by 5; both are written to `[gui]`.
+    fn window_keys(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        let z = ctx.zoom_factor();
+        if (z - self.zoom_seen).abs() > 0.001 {
+            self.zoom_seen = z;
+            let pct = ((z * 100.0).round() as u16).clamp(50, 200);
+            if pct != self.m.gui.ui_scale {
+                self.m.gui.ui_scale = pct;
+                changed = true;
+            }
+        }
+        let step = ctx.input(|i| {
+            let both = i.modifiers.command && i.modifiers.shift;
+            (both && i.key_pressed(egui::Key::ArrowUp)) as i16 - (both && i.key_pressed(egui::Key::ArrowDown)) as i16
+        });
+        if step != 0 {
+            self.m.gui.opacity = (self.m.gui.opacity as i16 + step * 5).clamp(0, 100) as u8;
+            changed = true;
+        }
+        if changed {
+            let t = self.m.gui.write();
+            self.m.save_settings(&[("gui", toml::Value::Table(t))]);
+        }
+    }
+
     fn pump(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             self.m.apply(ev);
@@ -123,18 +155,18 @@ impl Gui {
             PanelId::Chords => view::diagrams(ui, &mut self.m),
             PanelId::Lyrics => {
                 // cava docked under the lyrics
-                if self.m.cava_wanted() && self.m.layout.cava_under_lyrics {
+                if self.m.cava_wanted() && self.m.layout.cava_under_lyrics && !self.is_popped(PanelId::Cava) {
                     egui::Panel::bottom("cava_under").default_size(120.0).resizable(true).show(ui, |ui| extras::cava_panel(ui, &self.m));
                 }
                 // with the annotations column open the diagrams live in it (above the notes)
-                if self.m.show_diagrams && !self.m.annotations_shown() {
+                if self.m.show_diagrams && !self.m.annotations_shown() && !self.is_popped(PanelId::Chords) {
                     egui::Panel::right("diagrams").default_size(280.0).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
                 }
                 lyrics_view::lyrics(ui, &mut self.m);
             }
             PanelId::Cava => extras::cava_panel(ui, &self.m),
             PanelId::Annotations => {
-                if self.m.show_diagrams {
+                if self.m.show_diagrams && !self.is_popped(PanelId::Chords) {
                     // one column, two panels: the diagrams take the top half, the notes the rest
                     let half = ui.available_height() / 2.0;
                     egui::Panel::top("diagrams_stack").default_size(half).resizable(true).show(ui, |ui| view::diagrams(ui, &mut self.m));
@@ -160,7 +192,10 @@ impl eframe::App for Gui {
             self.title_sent = want;
         }
         // the clock moves the lyrics: redraw about 30 times a second while playing
-        let fast = self.m.playing() || self.m.cava_wanted();
+        self.window_keys(ctx);
+        // a moving background only runs while the window has the focus
+        let moving = style::Look::animated(&self.m.gui) && ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let fast = self.m.playing() || self.m.cava_wanted() || moving;
         ctx.request_repaint_after(std::time::Duration::from_millis(if fast { 33 } else { 250 }));
     }
 
@@ -182,6 +217,15 @@ impl eframe::App for Gui {
             ui.horizontal(|ui| {
                 ui.strong("music_display");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("windows", |ui| {
+                        ui.label(egui::RichText::new("Show in a window of its own").small().weak());
+                        for (id, name) in popout::PANELS {
+                            let mut on = self.is_popped(id);
+                            if ui.checkbox(&mut on, name).changed() {
+                                self.toggle_popout(id);
+                            }
+                        }
+                    });
                     if ui.button("?").on_hover_text("keys (?)").clicked() {
                         self.m.ux.help = !self.m.ux.help;
                     }
@@ -217,17 +261,20 @@ impl eframe::App for Gui {
         if self.m.show_diagrams && !self.m.layout.panels.shown(PanelId::Lyrics) && !self.m.annotations_shown() {
             cols.push(PanelId::Chords);
         }
+        // panels in a window of their own leave the columns
+        cols.retain(|p| !self.is_popped(*p));
         let vertical = self.m.layout.direction == music_display::layout::Split::Vertical;
         let (last, rest) = match cols.split_last() {
-            Some((l, r)) => (*l, r.to_vec()),
-            None => (PanelId::Metadata, Vec::new()),
+            Some((l, r)) => (Some(*l), r.to_vec()),
+            None if self.m.gui.popped.is_empty() => (Some(PanelId::Metadata), Vec::new()),
+            None => (None, Vec::new()),
         };
         // layout.direction: columns side by side, or stacked top to bottom
         let total = if vertical { ui.available_height() } else { ui.available_width() };
         for (i, id) in rest.iter().enumerate() {
             let pct = self.m.layout.size_of(*id).map(f32::from).unwrap_or(if *id == PanelId::Metadata { 34.0 } else { 25.0 });
             let panel = if vertical { egui::Panel::top(format!("col{i}")) } else { egui::Panel::left(format!("col{i}")) };
-            let panel = panel.frame(style::gutter(&g)).resizable(true).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
+            let panel = panel.frame(style::gutter(&g)).resizable(!g.lock_layout).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
             let resp = panel.show(ui, |ui| {
                 style::card(ui, &g, |ui| self.panel(ui, *id));
             });
@@ -239,7 +286,14 @@ impl eframe::App for Gui {
                 self.m.save_layout();
             }
         }
-        egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| style::card(ui, &g, |ui| self.panel(ui, last)));
+        egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| {
+            style::card(ui, &g, |ui| match last {
+                Some(id) => self.panel(ui, id),
+                None => {
+                    ui.weak("Every panel is in a window of its own. Dock one again from the \"windows\" menu.");
+                }
+            })
+        });
         self.popups(ui.ctx());
     }
 }

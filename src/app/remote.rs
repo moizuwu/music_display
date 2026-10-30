@@ -1,5 +1,6 @@
-use crate::browser::{DevicePicker, Edit, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TextInput};
+use crate::browser::{DevicePicker, Edit, LibLink, TAB_ALBUMS, TAB_ARTISTS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TextInput};
 use super::*;
+use crate::layout::MetaField;
 
 // ── Spotify (--spotify) ────────────────────────────────────────────────
 impl App {
@@ -17,7 +18,12 @@ impl App {
 
     /// The last API snapshot, its position moved on by the time since it came.
     pub(super) fn remote_snapshot(&self) -> Option<Snapshot> {
-        let (r, at) = self.remote.as_ref()?;
+        self.remote_snapshot_within(spotify::REMOTE_MAX_AGE)
+    }
+
+    /// The same, but only when the answer is at most `max_age` old.
+    pub(super) fn remote_snapshot_within(&self, max_age: Duration) -> Option<Snapshot> {
+        let (r, at) = self.remote.as_ref().filter(|(_, at)| at.elapsed() <= max_age)?;
         let mut s = r.snap.clone();
         if s.status == Status::Playing {
             s.position += at.elapsed().as_secs_f64();
@@ -436,6 +442,31 @@ impl App {
         // what is cached shows at once; a stale list is refreshed in the background
         self.load_tab(self.lib.tab, false);
         self.start_search_typing();
+    }
+
+    /// Click on Track / Artist / Album / Genre: show it in the library. Only with Spotify on.
+    pub fn open_library_for(&mut self, f: MetaField) -> bool {
+        if !f.opens_library() || self.spot.is_none() {
+            return false;
+        }
+        let genre = self.genre.clone().unwrap_or_default();
+        let remote = self.remote.as_ref().map(|(r, _)| r);
+        let Some(link) = self.snap.as_ref().and_then(|s| browser::library_link(f, s, &genre, remote)) else {
+            return false;
+        };
+        self.open_library();
+        match link {
+            LibLink::Open(it) => {
+                self.switch_tab(if it.kind == "album" { TAB_ALBUMS } else { TAB_ARTISTS });
+                self.open_item(it);
+            }
+            LibLink::Search(q) => {
+                self.switch_tab(TAB_SEARCH);
+                self.lib.input = TextInput::with(&q);
+                self.run_search();
+            }
+        }
+        true
     }
 
     pub(super) fn close_library(&mut self) {

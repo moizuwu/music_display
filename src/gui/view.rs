@@ -21,6 +21,8 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
         return;
     };
     let mut clicked_diagrams = false;
+    let mut to_library: Option<MetaField> = None;
+    let spotify_on = m.spot.on();
     let mut hide: Option<MetaField> = None;
     let mut mv: Option<(MetaField, i32)> = None;
     let capo = m.effective_capo();
@@ -96,6 +98,15 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
                         clicked_diagrams = true;
                     }
                 }
+                // with the Spotify library on, Track, Artist, Album and Genre open it there
+                if f.opens_library() && spotify_on {
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if r.clicked() {
+                        to_library = Some(*f);
+                    }
+                }
                 r.context_menu(|ui| {
                     if ui.button("Hide").clicked() {
                         hide = Some(*f);
@@ -117,6 +128,10 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     if clicked_diagrams {
         m.show_diagrams = true;
         m.layout.panels.set(music_display::layout::PanelId::Chords, true);
+    }
+    if let Some(f) = to_library {
+        let genre = m.genre.clone().unwrap_or_default();
+        m.spot.open_for(f, &s, &genre);
     }
     if let Some(f) = hide {
         m.layout.fields.set(f, false);

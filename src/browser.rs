@@ -79,6 +79,8 @@ pub const TABS: [&str; 7] = ["Recent", "Playlists", "Liked", "Albums", "Artists"
 pub const TABS_SHORT: [&str; 7] = ["Rec", "Lists", "Liked", "Alb", "Art", "Find", "Queue"];
 pub const TAB_LIKED: usize = 2;
 pub const TAB_PLAYLISTS: usize = 1;
+pub const TAB_ALBUMS: usize = 3;
+pub const TAB_ARTISTS: usize = 4;
 pub const TAB_SEARCH: usize = 5;
 pub const TAB_QUEUE: usize = 6;
 
@@ -261,4 +263,58 @@ pub fn fit_items(items: &[&str], width: usize) -> String {
     // equal priorities: `fit_hints` drops from the end
     let items: Vec<(u8, &str)> = items.iter().map(|i| (1, *i)).collect();
     crate::ui::fit_hints(&items, width)
+}
+
+/// Where a click on a metadata field goes in the library.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LibLink {
+    /// An artist or album level, opened by its Spotify URI.
+    Open(spotify::Item),
+    /// No URI known (an MPRIS player): run this search.
+    Search(String),
+}
+
+/// What Track / Artist / Album / Genre should open. `remote` is the last Spotify API state; its
+/// URIs are used only when it is the same song as `snap`.
+pub fn library_link(
+    f: crate::layout::MetaField,
+    snap: &crate::player::Snapshot,
+    genre: &str,
+    remote: Option<&spotify::Remote>,
+) -> Option<LibLink> {
+    use crate::layout::MetaField::*;
+    let same = remote.filter(|r| {
+        !snap.track_id.is_empty() && spotify::track_uri(&r.snap.track_id) == spotify::track_uri(&snap.track_id)
+    });
+    let first_artist = snap.artist.split(", ").next().unwrap_or("").trim();
+    match f {
+        Artist if first_artist.is_empty() => None,
+        Artist => match same.and_then(|r| r.artist_uris.first()) {
+            Some(uri) => Some(LibLink::Open(spotify::Item {
+                kind: "artist".into(),
+                uri: uri.clone(),
+                name: first_artist.into(),
+                openable: true,
+                ..Default::default()
+            })),
+            None => Some(LibLink::Search(first_artist.into())),
+        },
+        Album if snap.album.trim().is_empty() => None,
+        Album => match same.map(|r| &r.album_uri).filter(|u| !u.is_empty()) {
+            Some(uri) => Some(LibLink::Open(spotify::Item {
+                kind: "album".into(),
+                uri: uri.clone(),
+                name: snap.album.clone(),
+                sub: first_artist.into(),
+                openable: true,
+                ..Default::default()
+            })),
+            None => Some(LibLink::Search(format!("{} {first_artist}", snap.album).trim().to_string())),
+        },
+        Title if snap.title.trim().is_empty() => None,
+        Title => Some(LibLink::Search(format!("{} {first_artist}", snap.title).trim().to_string())),
+        Genre if genre.trim().is_empty() => None,
+        Genre => Some(LibLink::Search(genre.trim().to_string())),
+        _ => None,
+    }
 }

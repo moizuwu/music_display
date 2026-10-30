@@ -466,6 +466,12 @@ pub fn track_item(t: &Value) -> Option<Item> {
     })
 }
 
+/// An API state older than this is not shown any more (a rate limit or a lost login stopped the
+/// polling; the song has surely moved on).
+pub const REMOTE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// When the MPRIS player drops out for a moment, only an API answer this fresh stands in for it.
+pub const REMOTE_FRESH: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// What `/me/player` says is playing, and where.
 #[derive(Clone, Debug)]
 pub struct Remote {
@@ -473,6 +479,10 @@ pub struct Remote {
     /// This PC plays it (the Spotify app or spotifyd).
     pub local: bool,
     pub device: String,
+    /// `spotify:album:…` of the song (empty for episodes).
+    pub album_uri: String,
+    /// `spotify:artist:…` of each artist, in the order of `Snapshot::artist`.
+    pub artist_uris: Vec<String>,
 }
 
 /// `/me/player` → a snapshot like the MPRIS ones; `None` when nothing is loaded.
@@ -512,7 +522,8 @@ pub fn parse_state(p: &Value, is_local: impl Fn(&str) -> bool) -> Option<Remote>
             _ => Loop::None,
         }),
     };
-    Some(Remote { snap, local: is_local(&device), device })
+    let artist_uris = t["artists"].as_array().into_iter().flatten().map(|a| s(&a["uri"])).filter(|u| !u.is_empty()).collect();
+    Some(Remote { snap, local: is_local(&device), device, album_uri: s(&album["uri"]), artist_uris })
 }
 
 /// Recently played → distinct (kind, context uri, a track from it), newest first. Plays without

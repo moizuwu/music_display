@@ -567,6 +567,11 @@ fn general(ui: &mut Ui, m: &mut Model) {
     if done {
         m.save_lyric_numbers();
     }
+    let titles = [("off".to_string(), "off"), ("title".to_string(), "song title"), ("artist-title".to_string(), "artist - title")];
+    if let Some(v) = combo(ui, "wintitle", "Song in the window title", &m.args.window_title, &titles) {
+        m.args.window_title = v.clone();
+        m.persist("Window title", &[("window_title", v.into())]);
+    }
     ui.separator();
     ui.heading("View");
     if let Some(v) = check(ui, "Minimal view (lyrics only, large centred line)", m.x.minimal) {
@@ -578,6 +583,18 @@ fn general(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = check(ui, "Cava in a column of its own (third column)", !m.layout.cava_under_lyrics) {
         m.set_third_column(v);
     }
+    let mut bars = m.args.cava_bars as u32;
+    ui.horizontal(|ui| {
+        ui.label("Cava bars");
+        let r = ui.add(egui::DragValue::new(&mut bars).range(4..=1000).speed(1));
+        if r.changed() {
+            m.args.cava_bars = bars as u16;
+        }
+        if r.drag_stopped() || r.lost_focus() {
+            m.persist("Cava bars", &[("cava_bars", (bars as i64).into())]);
+        }
+        weak(ui, "used the next time cava starts");
+    });
     let cur = preset_of(&m.layout);
     let shown = cur.unwrap_or("custom");
     let mut chosen: Option<&str> = None;
@@ -598,7 +615,7 @@ fn general(ui: &mut Ui, m: &mut Model) {
     }
     weak(ui, "Panels, fields and buttons are in the Layout tab. Press ? for the key list.");
     ui.separator();
-    weak(ui, "Terminal-only settings (colour files, ASCII cover, mouse, terminal title, hide colour-file note) are not here.");
+    weak(ui, "Terminal-only settings (colour files and the cover tint that uses them, ASCII cover, mouse, hide colour-file note) are not here; the Appearance tab has the window's own colours.");
 }
 
 fn lyrics(ui: &mut Ui, m: &mut Model) {
@@ -629,6 +646,26 @@ fn lyrics(ui: &mut Ui, m: &mut Model) {
     if done {
         m.save_lyric_numbers();
     }
+    let mut off = m.args.offset;
+    let (och, odone) = slider(ui, "Default lyric offset", &mut off, -10.0..=10.0, " s");
+    if och {
+        let off = (off * 10.0).round() / 10.0;
+        m.args.offset = off;
+        m.offset = off;
+    }
+    if odone {
+        let off = m.args.offset;
+        m.persist("Lyric offset", &[("offset", off.into())]);
+    }
+    let mut tries = m.args.lyrics_retries;
+    let (rch, rdone) = slider(ui, "Lyrics lookup retries", &mut tries, 0..=10, "");
+    if rch {
+        m.args.lyrics_retries = tries;
+    }
+    if rdone {
+        m.persist("Lyrics retries", &[("lyrics_retries", (tries as i64).into())]);
+    }
+    weak(ui, "The offset is the starting value for every song; , and . nudge the current one.");
     weak(ui, "Keys: b big line, x size, i spacing, u padding, a word by word (the keys change them for this run only, like in the terminal).");
 }
 
@@ -651,6 +688,28 @@ fn chords(ui: &mut Ui, m: &mut Model) {
         m.save_chords_match();
     }
     weak(ui, "Lower shows weaker matches of a sheet to the lyrics; 0 always shows it.");
+    let mut ctx = m.args.chords_context as u32;
+    ui.horizontal(|ui| {
+        ui.label("Chords on the active line and");
+        let r = ui.add(egui::DragValue::new(&mut ctx).range(0..=99).speed(0.2));
+        ui.label("upcoming ones");
+        if r.changed() {
+            m.args.chords_context = ctx as u16;
+        }
+        if r.drag_stopped() || r.lost_focus() {
+            m.persist("Chord lines", &[("chords_context", (ctx as i64).into())]);
+        }
+    });
+    weak(ui, "99 shows the chords on every line.");
+    let dir = m.args.chords_dir.clone().unwrap_or_else(music_display::chords::default_dir).display().to_string();
+    if let Some(d) = text_row(ui, &mut m.ux.s.edits, "chords_dir", "Chord sheet folder", &dir, "", false) {
+        // an empty field keeps the folder (the default one is shown as the text)
+        if !d.is_empty() {
+            m.args.chords_dir = Some(std::path::PathBuf::from(&d));
+            m.persist("Chord folder", &[("chords_dir", d.into())]);
+        }
+    }
+    weak(ui, "Your own sheets are read from here from the next track on.");
     if let Some(v) = check(ui, "Member parts: who sings which line (experimental)", m.args.member_parts) {
         m.set_member_parts(v);
     }

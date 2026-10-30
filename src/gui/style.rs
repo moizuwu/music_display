@@ -2,10 +2,11 @@
 //! styles, fonts, the background, panel cards and transport icons, plus the Appearance tab of
 //! the settings window. The settings themselves are plain data in `guiconf`, so they are tested
 //! without a window; nothing in this file has been checked visually on a real compositor.
+use super::backdrop;
 use super::model::Model;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 use music_display::color::{self, Rgb};
-use music_display::guiconf::{Accent, Align as LAlign, Animation, Background, GuiConf, Theme, Weight};
+use music_display::guiconf::{Accent, Align as LAlign, Animation, Background, GuiConf, Preset, Theme, Weight};
 
 /// The family the active line uses when `active_weight` is medium or bold.
 const BOLD: &str = "md-bold";
@@ -22,8 +23,12 @@ pub struct Look {
     accent: Option<Rgb>,
     /// A tiny copy of the cover, stretched smooth, for `background = "cover-blur"`.
     blur: Option<egui::TextureHandle>,
+    /// The picture of `background = "image"`, with the path it was loaded from (and whether that failed).
+    picture: Option<(String, Option<egui::TextureHandle>)>,
     families: Option<Vec<String>>,
     filter: String,
+    /// The picture path being typed (written to the settings when the field loses focus).
+    image_edit: Option<String>,
     /// A change not written to the file yet (written when the pointer is released).
     dirty: bool,
     /// "Reset appearance" was pressed once and asks again.
@@ -50,9 +55,20 @@ fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
-/// The window colour for a theme.
-fn base(dark: bool) -> Rgb {
-    if dark { (27, 27, 31) } else { (243, 243, 246) }
+/// The window colour for a theme (a named look can have its own dark one).
+fn base(g: &GuiConf, dark: bool) -> Rgb {
+    match g.theme_preset.base() {
+        Some(c) if dark => c,
+        _ => if dark { (27, 27, 31) } else { (243, 243, 246) },
+    }
+}
+
+/// The colour the moving backgrounds are drawn in.
+fn effect_color(g: &GuiConf, cover: Option<Rgb>) -> Color32 {
+    match (g.accent, cover) {
+        (Accent::Fixed(c), _) | (Accent::Cover, Some(c)) => rgb32(c),
+        (Accent::Cover, None) => Color32::from_rgb(170, 130, 230),
+    }
 }
 
 impl Look {
@@ -63,6 +79,32 @@ impl Look {
             let small = i.resize_exact(24, 24, image::imageops::FilterType::Triangle).to_rgba8();
             ctx.load_texture("cover-blur", egui::ColorImage::from_rgba_unmultiplied([24, 24], small.as_raw()), egui::TextureOptions::LINEAR)
         });
+    }
+
+    /// Load the picture at `path` once (and again when the path changes); a bad path shows nothing.
+    fn load_picture(&mut self, ctx: &egui::Context, path: &str) {
+        if self.picture.as_ref().is_some_and(|(p, _)| p == path) {
+            return;
+        }
+        let full = match path.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir().map(|h| h.join(rest)).unwrap_or_else(|| path.into()),
+            None => std::path::PathBuf::from(path),
+        };
+        let tex = (!path.is_empty())
+            .then(|| image::open(&full).ok())
+            .flatten()
+            .map(|img| {
+                let img = if img.width().max(img.height()) > 2048 { img.thumbnail(2048, 2048) } else { img };
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                ctx.load_texture("background-picture", egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), egui::TextureOptions::LINEAR)
+            });
+        self.picture = Some((path.to_string(), tex));
+    }
+
+    /// Is something on the background moving (so the window should redraw about 30 times a second)?
+    pub fn animated(g: &GuiConf) -> bool {
+        matches!(g.background, Background::Particles | Background::Fog | Background::Bats)
     }
 
     /// Bring the egui styles, fonts and window flags in line with `g` (only when it changed).
@@ -107,37 +149,58 @@ impl Look {
             let level = if g.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         }
+        if first || prev.as_ref().is_some_and(|p| p.ui_scale != g.ui_scale) {
+            ctx.set_zoom_factor(g.ui_scale as f32 / 100.0);
+        }
         if prev.as_ref().is_some_and(|p| p.decorations != g.decorations) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(g.decorations));
         }
     }
 
     /// The window background, under every panel: solid, a blurred cover, or a gradient.
-    pub fn paint_background(&self, ui: &Ui, g: &GuiConf) {
+    pub fn paint_background(&mut self, ui: &Ui, g: &GuiConf) {
+        if g.background == Background::Image {
+            self.load_picture(ui.ctx(), &g.background_image);
+        }
         let r = ui.ctx().content_rect();
         let dark = ui.visuals().dark_mode;
         let a = g.opacity as f32 / 100.0;
-        let b = rgb32(base(dark));
+        let b = rgb32(base(g, dark));
         let p = ui.painter();
+        let time = ui.input(|i| i.time);
+        let fx = effect_color(g, self.accent);
         match (g.background, &self.blur, self.accent) {
+            (Background::Image, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                if let Some((_, Some(t))) = &self.picture {
+                    p.image(t.id(), r, cover_uv(r, t.size_vec2()), with_alpha(Color32::WHITE, a * 0.8));
+                    p.rect_filled(r, 0.0, with_alpha(b, a * 0.35));
+                }
+            }
+            (Background::Particles, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                backdrop::embers(p, r, time, fx, a);
+            }
+            (Background::Fog, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                backdrop::fog(p, r, time, fx, a);
+            }
+            (Background::Bats, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                backdrop::fog(p, r, time, Color32::from_rgb(110, 50, 170), a);
+                backdrop::embers(p, r, time, fx, a * 0.7);
+                backdrop::bats(p, r, time, Color32::from_rgb(8, 4, 12), a);
+            }
             (Background::CoverBlur, Some(t), _) => {
-                // cover-fit the square copy to the window, then a veil so the text stays readable
-                let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-                let uv = if w > h {
-                    let k = h / w / 2.0;
-                    Rect::from_min_max(Pos2::new(0.0, 0.5 - k), Pos2::new(1.0, 0.5 + k))
-                } else {
-                    let k = w / h / 2.0;
-                    Rect::from_min_max(Pos2::new(0.5 - k, 0.0), Pos2::new(0.5 + k, 1.0))
-                };
+                let uv = cover_uv(r, Vec2::splat(1.0));
                 p.rect_filled(r, 0.0, with_alpha(b, a));
                 p.image(t.id(), r, uv, with_alpha(Color32::WHITE, a * 0.55));
                 p.rect_filled(r, 0.0, with_alpha(b, a * 0.45));
             }
             (Background::Gradient, _, acc) => {
                 let top = match acc {
-                    Some(c) => rgb32(color::mix(base(dark), c, 0.28)),
-                    None => rgb32(color::mix(base(dark), if dark { (255, 255, 255) } else { (0, 0, 0) }, 0.10)),
+                    Some(c) => rgb32(color::mix(base(g, dark), c, 0.28)),
+                    None => rgb32(color::mix(base(g, dark), if dark { (255, 255, 255) } else { (0, 0, 0) }, 0.10)),
                 };
                 let mut mesh = egui::Mesh::default();
                 let (ct, cb) = (with_alpha(top, a), with_alpha(b, a));
@@ -156,13 +219,21 @@ impl Look {
     }
 }
 
+/// The part of a picture (UV) that fills `r` without stretching it.
+fn cover_uv(r: Rect, size: Vec2) -> Rect {
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    let (pw, ph) = (size.x.max(1.0), size.y.max(1.0));
+    let (kx, ky) = if w / h > pw / ph { (1.0, (h / w) * (pw / ph) / 1.0) } else { ((w / h) * (ph / pw), 1.0) };
+    Rect::from_min_max(Pos2::new(0.5 - kx / 2.0, 0.5 - ky / 2.0), Pos2::new(0.5 + kx / 2.0, 0.5 + ky / 2.0))
+}
+
 /// The egui style for one theme: neutral egui defaults plus the user's accent, radius, spacing
 /// and text sizes. Panels are see-through; the background and the cards are painted by us.
 fn style(g: &GuiConf, cover: Option<Rgb>, dark: bool) -> egui::Style {
     let mut s = egui::Style { visuals: if dark { egui::Visuals::dark() } else { egui::Visuals::light() }, ..Default::default() };
     let acc = match g.accent {
         Accent::Fixed(c) => Some(c),
-        Accent::Cover => cover.map(|c| color::readable(c, Some(base(dark)))),
+        Accent::Cover => cover.map(|c| color::readable(c, Some(base(g, dark)))),
     };
     let v = &mut s.visuals;
     v.panel_fill = Color32::TRANSPARENT;
@@ -265,7 +336,11 @@ pub fn gutter(g: &GuiConf) -> Frame {
 /// A rounded card behind a panel's content: `panel_opacity` fill, optional border.
 pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
     let dark = ui.visuals().dark_mode;
-    let fill = if dark { Color32::from_rgb(40, 40, 47) } else { Color32::WHITE };
+    let fill = match g.theme_preset {
+        Preset::Halloween if dark => Color32::from_rgb(38, 20, 50),
+        _ if dark => Color32::from_rgb(40, 40, 47),
+        _ => Color32::WHITE,
+    };
     let alpha = g.panel_opacity as f32 / 100.0 * (g.opacity as f32 / 100.0).max(0.0);
     let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
     let margin = g.panel_spacing.min(127) as i8;
@@ -371,6 +446,20 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     let mut changed = false;
     let g = &mut m.gui;
     ui.label(egui::RichText::new("Changes show at once and are saved to [gui] in config.toml.").small().weak());
+    ui.heading("Look");
+    let mut preset = g.theme_preset;
+    if choice(ui, "Look", &mut preset, &[(Preset::None, "none"), (Preset::Halloween, "Halloween")]) {
+        g.apply_preset(preset);
+        changed = true;
+    }
+    ui.label(egui::RichText::new("Picking a look sets colours, background and glow below; change any of them afterwards.").small().weak());
+    let mut v = g.ui_scale as u32;
+    if slider(ui, "Interface size", &mut v, 50..=200, "%") {
+        g.ui_scale = v as u16;
+        changed = true;
+    }
+    ui.label(egui::RichText::new("Ctrl and + / - / 0 zoom as well; Ctrl+Shift+Up / Down change the window opacity.").small().weak());
+    ui.separator();
     ui.heading("Window");
     let mut o = g.opacity as u32;
     if slider(ui, "Window opacity", &mut o, 0..=100, "%") {
@@ -390,8 +479,35 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
         ui,
         "Background",
         &mut g.background,
-        &[(Background::Solid, "solid"), (Background::CoverBlur, "cover blur"), (Background::Gradient, "gradient")],
+        &[
+            (Background::Solid, "solid"),
+            (Background::CoverBlur, "cover blur"),
+            (Background::Gradient, "gradient"),
+            (Background::Image, "picture"),
+            (Background::Particles, "embers"),
+            (Background::Fog, "fog"),
+            (Background::Bats, "fog and bats"),
+        ],
     );
+    if g.background == Background::Image {
+        ui.horizontal(|ui| {
+            ui.label("Picture file");
+            let buf = look.image_edit.get_or_insert_with(|| g.background_image.clone());
+            let r = ui.add(egui::TextEdit::singleline(buf).hint_text("/path/to/picture.png or ~/…").desired_width(260.0));
+            if r.lost_focus() && buf.trim() != g.background_image {
+                g.background_image = buf.trim().to_string();
+                changed = true;
+            } else if !r.has_focus() && *buf != g.background_image {
+                *buf = g.background_image.clone();
+            }
+        });
+        if !g.background_image.is_empty() && look.picture.as_ref().is_some_and(|(p, t)| *p == g.background_image && t.is_none()) {
+            ui.colored_label(ui.visuals().warn_fg_color, "That file can't be read as a picture.");
+        }
+    }
+    if Look::animated(g) {
+        ui.label(egui::RichText::new("Moving backgrounds redraw the window about 30 times a second while it has focus.").small().weak());
+    }
     changed |= ui.checkbox(&mut g.decorations, "Window title bar and borders").changed();
     changed |= ui.checkbox(&mut g.always_on_top, "Keep the window on top").changed();
     changed |= ui.checkbox(&mut g.remember_window, "Remember window size and position (next start)").changed();
@@ -465,6 +581,11 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
         g.inactive_fade = v as u8;
         changed = true;
     }
+    let mut v = g.lyrics_glow as u32;
+    if slider(ui, "Glow around the active line", &mut v, 0..=100, "%") {
+        g.lyrics_glow = v as u8;
+        changed = true;
+    }
     changed |= choice(ui, "Lyrics movement", &mut g.lyrics_animation, &[(Animation::Smooth, "smooth"), (Animation::Instant, "instant")]);
 
     ui.separator();
@@ -480,6 +601,7 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
         changed = true;
     }
     changed |= ui.checkbox(&mut g.panel_borders, "Panel borders").changed();
+    changed |= ui.checkbox(&mut g.lock_layout, "Lock the layout (column borders can't be dragged)").changed();
 
     ui.separator();
     // one press asks, the second one resets

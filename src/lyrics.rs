@@ -21,6 +21,8 @@ struct Rec {
     plain: Option<String>,
     instrumental: Option<bool>,
     duration: Option<f64>,
+    #[serde(rename = "trackName")]
+    track_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -292,6 +294,15 @@ async fn get(
     }
 }
 
+/// Does a search hit's `name` belong to the song `title`? Compared without case, editions and
+/// credits, either one containing the other.
+fn names_title(name: Option<&str>, title: &str) -> bool {
+    let Some(name) = name.filter(|n| !n.trim().is_empty()) else { return true };
+    let norm = |s: &str| crate::util::normalize_track(&crate::year::base_title(s));
+    let (a, b) = (norm(name), norm(title));
+    a.is_empty() || b.is_empty() || a.contains(&b) || b.contains(&a)
+}
+
 async fn search(
     c: &reqwest::Client,
     base: &str,
@@ -303,7 +314,8 @@ async fn search(
     let q = [("artist_name", artist), ("track_name", title)];
     match request(c, &format!("{base}/api/search"), &q, retries, p.backoff).await {
         Reply::Body(t) => match serde_json::from_str::<Vec<Rec>>(&t) {
-            Ok(v) => Step::Hit(v),
+            // a search also returns other songs: only the one asked for (a hit without a name stays)
+            Ok(v) => Step::Hit(v.into_iter().filter(|r| names_title(r.track_name.as_deref(), title)).collect()),
             Err(_) => Step::Failed("unreadable reply"),
         },
         Reply::NotFound => Step::Nothing,
@@ -554,7 +566,15 @@ mod tests {
             plain: (!plain.is_empty()).then(|| plain.to_string()),
             instrumental: None,
             duration: Some(duration),
+            track_name: None,
         }
+    }
+
+    #[test]
+    fn a_search_hit_must_be_the_song_asked_for() {
+        assert!(names_title(Some("Into The Sun (Remastered)"), "Into The Sun"));
+        assert!(names_title(None, "My Universe"));
+        assert!(!names_title(Some("Into The Sun"), "My Universe"));
     }
 
     #[test]

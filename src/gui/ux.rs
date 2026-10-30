@@ -12,6 +12,10 @@ pub struct Ux {
     pub keys: Keymap,
     /// The help window (`?`).
     pub help: bool,
+    /// The help window lets the keys be changed; `key_capture` waits for the next key of that action.
+    pub key_edit: bool,
+    pub key_capture: Option<crate::app::Action>,
+    pub key_note: Option<String>,
     pub s: SettingsUi,
     /// Volume to restore when un-muting.
     pub vol_last: f64,
@@ -31,6 +35,9 @@ impl Ux {
         Ux {
             keys,
             help: false,
+            key_edit: false,
+            key_capture: None,
+            key_note: None,
             s: SettingsUi::default(),
             vol_last: 0.5,
             ann_rows: 0.0,

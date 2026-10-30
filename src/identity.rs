@@ -31,10 +31,13 @@ pub fn same_recording(shown: Option<&Snapshot>, track_key: u64, shown_pos: f64, 
     if track_key == 0 || o.player != s.player {
         return false;
     }
-    if !s.track_id.is_empty() && s.track_id == o.track_id {
+    // Some players keep one id or url for everything they play (a browser tab, a stream), so a
+    // match only counts while the position has not gone back to the start: a new song does.
+    let restarted = s.position + 3.0 < shown_pos;
+    if !restarted && !s.track_id.is_empty() && s.track_id == o.track_id {
         return true;
     }
-    if !s.url.is_empty() && s.url == o.url {
+    if !restarted && !s.url.is_empty() && s.url == o.url {
         return true;
     }
     let same_len = o.length > 0.0 && (o.length - s.length).abs() <= 1.0;
@@ -120,6 +123,8 @@ mod tests {
         assert!(same_recording(Some(&o), 7, 30.0, &snap("vlc", "Playing", 31.0, "a")));
         // another id, but it runs on where we were with the same length
         assert!(same_recording(Some(&o), 7, 30.0, &snap("vlc", "Playing", 30.5, "b")));
+        // a player that keeps one id for every song: a restart is still a new song
+        assert!(!same_recording(Some(&o), 7, 120.0, &snap("vlc", "Playing", 1.0, "a")));
         // a jump or a restart is a different item
         assert!(!same_recording(Some(&o), 7, 30.0, &snap("vlc", "Playing", 1.0, "b")));
         assert!(!same_recording(Some(&o), 7, 30.0, &snap("vlc", "Playing", 90.0, "b")));
@@ -127,6 +132,15 @@ mod tests {
         assert!(!same_recording(Some(&o), 0, 30.0, &snap("vlc", "Playing", 31.0, "a")));
         assert!(!same_recording(Some(&o), 7, 30.0, &snap("mpv", "Playing", 31.0, "a")));
         assert!(!same_recording(None, 7, 30.0, &o));
+    }
+
+    #[test]
+    fn a_second_title_with_a_constant_id_is_not_the_same_recording() {
+        let mut o = snap("firefox", "Playing", 150.0, "/org/mpris/MediaPlayer2/firefox");
+        o.title = "Into The Sun".into();
+        let mut n = snap("firefox", "Playing", 0.5, "/org/mpris/MediaPlayer2/firefox");
+        n.title = "My Universe".into();
+        assert!(!same_recording(Some(&o), 7, 150.0, &n));
     }
 
     #[test]
