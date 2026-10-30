@@ -727,7 +727,7 @@ pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
 /// The library button, in the top row. `spotify_button = false` hides it (the `o` key still
 /// opens the library).
 pub fn library_button(ui: &mut Ui, m: &mut Model) {
-    if m.spot.on() && !m.args.no_spotify_button && ui.selectable_label(m.spot.open, "library").on_hover_text("Spotify library (o)").clicked() {
+    if m.spot.on() && !m.args.no_spotify_button && ui.add(egui::Button::new("library").selected(m.spot.open)).on_hover_text("Spotify library (o)").clicked() {
         toggle(m);
     }
 }
