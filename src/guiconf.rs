@@ -148,6 +148,8 @@ pub struct GuiConf {
     pub lyrics_glow: u8,
     /// The column borders cannot be dragged.
     pub lock_layout: bool,
+    /// On a tiling compositor (Hyprland, sway, niri) the extra windows are asked to float.
+    pub float_windows: bool,
     /// Size of the translated line in points; 0 = the text size of the metadata.
     pub translation_size: u16,
     /// Size of the member tag in points; 0 = small.
@@ -191,6 +193,7 @@ impl Default for GuiConf {
             background_image: String::new(),
             lyrics_glow: 0,
             lock_layout: false,
+            float_windows: true,
             translation_size: 0,
             member_size: 0,
             inner_sizes: Default::default(),
@@ -292,7 +295,7 @@ impl GuiConf {
 
 const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, font, lyrics_size, active_size, meta_size, \
 active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, translation_size, member_size, inner_sizes, popped";
+remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
 
 impl GuiConf {
     /// Set the values the look is made of (everything else is left as the user has it, the
@@ -430,7 +433,7 @@ impl GuiConf {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
                     None => warn(format!("[gui] {k}: expected a list of panel names; ignored")),
                 },
-                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" => {
+                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" => {
                     let Some(b) = v.as_bool() else {
                         warn(format!("[gui] {k}: expected true or false; using the default"));
                         continue;
@@ -440,6 +443,7 @@ impl GuiConf {
                         "remember_window" => self.remember_window = b,
                         "always_on_top" => self.always_on_top = b,
                         "lock_layout" => self.lock_layout = b,
+                        "float_windows" => self.float_windows = b,
                         _ => self.decorations = b,
                     }
                 }
@@ -527,6 +531,7 @@ impl GuiConf {
         put("background_image", self.background_image.clone().into());
         put("lyrics_glow", (self.lyrics_glow as i64).into());
         put("lock_layout", self.lock_layout.into());
+        put("float_windows", self.float_windows.into());
         put(
             "inner_sizes",
             toml::Value::Table(self.inner_sizes.iter().map(|(k, v)| (k.clone(), toml::Value::Integer(*v as i64))).collect()),
@@ -785,6 +790,7 @@ mod tests {
             background_image: "/x/y.png".into(),
             lyrics_glow: 30,
             lock_layout: true,
+            float_windows: false,
             translation_size: 22,
             member_size: 12,
             inner_sizes: [("cava".to_string(), 150u16), ("stack".to_string(), 300)].into_iter().collect(),

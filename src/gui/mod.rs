@@ -5,6 +5,7 @@ mod backdrop;
 mod browse;
 mod controls;
 mod extras;
+mod floathook;
 mod floating;
 mod footer;
 mod keys;
@@ -14,6 +15,7 @@ mod model;
 mod popout;
 mod privacy;
 mod settings;
+mod sizewatch;
 mod style;
 mod ux;
 mod translation;
@@ -70,6 +72,9 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
                     colors_watch: Vec::new(),
                     colors_asked: None,
                     colors_polled: std::time::Instant::now(),
+                    size_watch: Default::default(),
+                    col_epoch: 0,
+                    col_total: 0.0,
                 }) as Box<dyn eframe::App>)
             }),
         )
@@ -93,6 +98,12 @@ struct Gui {
     colors_watch: Vec<(PathBuf, Option<std::time::SystemTime>)>,
     colors_asked: Option<(std::time::Instant, music_display::guiconf::ColorsFrom, String)>,
     colors_polled: std::time::Instant,
+    /// Which panels were dragged to which size.
+    size_watch: sizewatch::SizeWatch,
+    /// The columns' size in the window is taken from their share again each time the window
+    /// itself changes size; this counts those times (it is part of the columns' ids).
+    col_epoch: u32,
+    col_total: f32,
 }
 
 impl Gui {
@@ -195,11 +206,19 @@ impl Gui {
         self.m.gui.inner_sizes.get(key).map_or(default, |v| *v as f32)
     }
 
-    /// Remember a dragged size: when the pointer is let go and the panel is not the size it
-    /// started with, the new size goes to `[gui] inner_sizes`.
-    fn remember_size(&mut self, ui: &egui::Ui, key: &str, default: f32, extent: f32) {
-        if ui.input(|i| i.pointer.any_released()) && (self.inner_size(key, default) - extent).abs() >= 2.0 {
-            self.m.gui.inner_sizes.insert(key.to_string(), extent.round().clamp(40.0, 4000.0) as u16);
+    /// A panel was dragged to `extent` and the pointer was let go: that size, once. Only a size
+    /// that changed while the pointer was down counts, so the sizes a panel gets from the
+    /// layout (the first frames, a window that is resized or maximised) are never taken for
+    /// something the user chose.
+    fn dragged_size(&mut self, ui: &egui::Ui, key: &str, extent: f32) -> Option<f32> {
+        let (down, released) = ui.input(|i| (i.pointer.any_down(), i.pointer.any_released()));
+        self.size_watch.step(key, extent, down, released)
+    }
+
+    /// Remember a dragged size of a panel inside a column in `[gui] inner_sizes`.
+    fn remember_size(&mut self, ui: &egui::Ui, key: &str, extent: f32) {
+        if let Some(px) = self.dragged_size(ui, key, extent) {
+            self.m.gui.inner_sizes.insert(key.to_string(), px.round().clamp(40.0, 4000.0) as u16);
             let t = self.m.gui.write();
             self.m.save_settings(&[("gui", toml::Value::Table(t))]);
         }
@@ -232,7 +251,7 @@ impl Gui {
                         .default_size(self.inner_size("cava", 120.0))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| extras::cava_panel(ui, &self.m));
-                    self.remember_size(ui, "cava", 120.0, r.response.rect.height());
+                    self.remember_size(ui, "cava", r.response.rect.height());
                 }
                 // with the annotations column open the diagrams live in it (above the notes)
                 if self.m.show_diagrams && !self.m.annotations_shown() && !self.is_popped(PanelId::Chords) {
@@ -240,7 +259,7 @@ impl Gui {
                         .default_size(self.inner_size("diagrams", 280.0))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| view::diagrams(ui, &mut self.m));
-                    self.remember_size(ui, "diagrams", 280.0, r.response.rect.width());
+                    self.remember_size(ui, "diagrams", r.response.rect.width());
                 }
                 lyrics_view::lyrics(ui, &mut self.m);
             }
@@ -253,7 +272,7 @@ impl Gui {
                         .default_size(self.inner_size("stack", half))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| view::diagrams(ui, &mut self.m));
-                    self.remember_size(ui, "stack", half, r.response.rect.height());
+                    self.remember_size(ui, "stack", r.response.rect.height());
                 }
                 view::annotations(ui, &mut self.m);
             }
@@ -365,20 +384,26 @@ impl eframe::App for Gui {
         };
         // layout.direction: columns side by side, or stacked top to bottom
         let total = if vertical { ui.available_height() } else { ui.available_width() };
+        // The columns start at their share of the window. egui remembers a panel's size in
+        // pixels, so when the window changes size (the first frame is often not the size it ends
+        // up with, a tiling manager maximises it) they would keep the pixels of the old size:
+        // new ids make them start again from their share, and a drag is what changes the share.
+        if (total - self.col_total).abs() > 2.0 && !ui.input(|i| i.pointer.any_down()) {
+            self.col_total = total;
+            self.col_epoch += 1;
+        }
         for (i, id) in rest.iter().enumerate() {
             let pct = self.m.layout.size_of(*id).map(f32::from).unwrap_or(if *id == PanelId::Metadata { 34.0 } else { 25.0 });
-            let panel = if vertical { egui::Panel::top(format!("col{i}")) } else { egui::Panel::left(format!("col{i}")) };
+            let pid = format!("col{i}-{}", self.col_epoch);
+            let panel = if vertical { egui::Panel::top(pid) } else { egui::Panel::left(pid) };
             let panel = panel.frame(style::gutter(&g)).resizable(!g.lock_layout).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
             let resp = panel.show(ui, |ui| {
                 style::card(ui, &g, |ui| self.panel(ui, *id));
             });
             // dragging the border stores the new share
             let extent = if vertical { resp.response.rect.height() } else { resp.response.rect.width() };
-            let new = (extent / total.max(1.0) * 100.0).round() as u16;
-            let shown = self.m.layout.size_of(*id).unwrap_or(if *id == PanelId::Metadata { 34 } else { 25 });
-            let released = ui.input(|i| i.pointer.any_released());
-            if (resp.response.drag_stopped() || released) && new.abs_diff(shown) >= 1 && self.m.layout.size_of(*id) != Some(new) {
-                self.m.layout.set_size(*id, new);
+            if let Some(px) = self.dragged_size(ui, &format!("col:{}", id.id()), extent) {
+                self.m.layout.set_size(*id, (px / total.max(1.0) * 100.0).round() as u16);
                 self.m.save_layout();
             }
         }

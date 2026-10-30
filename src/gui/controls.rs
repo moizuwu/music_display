@@ -69,18 +69,18 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
                     }
                 }
                 Ctl::Prev => {
-                    if style::icon_button(ui, Icon::Prev, false).on_hover_text("previous").clicked() {
+                    if style::icon_button(ui, Icon::Prev).on_hover_text("previous").clicked() {
                         m.prev();
                     }
                 }
                 Ctl::Play(playing) => {
                     let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
-                    if style::icon_button(ui, icon, true).on_hover_text(tip).clicked() {
+                    if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
                         m.play_pause();
                     }
                 }
                 Ctl::Next => {
-                    if style::icon_button(ui, Icon::Next, false).on_hover_text("next").clicked() {
+                    if style::icon_button(ui, Icon::Next).on_hover_text("next").clicked() {
                         m.next();
                     }
                 }

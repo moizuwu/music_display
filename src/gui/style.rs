@@ -456,18 +456,17 @@ pub enum Icon {
     Next,
 }
 
+/// The size of every transport button (previous, play / pause, next alike).
+pub const ICON_SIDE: f32 = 30.0;
+
 /// A round transport button with a drawn icon (no dependence on the font having the glyphs);
-/// lights up under the pointer, and `main` ones (play) are filled with the accent.
-pub fn icon_button(ui: &mut Ui, icon: Icon, main: bool) -> Response {
-    let side = if main { 40.0 } else { 30.0 };
+/// all of them look the same and light up under the pointer.
+pub fn icon_button(ui: &mut Ui, icon: Icon) -> Response {
+    let side = ICON_SIDE;
     let (r, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
-    let accent = ui.visuals().hyperlink_color;
-    let ink = if main { if color::luminance((accent.r(), accent.g(), accent.b())) > 0.6 { Color32::BLACK } else { Color32::WHITE } } else { ui.visuals().strong_text_color() };
+    let ink = ui.visuals().strong_text_color();
     let p = ui.painter();
-    if main {
-        let k = if resp.is_pointer_button_down_on() { 0.8 } else if resp.hovered() { 1.0 } else { 0.85 };
-        p.circle_filled(r.center(), side / 2.0, accent.gamma_multiply(k));
-    } else if resp.hovered() {
+    if resp.hovered() {
         p.circle_filled(r.center(), side / 2.0, with_alpha(ui.visuals().widgets.hovered.fg_stroke.color, if resp.is_pointer_button_down_on() { 0.22 } else { 0.12 }));
     }
     let c = r.center();
@@ -622,6 +621,7 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     }
     changed |= ui.checkbox(&mut g.decorations, "Window title bar and borders").changed();
     changed |= ui.checkbox(&mut g.always_on_top, "Keep the window on top").changed();
+    changed |= ui.checkbox(&mut g.float_windows, "Open the extra windows floating (Hyprland, sway, niri)").changed();
     changed |= ui.checkbox(&mut g.remember_window, "Remember window size and position (next start)").changed();
 
     ui.separator();
@@ -810,6 +810,14 @@ mod tests {
         // a colour source with a surface and no accent leaves the accent alone
         let only_surface = Colors { primary: None, ..sys(Some(true)) };
         assert_eq!(accent_of(&g, None, Some(&only_surface)), Some((242, 201, 76)));
+    }
+
+    #[test]
+    fn the_transport_buttons_are_one_size() {
+        // previous, play / pause and next share one constant: none is drawn larger than the others
+        assert_eq!(ICON_SIDE, 30.0);
+        let src = include_str!("controls.rs");
+        assert_eq!(src.matches("style::icon_button(ui, ").count(), 3);
     }
 
     #[test]

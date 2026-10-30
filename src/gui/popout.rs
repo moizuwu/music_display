@@ -54,12 +54,15 @@ impl Gui {
         let g = self.m.gui.clone();
         let mut docked: Vec<PanelId> = Vec::new();
         for (id, name) in PANELS {
+            let title = format!("music_display - {name}");
             if !self.is_popped(id) {
+                // (docked from the menu: the next time it is popped out it is a new window)
+                super::floathook::forget(ctx, &title);
                 continue;
             }
             let mut b = ViewportBuilder::default()
-                .with_title(format!("music_display - {name}"))
-                .with_app_id("music_display")
+                .with_title(title.clone())
+                .with_app_id("music_display.popout")
                 .with_inner_size(size_of(id))
                 .with_min_inner_size([200.0, 120.0])
                 .with_transparent(true)
@@ -73,12 +76,16 @@ impl Gui {
                     // no second window possible: the panel stays in the main window's own frame
                     style::card(ui, &g, |ui| self.panel(ui, id));
                 } else {
+                    if g.float_windows && super::floathook::first_frame(ui.ctx(), &title) {
+                        super::floathook::float_once(&title, size_of(id));
+                    }
                     self.look.paint_background(ui, &g);
                     self.look.paint_effects(ui, &g);
                     egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| style::card(ui, &g, |ui| self.panel(ui, id)));
                 }
                 if ui.input(|i| i.viewport().close_requested()) {
                     docked.push(id);
+                    super::floathook::forget(ui.ctx(), &title);
                 }
             });
         }

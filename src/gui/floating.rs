@@ -19,9 +19,11 @@ pub fn window(
     open: &mut bool,
     mut add: impl FnMut(&mut Ui, &mut Look),
 ) {
+    let title = format!("music_display - {title}");
     let mut b = ViewportBuilder::default()
-        .with_title(format!("music_display - {title}"))
-        .with_app_id("music_display")
+        .with_title(title.clone())
+        // (its own class, so that a rule of the compositor can name these windows)
+        .with_app_id("music_display.floating")
         .with_inner_size(size)
         .with_min_inner_size([240.0, 140.0])
         .with_transparent(true)
@@ -34,12 +36,17 @@ pub fn window(
             // the backend already put this in a window of the main one
             add(ui, look);
         } else {
+            // a tiling compositor is asked to float it, once, when it has just opened
+            if g.float_windows && super::floathook::first_frame(ui.ctx(), &title) {
+                super::floathook::float_once(&title, size);
+            }
             look.paint_background(ui, g);
             look.paint_effects(ui, g);
             egui::CentralPanel::default().frame(style::gutter(g)).show(ui, |ui| style::card(ui, g, |ui| add(ui, look)));
         }
         if ui.input(|i| i.viewport().close_requested()) {
             *open = false;
+            super::floathook::forget(ui.ctx(), &title);
         }
     });
 }
