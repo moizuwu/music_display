@@ -523,6 +523,7 @@ impl super::Gui {
         let g = self.m.gui.clone();
         // the window draws with the look too, so it is lent to it for the time being
         let mut look = std::mem::take(&mut self.look);
+        let mut close = false;
         super::floating::window(ctx, &mut look, &g, "settings", "Settings", [480.0, 600.0], &mut open, |ui, look| {
             ui.horizontal_wrapped(|ui| {
                 for (t, name) in Tab::ALL {
@@ -554,10 +555,16 @@ impl super::Gui {
                     Some(s) => ui.label(RichText::new(format!("saved: {s}")).small().color(ui.visuals().hyperlink_color)),
                     None => ui.label(RichText::new("changes apply at once and are saved to config.toml").small().weak()),
                 };
+                // (a tiling window manager draws no title bar with a close button)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("close").on_hover_text("close the settings").clicked() {
+                        close = true;
+                    }
+                });
             });
         });
         self.look = look;
-        self.m.ux.s.open = open;
+        self.m.ux.s.open = open && !close;
     }
 }
 

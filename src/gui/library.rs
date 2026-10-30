@@ -721,11 +721,15 @@ pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
     if ui.button("play here").on_hover_text("move playback to this computer").clicked() {
         m.spot.cmd(Cmd::Transfer);
     }
-    // `spotify_button = false` hides it (the `o` key still opens the library)
-    if !m.args.no_spotify_button && ui.selectable_label(m.spot.open, "library").on_hover_text("Spotify library (o)").clicked() {
+    m.take_spot_note();
+}
+
+/// The library button, in the top row. `spotify_button = false` hides it (the `o` key still
+/// opens the library).
+pub fn library_button(ui: &mut Ui, m: &mut Model) {
+    if m.spot.on() && !m.args.no_spotify_button && ui.selectable_label(m.spot.open, "library").on_hover_text("Spotify library (o)").clicked() {
         toggle(m);
     }
-    m.take_spot_note();
 }
 
 /// `o` and the button.

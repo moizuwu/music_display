@@ -345,6 +345,7 @@ impl eframe::App for Gui {
                     if ui.button("settings").on_hover_text("settings (s)").clicked() {
                         self.m.ux.s.open = !self.m.ux.s.open;
                     }
+                    library::library_button(ui, &mut self.m);
                 });
             });
         });
