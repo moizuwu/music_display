@@ -897,6 +897,7 @@ fn member_tag_shows_above_the_big_line_and_never_overlaps() {
             in_break: false,
             members,
             reserve_tag: reserve,
+            tag_below: false,
             progress: None,
         };
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -974,6 +975,7 @@ fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
         in_break,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress: None,
     };
     let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
@@ -2137,6 +2139,7 @@ fn chords_sit_above_their_glyphs_in_the_big_layout() {
         in_break: false,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress: None,
     };
     let (w, h) = (40u16, 12u16);
@@ -3463,6 +3466,7 @@ fn karaoke_colours_the_sung_part_of_the_big_line() {
         in_break: false,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress,
     };
     let (w, h) = (40u16, 12u16);
@@ -4542,4 +4546,60 @@ fn metadata_links_use_uris_only_for_the_same_song() {
     assert_eq!(library_link(F::Genre, &s, "Pop", None), Some(LibLink::Search("Pop".into())));
     assert_eq!(library_link(F::Genre, &s, "", None), None);
     assert_eq!(library_link(F::Key, &s, "Pop", None), None);
+}
+
+#[tokio::test]
+async fn auto_zero_capo_in_the_terminal_ui() {
+    let mut app = test_app();
+    app.apply(AppEvent::Player(Some(snap("Band", "Song", "Album"))));
+    let key = app.track_key;
+    let sheet = chords::parse_chordpro("{capo: 2}\n[Am]hello\n");
+    app.apply(AppEvent::Chords { key, sheet: Ok(Some(sheet)), capo: None });
+    assert_eq!(app.effective_capo(), 2);
+    assert_eq!(app.chord_shift(), 0);
+    app.args.auto_zero_capo = true;
+    assert_eq!((app.effective_capo(), app.chord_shift()), (0, 2));
+    // a capo remembered for the track wins
+    let sheet = chords::parse_chordpro("{capo: 2}\n[Am]hello\n");
+    app.apply(AppEvent::Chords { key, sheet: Ok(Some(sheet)), capo: Some(1) });
+    assert_eq!((app.effective_capo(), app.chord_shift()), (1, 1));
+}
+
+#[tokio::test]
+async fn translation_and_member_tag_go_where_the_settings_say() {
+    use cli::{MemberPosition as MP, TranslationPosition as TP};
+    let mut app = test_app();
+    app.apply(AppEvent::Player(Some(snap("Band", "Song", "Album"))));
+    let key = app.track_key;
+    app.apply(AppEvent::Lyrics { key, lyrics: lyrics::Lyrics::Synced(vec![(0.0, "hello there".into()), (30.0, "second line".into())]) });
+    let lang = app.args.translate_lang.clone();
+    app.apply(AppEvent::Translated { key, lang, lines: Ok((vec!["hej da".into(), "andra raden".into()], "test".into())) });
+    app.translate_on = true;
+    app.translate_both = true;
+    app.members = vec![vec!["Jimin".into()], vec![]];
+    // the rows (top to bottom) of the first line: original, translation, tag
+    let order = |app: &mut app::App| -> Vec<&'static str> {
+        let screen = render(app, 60, 20);
+        let at = |needle: &str| screen.iter().position(|r| r.contains(needle));
+        let mut found: Vec<(usize, &'static str)> =
+            [("hello there", "original"), ("hej da", "translation"), ("[Jimin]", "tag")].into_iter().filter_map(|(n, w)| at(n).map(|y| (y, w))).collect();
+        found.sort();
+        found.into_iter().map(|(_, w)| w).collect()
+    };
+    app.args.member_position = MP::Below;
+    assert_eq!(order(&mut app), ["original", "translation", "tag"]);
+    app.args.translation_position = TP::Above;
+    assert_eq!(order(&mut app), ["translation", "original", "tag"]);
+    app.args.member_position = MP::Above;
+    assert_eq!(order(&mut app), ["tag", "translation", "original"]);
+    app.args.translation_position = TP::Below;
+    assert_eq!(order(&mut app), ["tag", "original", "translation"]);
+    // inline: the tag shares the row of the original
+    app.args.member_position = MP::Inline;
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.iter().any(|r| r.contains("[Jimin") && r.contains("hello there")), "{screen:#?}");
+    // and with the translation above the line the tag still sits on the original's row
+    app.args.translation_position = TP::Above;
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.iter().any(|r| r.contains("[Jimin") && r.contains("hello there")), "{screen:#?}");
 }

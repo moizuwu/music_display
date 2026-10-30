@@ -410,41 +410,72 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             _ => accent.gamma_multiply(0.7),
         });
         let lit = (active && karaoke && text.trim() != "♪").then(|| (m.line_fraction(), accent));
-        // a halo behind the active line (`lyrics_glow`): the slot is reserved first so it paints under the text
-        let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
-        let resp = draw_line(ui, &Spec { text, chords: &line_chords, chord_color, font, color, chord_font: chord_font.clone(), lit, center });
-        if let Some(slot) = halo {
-            let k = g.lyrics_glow as f32 / 100.0;
-            let rings = (1..=6u8)
-                .rev()
-                .map(|r| {
-                    let grow = r as f32 * 4.0;
-                    egui::Shape::rect_filled(resp.rect.expand(grow), egui::CornerRadius::same((g.corner_radius as f32 + grow) as u8), accent.gamma_multiply(k * 0.07))
-                })
-                .collect();
-            ui.painter().set(slot, egui::Shape::Vec(rings));
-        }
-        if synced.is_some() && resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            ui.painter().rect_filled(resp.rect.expand(3.0), g.corner_radius.min(8), base.gamma_multiply(0.07));
-        }
-        if both {
-            if let Some(t) = trans.filter(|t| t.trim() != orig.trim()) {
-                let txt = RichText::new(t).italics().color(weak_c);
-                if center {
-                    ui.vertical_centered(|ui| ui.add(egui::Label::new(txt).wrap()));
-                } else {
-                    ui.add(egui::Label::new(txt).wrap());
+        let has_tr = both && trans.is_some_and(|t| t.trim() != orig.trim());
+        let member_tag = cur
+            .filter(|c| i.abs_diff(*c) <= 2)
+            .and_then(|_| m.members.get(i))
+            .filter(|x| !x.is_empty())
+            .map(|mem| {
+                let tag = RichText::new(format!("[{}]", mem.join(" · "))).color(weak_c);
+                if g.member_size > 0 { tag.size(g.member_size as f32) } else { tag.small() }
+            });
+        let (parts, inline) = line_parts(m.args.translation_position, m.args.member_position, has_tr, member_tag.is_some(), center);
+        let mut line_resp = None;
+        for part in parts {
+            match part {
+                Part::Member => {
+                    if let Some(tag) = member_tag.clone() {
+                        if center {
+                            ui.vertical_centered(|ui| ui.label(tag));
+                        } else {
+                            ui.label(tag);
+                        }
+                    }
+                }
+                Part::Translation => {
+                    if let Some(tr_text) = trans {
+                        let txt = RichText::new(tr_text).italics().color(weak_c);
+                        let txt = if g.translation_size > 0 { txt.size(g.translation_size as f32) } else { txt };
+                        if center {
+                            ui.vertical_centered(|ui| ui.add(egui::Label::new(txt).wrap()));
+                        } else {
+                            ui.add(egui::Label::new(txt).wrap());
+                        }
+                    }
+                }
+                Part::Line => {
+                    // a halo behind the active line (`lyrics_glow`): the slot is reserved first so it paints under the text
+                    let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
+                    let spec = Spec { text, chords: &line_chords, chord_color, font: font.clone(), color, chord_font: chord_font.clone(), lit, center };
+                    let resp = match (inline, member_tag.clone()) {
+                        // the tag in front of the line, on its first row; the line keeps its own width
+                        (true, Some(tag)) => ui.horizontal_top(|ui| {
+                            ui.label(tag);
+                            ui.vertical(|ui| draw_line(ui, &spec)).inner
+                        })
+                        .inner,
+                        _ => draw_line(ui, &spec),
+                    };
+                    if let Some(slot) = halo {
+                        let k = g.lyrics_glow as f32 / 100.0;
+                        let rings = (1..=6u8)
+                            .rev()
+                            .map(|r| {
+                                let grow = r as f32 * 4.0;
+                                egui::Shape::rect_filled(resp.rect.expand(grow), egui::CornerRadius::same((g.corner_radius as f32 + grow) as u8), accent.gamma_multiply(k * 0.07))
+                            })
+                            .collect();
+                        ui.painter().set(slot, egui::Shape::Vec(rings));
+                    }
+                    if synced.is_some() && resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        ui.painter().rect_filled(resp.rect.expand(3.0), g.corner_radius.min(8), base.gamma_multiply(0.07));
+                    }
+                    line_resp = Some(resp);
                 }
             }
         }
-        if let Some(c) = cur {
-            if i.abs_diff(c) <= 2 {
-                if let Some(mem) = m.members.get(i).filter(|x| !x.is_empty()) {
-                    ui.label(RichText::new(format!("[{}]", mem.join(" · "))).small().color(weak_c));
-                }
-            }
-        }
+        let Some(resp) = line_resp else { continue };
         if let Some(l) = synced {
             if resp.clicked() {
                 act.seek_to = Some((l[i].0 - m.offset).max(0.0));
@@ -465,12 +496,68 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
     }
 }
 
+/// One thing drawn for a lyric line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Part {
+    Member,
+    Translation,
+    Line,
+}
+
+/// What is drawn for one line, top to bottom, and whether the member tag shares the line's row.
+/// `auto` puts the tag under the line; `inline` needs a left-aligned line, so a centred one
+/// gets the tag above instead.
+fn line_parts(
+    translation: music_display::cli::TranslationPosition,
+    member: music_display::cli::MemberPosition,
+    has_translation: bool,
+    has_member: bool,
+    center: bool,
+) -> (Vec<Part>, bool) {
+    use music_display::cli::{MemberPosition as MP, TranslationPosition as TP};
+    let member = match (member, center) {
+        (MP::Auto, _) => MP::Below,
+        (MP::Inline, true) => MP::Above,
+        (m, _) => m,
+    };
+    let mut parts = Vec::new();
+    if has_member && member == MP::Above {
+        parts.push(Part::Member);
+    }
+    if has_translation && translation == TP::Above {
+        parts.push(Part::Translation);
+    }
+    parts.push(Part::Line);
+    if has_translation && translation == TP::Below {
+        parts.push(Part::Translation);
+    }
+    if has_member && member == MP::Below {
+        parts.push(Part::Member);
+    }
+    (parts, has_member && member == MP::Inline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn song() -> Vec<(f64, String)> {
         vec![(10.0, "first line here".into()), (14.0, "second".into()), (60.0, "after a solo".into())]
+    }
+
+    #[test]
+    fn the_translation_and_the_member_tag_follow_their_positions() {
+        use music_display::cli::{MemberPosition as MP, TranslationPosition as TP};
+        use Part::*;
+        let p = |tp, mp, c| line_parts(tp, mp, true, true, c);
+        assert_eq!(p(TP::Below, MP::Auto, false), (vec![Line, Translation, Member], false));
+        assert_eq!(p(TP::Above, MP::Above, false), (vec![Member, Translation, Line], false));
+        assert_eq!(p(TP::Above, MP::Below, false), (vec![Translation, Line, Member], false));
+        assert_eq!(p(TP::Below, MP::Inline, false), (vec![Line, Translation], true));
+        // inline needs a left-aligned line
+        assert_eq!(p(TP::Below, MP::Inline, true), (vec![Member, Line, Translation], false));
+        // nothing to show, nothing drawn
+        assert_eq!(line_parts(TP::Above, MP::Above, false, false, false), (vec![Line], false));
     }
 
     #[test]

@@ -57,10 +57,7 @@ fn with_alpha(c: Color32, a: f32) -> Color32 {
 
 /// The window colour for a theme (a named look can have its own dark one).
 fn base(g: &GuiConf, dark: bool) -> Rgb {
-    match g.theme_preset.base() {
-        Some(c) if dark => c,
-        _ => if dark { (27, 27, 31) } else { (243, 243, 246) },
-    }
+    g.theme_preset.base(dark).unwrap_or(if dark { (27, 27, 31) } else { (243, 243, 246) })
 }
 
 /// The colour the moving backgrounds are drawn in.
@@ -104,7 +101,7 @@ impl Look {
 
     /// Is something on the background moving (so the window should redraw about 30 times a second)?
     pub fn animated(g: &GuiConf) -> bool {
-        matches!(g.background, Background::Particles | Background::Fog | Background::Bats)
+        matches!(g.background, Background::Particles | Background::Fog | Background::Bats | Background::Snow | Background::Eggs | Background::Meadow)
     }
 
     /// Bring the egui styles, fonts and window flags in line with `g` (only when it changed).
@@ -185,6 +182,16 @@ impl Look {
                 p.rect_filled(r, 0.0, with_alpha(b, a));
                 backdrop::fog(p, r, time, fx, a);
             }
+            (Background::Snow, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                backdrop::snow(p, r, time, Color32::from_rgb(236, 246, 255), a);
+                backdrop::lights(p, r, time, a);
+            }
+            (Background::Eggs, _, _) => {
+                p.rect_filled(r, 0.0, with_alpha(b, a));
+                backdrop::eggs(p, r, time, a);
+            }
+            (Background::Meadow, _, _) => backdrop::meadow(p, r, time, dark, a),
             (Background::Bats, _, _) => {
                 p.rect_filled(r, 0.0, with_alpha(b, a));
                 backdrop::fog(p, r, time, Color32::from_rgb(110, 50, 170), a);
@@ -336,10 +343,10 @@ pub fn gutter(g: &GuiConf) -> Frame {
 /// A rounded card behind a panel's content: `panel_opacity` fill, optional border.
 pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
     let dark = ui.visuals().dark_mode;
-    let fill = match g.theme_preset {
-        Preset::Halloween if dark => Color32::from_rgb(38, 20, 50),
-        _ if dark => Color32::from_rgb(40, 40, 47),
-        _ => Color32::WHITE,
+    let fill = match g.theme_preset.card(dark) {
+        Some(c) => rgb32(c),
+        None if dark => Color32::from_rgb(40, 40, 47),
+        None => Color32::WHITE,
     };
     let alpha = g.panel_opacity as f32 / 100.0 * (g.opacity as f32 / 100.0).max(0.0);
     let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
@@ -448,7 +455,13 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     ui.label(egui::RichText::new("Changes show at once and are saved to [gui] in config.toml.").small().weak());
     ui.heading("Look");
     let mut preset = g.theme_preset;
-    if choice(ui, "Look", &mut preset, &[(Preset::None, "none"), (Preset::Halloween, "Halloween")]) {
+    if choice(ui, "Look", &mut preset, &[
+            (Preset::None, "none"),
+            (Preset::Halloween, "Halloween"),
+            (Preset::Christmas, "Christmas"),
+            (Preset::Easter, "Easter"),
+            (Preset::Midsummer, "Midsummer"),
+        ]) {
         g.apply_preset(preset);
         changed = true;
     }
@@ -487,6 +500,9 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
             (Background::Particles, "embers"),
             (Background::Fog, "fog"),
             (Background::Bats, "fog and bats"),
+            (Background::Snow, "snow and lights"),
+            (Background::Eggs, "eggs"),
+            (Background::Meadow, "meadow"),
         ],
     );
     if g.background == Background::Image {
@@ -572,6 +588,16 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     let mut v = g.meta_size as u32;
     if slider(ui, "Text size (metadata, buttons)", &mut v, 8..=40, " pt") {
         g.meta_size = v as u16;
+        changed = true;
+    }
+    let mut v = g.translation_size as u32;
+    if slider(ui, "Translation size (0 = automatic)", &mut v, 0..=64, " pt") {
+        g.translation_size = v as u16;
+        changed = true;
+    }
+    let mut v = g.member_size as u32;
+    if slider(ui, "Member parts size (0 = automatic)", &mut v, 0..=40, " pt") {
+        g.member_size = v as u16;
         changed = true;
     }
     changed |= choice(ui, "Active line weight", &mut g.active_weight, &[(Weight::Regular, "regular"), (Weight::Medium, "medium"), (Weight::Bold, "bold")]);

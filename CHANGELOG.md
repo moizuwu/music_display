@@ -8,6 +8,9 @@ which turns the `Unreleased` section into that version.
 ## [Unreleased]
 
 ### Added
+- GUI looks Christmas, Easter and Midsummer next to Halloween, with the backgrounds `snow`, `eggs` and `meadow`; the light looks also work in the dark theme.
+- Placement and size of the translated line and of the member tag: `translation_position` (`below`, `above`), `member_position` (`auto`, `below`, `above`, `inline`) in the terminal UI and the window, and `translation_size` / `member_size` in `[gui]`.
+- `auto_zero_capo`: a sheet that says "capo 2" is shown with capo 0 (the sounding chords); your own capo for a track still wins. Config key, `--auto-zero-capo`, settings row and GUI checkbox.
 - `CHANGELOG.md` and `scripts/release.sh X.Y.Z` (bumps `Cargo.toml` / `Cargo.lock`, dates the
   `Unreleased` section, commits and tags `vX.Y.Z`).
 - `--version` and the settings menu show the build as `0.1.0 (a1b2c3d, dirty)`: the version, the

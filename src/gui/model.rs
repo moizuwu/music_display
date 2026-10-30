@@ -609,8 +609,13 @@ impl Model {
         };
     }
 
+    /// The capo a track starts with: the sheet's own, or none with `auto_zero_capo`.
+    pub fn default_capo(&self) -> u8 {
+        if self.args.auto_zero_capo { 0 } else { self.sheet.as_ref().map_or(0, |s| s.capo) }
+    }
+
     pub fn effective_capo(&self) -> u8 {
-        self.capo_override.unwrap_or_else(|| self.sheet.as_ref().map_or(0, |s| s.capo))
+        self.capo_override.unwrap_or_else(|| self.default_capo())
     }
 
     pub fn chord_shift(&self) -> i32 {
@@ -1015,6 +1020,37 @@ mod tests {
         assert!(after.contains(&"Bm".to_string()), "{after:?}");
         m.apply(AppEvent::Chords { key: k ^ 1, sheet: Ok(None), capo: None });
         assert!(matches!(m.chords_state, Chords::Ready), "stale answers are dropped");
+    }
+
+    #[tokio::test]
+    async fn auto_zero_capo_shows_the_sounding_chords_and_your_own_capo_wins() {
+        let (mut m, _rx) = model();
+        m.apply(AppEvent::Player(Some(snap("Band", "Song"))));
+        let k = m.track_key;
+        m.apply(AppEvent::Lyrics {
+            key: k,
+            lyrics: Lyrics::Synced(vec![(0.0, "hello darkness my old friend".into()), (5.0, "i've come to talk with you again".into())]),
+        });
+        let sheet = chords::parse_chordpro("{capo: 2}\n[Am]hello darkness [G]my old friend\n[C]i've come to talk [F]with you again\n");
+        m.apply(AppEvent::Chords { key: k, sheet: Ok(Some(sheet)), capo: None });
+        m.args.chords_match = 0;
+        m.realign();
+        assert_eq!(m.effective_capo(), 2);
+        assert!(m.song_chords().contains(&"Am".to_string()));
+        m.args.auto_zero_capo = true;
+        assert_eq!((m.effective_capo(), m.default_capo()), (0, 0));
+        assert!(m.song_chords().contains(&"Bm".to_string()), "{:?}", m.song_chords());
+        // stepping up to the sheet's capo is a choice of its own, stepping back to 0 clears it
+        m.change_capo(1);
+        m.change_capo(1);
+        assert_eq!((m.capo_override, m.effective_capo()), (Some(2), 2));
+        m.change_capo(-1);
+        m.change_capo(-1);
+        assert_eq!(m.capo_override, None);
+        // a capo remembered for the track beats the automatic one
+        m.apply(AppEvent::Chords { key: k, sheet: Ok(Some(chords::parse_chordpro("{capo: 2}\n[Am]x\n"))), capo: Some(3) });
+        assert_eq!(m.effective_capo(), 3);
+        let _ = std::fs::remove_file(crate::gui::extras::capo_path(k));
     }
 
     #[tokio::test]

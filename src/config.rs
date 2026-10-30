@@ -50,7 +50,10 @@ pub const KEYS: &[Key] = &[
     k!("hide_color_warning", Kind::Bool, "hide_color_warning"),
     k!("chords", Kind::Bool, "chords"),
     k!("chords_ug", Kind::Bool, "chords_ug"),
+    k!("auto_zero_capo", Kind::Bool, "auto_zero_capo"),
     k!("member_parts", Kind::Bool, "member_parts"),
+    k!("translation_position", Kind::Choice(crate::cli::TranslationPosition::NAMES), "translation_position"),
+    k!("member_position", Kind::Choice(crate::cli::MemberPosition::NAMES), "member_position"),
     k!("chords_dir", Kind::Str, "chords_dir"),
     k!("chords_context", Kind::Int(0, 99), "chords_context"),
     k!("volume_step", Kind::Int(1, 50), "volume_step"),
@@ -155,7 +158,10 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "hide_color_warning" => args.hide_color_warning = b(),
         "chords" => args.chords = b(),
         "chords_ug" => args.chords_ug = b(),
+        "auto_zero_capo" => args.auto_zero_capo = b(),
         "member_parts" => args.member_parts = b(),
+        "translation_position" => args.translation_position = crate::cli::TranslationPosition::parse(&st()).unwrap_or_default(),
+        "member_position" => args.member_position = crate::cli::MemberPosition::parse(&st()).unwrap_or_default(),
         "chords_dir" => args.chords_dir = Some(PathBuf::from(st())),
         "chords_context" => args.chords_context = i() as u16,
         "volume_step" => args.volume_step = i() as u32,
@@ -415,7 +421,10 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("hide_color_warning", args.hide_color_warning.to_string());
     line("chords", args.chords.to_string());
     line("chords_ug", args.chords_ug.to_string());
+    line("auto_zero_capo", args.auto_zero_capo.to_string());
     line("member_parts", args.member_parts.to_string());
+    line("translation_position", q(args.translation_position.name()));
+    line("member_position", q(args.member_position.name()));
     match &args.chords_dir {
         Some(d) => line("chords_dir", q(&d.display().to_string())),
         None => line("# chords_dir", "\"~/.local/share/music_display/chords\"  # default".into()),

@@ -27,8 +27,9 @@ choice!(
     Theme { System = "system", Dark = "dark", Light = "light" }
 );
 choice!(
-    /// What is painted behind the panels. `Image` is the file named by `background_image`; the last
-    /// three are drawn live (no files): rising embers, drifting fog, fog with bats.
+    /// What is painted behind the panels. `Image` is the file named by `background_image`; the rest
+    /// are drawn live (no files): rising embers, drifting fog, fog with bats, falling snow with a
+    /// string of lights, painted eggs, a summer meadow.
     Background {
         Solid = "solid",
         CoverBlur = "cover-blur",
@@ -37,13 +38,22 @@ choice!(
         Particles = "particles",
         Fog = "fog",
         Bats = "bats",
+        Snow = "snow",
+        Eggs = "eggs",
+        Meadow = "meadow",
     }
 );
 choice!(
     /// A named look: picking one in the Appearance tab sets the matching values below, which can
     /// then be changed one by one. The name stays so the look's own touches (its window colour)
     /// keep applying.
-    Preset { None = "none", Halloween = "halloween" }
+    Preset {
+        None = "none",
+        Halloween = "halloween",
+        Christmas = "christmas",
+        Easter = "easter",
+        Midsummer = "midsummer",
+    }
 );
 choice!(Align { Left = "left", Center = "center" });
 choice!(Animation { Smooth = "smooth", Instant = "instant" });
@@ -108,6 +118,10 @@ pub struct GuiConf {
     pub lyrics_glow: u8,
     /// The column borders cannot be dragged.
     pub lock_layout: bool,
+    /// Size of the translated line in points; 0 = the text size of the metadata.
+    pub translation_size: u16,
+    /// Size of the member tag in points; 0 = small.
+    pub member_size: u16,
     /// Panels shown in a window of their own (layout names like `lyrics`, `cava`).
     pub popped: Vec<String>,
 }
@@ -139,6 +153,8 @@ impl Default for GuiConf {
             background_image: String::new(),
             lyrics_glow: 0,
             lock_layout: false,
+            translation_size: 0,
+            member_size: 0,
             popped: Vec::new(),
         }
     }
@@ -146,32 +162,92 @@ impl Default for GuiConf {
 
 impl Preset {
     /// The window colour this look uses instead of the plain dark / light one.
-    pub fn base(self) -> Option<Rgb> {
-        match self {
-            Preset::None => None,
-            Preset::Halloween => Some((17, 9, 24)),
+    pub fn base(self, dark: bool) -> Option<Rgb> {
+        match (self, dark) {
+            (Preset::None, _) | (Preset::Halloween, false) => None,
+            (Preset::Halloween, true) => Some((17, 9, 24)),
+            (Preset::Christmas, true) => Some((9, 23, 18)),
+            (Preset::Christmas, false) => Some((236, 244, 238)),
+            (Preset::Easter, true) => Some((30, 26, 38)),
+            (Preset::Easter, false) => Some((253, 248, 240)),
+            (Preset::Midsummer, true) => Some((14, 28, 30)),
+            (Preset::Midsummer, false) => Some((246, 250, 236)),
+        }
+    }
+
+    /// The fill of the panel cards in this look, when it has its own.
+    pub fn card(self, dark: bool) -> Option<Rgb> {
+        match (self, dark) {
+            (Preset::None, _) | (Preset::Halloween, false) => None,
+            (Preset::Halloween, true) => Some((38, 20, 50)),
+            (Preset::Christmas, true) => Some((22, 44, 36)),
+            (Preset::Christmas, false) => Some((250, 253, 250)),
+            (Preset::Easter, true) => Some((44, 38, 56)),
+            (Preset::Easter, false) => Some((255, 252, 247)),
+            (Preset::Midsummer, true) => Some((24, 44, 46)),
+            (Preset::Midsummer, false) => Some((255, 255, 250)),
         }
     }
 }
 
 const KEYS: &str = "opacity, panel_opacity, theme, accent, background, font, lyrics_size, active_size, meta_size, \
 active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, popped";
+remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, translation_size, member_size, popped";
 
 impl GuiConf {
     /// Set the values the look is made of (everything else is left as the user has it).
     pub fn apply_preset(&mut self, p: Preset) {
+        if self.theme_preset == Preset::Christmas && p != Preset::Christmas {
+            self.font.clear();
+        }
         self.theme_preset = p;
-        if p == Preset::Halloween {
-            self.theme = Theme::Dark;
-            self.accent = Accent::Fixed((255, 122, 24));
-            self.background = Background::Bats;
-            self.panel_opacity = 82;
-            self.corner_radius = 14;
-            self.panel_borders = true;
-            self.active_weight = Weight::Bold;
-            self.inactive_fade = 55;
-            self.lyrics_glow = 60;
+        match p {
+            Preset::None => {}
+            Preset::Halloween => {
+                self.theme = Theme::Dark;
+                self.accent = Accent::Fixed((255, 122, 24));
+                self.background = Background::Bats;
+                self.panel_opacity = 82;
+                self.corner_radius = 14;
+                self.panel_borders = true;
+                self.active_weight = Weight::Bold;
+                self.inactive_fade = 55;
+                self.lyrics_glow = 60;
+            }
+            Preset::Christmas => {
+                self.theme = Theme::Dark;
+                self.accent = Accent::Fixed((242, 201, 76));
+                self.background = Background::Snow;
+                self.panel_opacity = 85;
+                self.corner_radius = 12;
+                self.panel_borders = true;
+                self.active_weight = Weight::Bold;
+                self.inactive_fade = 50;
+                self.lyrics_glow = 40;
+                self.font = "Comic Sans MS".into();
+            }
+            Preset::Easter => {
+                self.theme = Theme::Light;
+                self.accent = Accent::Fixed((214, 92, 150));
+                self.background = Background::Eggs;
+                self.panel_opacity = 88;
+                self.corner_radius = 18;
+                self.panel_borders = true;
+                self.active_weight = Weight::Medium;
+                self.inactive_fade = 35;
+                self.lyrics_glow = 0;
+            }
+            Preset::Midsummer => {
+                self.theme = Theme::Light;
+                self.accent = Accent::Fixed((0, 106, 167));
+                self.background = Background::Meadow;
+                self.panel_opacity = 85;
+                self.corner_radius = 16;
+                self.panel_borders = true;
+                self.active_weight = Weight::Medium;
+                self.inactive_fade = 35;
+                self.lyrics_glow = 25;
+            }
         }
         self.clamp();
     }
@@ -188,6 +264,13 @@ impl GuiConf {
         self.inactive_fade = self.inactive_fade.min(100);
         self.ui_scale = self.ui_scale.clamp(50, 200);
         self.lyrics_glow = self.lyrics_glow.min(100);
+        // 0 means "automatic"; anything else is a size in points
+        if self.translation_size != 0 {
+            self.translation_size = self.translation_size.clamp(8, 64);
+        }
+        if self.member_size != 0 {
+            self.member_size = self.member_size.clamp(8, 40);
+        }
         self.background_image = self.background_image.trim().to_string();
         self.popped.dedup();
         self.font = self.font.trim().to_string();
@@ -221,6 +304,8 @@ impl GuiConf {
                 "panel_spacing" => self.panel_spacing = num(&mut int, 0, 32, self.panel_spacing as i64) as u8,
                 "inactive_fade" => self.inactive_fade = num(&mut int, 0, 100, self.inactive_fade as i64) as u8,
                 "ui_scale" => self.ui_scale = num(&mut int, 50, 200, self.ui_scale as i64) as u16,
+                "translation_size" => self.translation_size = num(&mut int, 0, 64, self.translation_size as i64) as u16,
+                "member_size" => self.member_size = num(&mut int, 0, 40, self.member_size as i64) as u16,
                 "lyrics_glow" => self.lyrics_glow = num(&mut int, 0, 100, self.lyrics_glow as i64) as u8,
                 "popped" => match v.as_array() {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
@@ -302,6 +387,8 @@ impl GuiConf {
         put("background_image", self.background_image.clone().into());
         put("lyrics_glow", (self.lyrics_glow as i64).into());
         put("lock_layout", self.lock_layout.into());
+        put("translation_size", (self.translation_size as i64).into());
+        put("member_size", (self.member_size as i64).into());
         put("popped", toml::Value::Array(self.popped.iter().map(|s| s.clone().into()).collect()));
         t
     }
@@ -375,7 +462,7 @@ mod tests {
              corner_radius = 4\npanel_spacing = 12\npanel_borders = false\nlyrics_align = \"center\"\ninactive_fade = 70\n\
              lyrics_animation = \"instant\"\nremember_window = false\nalways_on_top = true\ndecorations = false\n\
              ui_scale = 130\ntheme_preset = \"halloween\"\nbackground_image = \"~/a.png\"\nlyrics_glow = 60\nlock_layout = true\n\
-             popped = [\"lyrics\", \"cava\"]\n",
+             translation_size = 20\nmember_size = 11\npopped = [\"lyrics\", \"cava\"]\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!((g.opacity, g.panel_opacity, g.theme, g.background), (80, 55, Theme::Dark, Background::CoverBlur));
@@ -386,6 +473,7 @@ mod tests {
         assert_eq!((g.lyrics_align, g.inactive_fade, g.lyrics_animation), (Align::Center, 70, Animation::Instant));
         assert_eq!((g.remember_window, g.always_on_top, g.decorations), (false, true, false));
         assert_eq!((g.ui_scale, g.theme_preset, g.lyrics_glow, g.lock_layout), (130, Preset::Halloween, 60, true));
+        assert_eq!((g.translation_size, g.member_size), (20, 11));
         assert_eq!((g.background_image.as_str(), g.popped.as_slice()), ("~/a.png", ["lyrics".to_string(), "cava".to_string()].as_slice()));
     }
 
@@ -416,7 +504,61 @@ mod tests {
         assert_eq!((g.theme, g.background, g.theme_preset), (Theme::Dark, Background::Bats, Preset::Halloween));
         assert_eq!(g.accent, Accent::Fixed((255, 122, 24)));
         assert_eq!((g.opacity, g.font.as_str()), (70, "Serif"));
-        assert!(Preset::Halloween.base().is_some() && Preset::None.base().is_none());
+        assert!(Preset::Halloween.base(true).is_some() && Preset::None.base(true).is_none());
+    }
+
+    #[test]
+    fn text_sizes_are_automatic_at_zero_and_clamped_otherwise() {
+        let (g, w) = parse("[gui]\ntranslation_size = 3\nmember_size = 99\n");
+        assert_eq!((g.translation_size, g.member_size), (8, 40));
+        assert_eq!(w.len(), 1, "{w:?}"); // only member_size is outside what the file may say
+        let (g, w) = parse("[gui]\ntranslation_size = 0\nmember_size = 0\n");
+        assert_eq!((g.translation_size, g.member_size), (0, 0));
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn every_look_has_its_own_values_and_colours() {
+        for name in Preset::NAMES.iter().filter(|n| **n != "none") {
+            let p = Preset::parse(name).unwrap();
+            let mut g = GuiConf::default();
+            g.apply_preset(p);
+            assert_eq!(g.theme_preset, p);
+            assert_ne!(g.accent, Accent::Cover, "{name}");
+            assert_ne!(g.background, Background::Solid, "{name}");
+            // a colour for the window and the cards in the look's own mode, and in the other one
+            for dark in [true, false] {
+                assert!(p.base(dark).is_some() || p == Preset::Halloween, "{name} {dark}");
+                assert_eq!(p.card(dark).is_some(), p.base(dark).is_some(), "{name} {dark}");
+            }
+            // the name survives the file
+            let mut root = toml::Table::new();
+            root.insert("gui".into(), toml::Value::Table(g.write()));
+            let mut back = GuiConf::default();
+            back.read(&root, &mut |m| panic!("{m}"));
+            assert_eq!(back, g, "{name}");
+        }
+        // the light looks are light, the others dark
+        let theme = |p| {
+            let mut g = GuiConf::default();
+            g.apply_preset(p);
+            g.theme
+        };
+        assert_eq!((theme(Preset::Easter), theme(Preset::Midsummer)), (Theme::Light, Theme::Light));
+        assert_eq!((theme(Preset::Christmas), theme(Preset::Halloween)), (Theme::Dark, Theme::Dark));
+    }
+
+    #[test]
+    fn leaving_a_look_resets_what_it_set() {
+        let mut g = GuiConf::default();
+        g.apply_preset(Preset::Christmas);
+        assert!(!g.font.is_empty());
+        g.apply_preset(Preset::Easter);
+        assert!(g.font.is_empty());
+        // a font chosen by hand survives a look that sets none
+        g.font = "Noto Sans".into();
+        g.apply_preset(Preset::Midsummer);
+        assert_eq!(g.font, "Noto Sans");
     }
 
     #[test]
@@ -445,6 +587,8 @@ mod tests {
             background_image: "/x/y.png".into(),
             lyrics_glow: 30,
             lock_layout: true,
+            translation_size: 22,
+            member_size: 12,
             popped: vec!["cava".into()],
             ..GuiConf::default()
         };

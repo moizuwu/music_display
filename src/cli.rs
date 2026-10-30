@@ -85,6 +85,78 @@ impl AnnotationScroll {
     }
 }
 
+/// Where the translation sits when it is shown next to the original line.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TranslationPosition {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // Under the original line.
+    #[default]
+    Below,
+    // Above the original line.
+    Above,
+}
+
+impl TranslationPosition {
+    pub const NAMES: &'static [&'static str] = &["below", "above"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "below" => Some(Self::Below),
+            "above" => Some(Self::Above),
+            _ => None,
+        }
+    }
+
+    /// The next (`dir` = 1) or previous value, wrapping, for the settings rows.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
+    }
+}
+
+/// Where the "who sings this line" tag sits.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MemberPosition {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // The terminal UI puts it before the line, the window under it.
+    #[default]
+    Auto,
+    // Under the line (and its translation).
+    Below,
+    // Above the line (and its translation).
+    Above,
+    // In front of the line, on the same row.
+    Inline,
+}
+
+impl MemberPosition {
+    pub const NAMES: &'static [&'static str] = &["auto", "below", "above", "inline"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "below" => Some(Self::Below),
+            "above" => Some(Self::Above),
+            "inline" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+
+    /// The next (`dir` = 1) or previous value, wrapping, for the settings rows.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
+    }
+}
+
 /// Which engine translates the lyrics.
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TranslateEngine {
@@ -279,6 +351,11 @@ pub struct Args {
     #[arg(long)]
     pub chords_ug: bool,
 
+    /// A sheet that says "capo 2" is shown with capo 0, so its chords are the sounding ones
+    /// (your own `[` `]` choice for a track still wins) [config: auto_zero_capo]
+    #[arg(long)]
+    pub auto_zero_capo: bool,
+
     /// Experimental: show which group member sings each line, scraped from Genius
     /// (unofficial, off by default; results are cached) [config: member_parts]
     #[arg(long)]
@@ -334,6 +411,15 @@ pub struct Args {
     /// or translated (the translation replaces the line). Wins over --translate [config: translate_mode]
     #[arg(long, value_enum, value_name = "MODE")]
     pub translate_mode: Option<TranslateMode>,
+
+    /// With the translation next to the original: below the line or above it [config: translation_position]
+    #[arg(long, value_enum, default_value = "below", value_name = "WHERE")]
+    pub translation_position: TranslationPosition,
+
+    /// Where the member tag goes: auto (terminal: in front of the line, window: under it), below,
+    /// above or inline [config: member_position]
+    #[arg(long, value_enum, default_value = "auto", value_name = "WHERE")]
+    pub member_position: MemberPosition,
 
     /// Look the genre up on MusicBrainz when neither the player nor the file's tags have one
     /// [config: genre_lookup]

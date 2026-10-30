@@ -213,6 +213,10 @@ impl eframe::App for Gui {
         let g = self.m.gui.clone();
         self.look.apply(ui.ctx(), &g);
         self.look.paint_background(ui, &g);
+        if g.theme_preset == music_display::guiconf::Preset::Christmas {
+            let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("look-extra"));
+            backdrop::figure(&ui.ctx().layer_painter(layer), ui.ctx().content_rect(), g.opacity as f32 / 100.0);
+        }
         egui::Panel::top("top").frame(style::gutter(&g)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("music_display");

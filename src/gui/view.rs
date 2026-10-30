@@ -61,11 +61,12 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
                         if let Some((_, shapes)) = m.keys() {
                             v.push_str(&format!(" ({})", shapes.short()));
                         }
-                        if m.capo_override.is_some() {
-                            v.push_str(&format!(" [sheet {}]", m.sheet.as_ref().map_or(0, |x| x.capo)));
+                        let sheet_capo = m.sheet.as_ref().map_or(0, |x| x.capo);
+                        if capo != sheet_capo {
+                            v.push_str(&format!(" [sheet {sheet_capo}]"));
                         }
                         v
-                    } else if m.chords_on && m.capo_override == Some(0) {
+                    } else if m.chords_on && m.sheet.as_ref().is_some_and(|x| x.capo > 0) {
                         "none".into()
                     } else {
                         return None;

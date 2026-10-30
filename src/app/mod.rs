@@ -879,13 +879,13 @@ impl App {
     }
 
     /// `[` / `]`: capo ±1 (0..=12) as a per-track override, remembered across restarts.
-    /// Landing on the sheet's own capo clears the override.
+    /// Landing on the default capo (the sheet's own, or none with `auto_zero_capo`) clears the override.
     fn change_capo(&mut self, d: i32) {
-        let Some(sheet_capo) = self.sheet.as_ref().map(|s| s.capo) else {
+        if self.sheet.is_none() {
             return;
-        };
+        }
         let n = (self.effective_capo() as i32 + d).clamp(0, 12) as u8;
-        self.set_capo_override((n != sheet_capo).then_some(n));
+        self.set_capo_override((n != self.default_capo()).then_some(n));
     }
 
     fn set_capo_override(&mut self, o: Option<u8>) {
@@ -965,10 +965,14 @@ impl App {
         self.sheet.as_ref().map(|s| (s.source.as_str(), s.capo))
     }
 
-    /// The capo in effect: the per-track override, else the sheet's own.
+    /// The capo a track starts with: the sheet's own, or none with `auto_zero_capo`.
+    pub fn default_capo(&self) -> u8 {
+        if self.args.auto_zero_capo { 0 } else { self.sheet.as_ref().map_or(0, |s| s.capo) }
+    }
+
+    /// The capo in effect: the per-track override, else the default.
     pub fn effective_capo(&self) -> u8 {
-        self.capo_override
-            .unwrap_or_else(|| self.sheet.as_ref().map_or(0, |s| s.capo))
+        self.capo_override.unwrap_or_else(|| self.default_capo())
     }
 
     /// Semitones to shift the sheet's chord shapes by: a higher capo means lower shapes,
@@ -1310,11 +1314,14 @@ impl App {
             Setting::Player => format!("< {} >", self.args.player),
             Setting::Chords => onoff(self.chords_on),
             Setting::ChordsUg => onoff(self.args.chords_ug),
+            Setting::AutoZeroCapo => onoff(self.args.auto_zero_capo),
             Setting::ChordsMatch => match &self.settings_edit {
                 Some((Setting::ChordsMatch, input)) => input.shown(),
                 _ => format!("{} %", self.args.chords_match),
             },
             Setting::MemberParts => onoff(self.args.member_parts),
+            Setting::MemberPosition => format!("< {} >", self.args.member_position.name()),
+            Setting::TranslationPosition => format!("< {} >", self.args.translation_position.name()),
             Setting::Translate => onoff(self.translate_on),
             Setting::TranslateMode => format!("< {} >", self.translate_mode().name()),
             Setting::TranslateEngine => format!("< {} >", self.args.translate_engine.name()),
@@ -1434,11 +1441,23 @@ impl App {
             }
             Setting::Chords => self.toggle_chords(),
             Setting::ChordsUg => self.args.chords_ug = !self.args.chords_ug,
+            Setting::AutoZeroCapo => {
+                self.args.auto_zero_capo = !self.args.auto_zero_capo;
+                self.snap_scroll = true;
+            }
             Setting::ChordsMatch => {
                 self.settings_edit = Some((s, TextInput::with(&self.args.chords_match.to_string())));
                 return;
             }
             Setting::MemberParts => self.toggle_member_parts(),
+            Setting::MemberPosition => {
+                self.args.member_position = self.args.member_position.step(dir);
+                self.snap_scroll = true;
+            }
+            Setting::TranslationPosition => {
+                self.args.translation_position = self.args.translation_position.step(dir);
+                self.snap_scroll = true;
+            }
             Setting::Translate => self.toggle_translate(),
             Setting::TranslateMode => self.set_translate_mode(self.translate_mode().step(dir)),
             Setting::TranslateEngine => {
@@ -1663,6 +1682,9 @@ impl App {
             ("player", S(self.args.player.clone())),
             ("chords", B(self.chords_on)),
             ("chords_ug", B(self.args.chords_ug)),
+            ("auto_zero_capo", B(self.args.auto_zero_capo)),
+            ("member_position", S(self.args.member_position.name().to_string())),
+            ("translation_position", S(self.args.translation_position.name().to_string())),
             ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
             ("genre_lookup", B(self.args.genre_lookup)),

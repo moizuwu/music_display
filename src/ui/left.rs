@@ -76,12 +76,12 @@ pub(super) fn meta_lines(
                     if let Some((_, shapes)) = app.keys() {
                         v.push_str(&format!(" ({})", shapes.short()));
                     }
-                    if app.capo_override.is_some() {
-                        let sheet_capo = app.sheet_info().map_or(0, |i| i.1);
+                    let sheet_capo = app.sheet_info().map_or(0, |i| i.1);
+                    if capo != sheet_capo {
                         v.push_str(&format!(" [sheet {sheet_capo}]"));
                     }
                     tag("Capo:", v)
-                } else if app.chords_on && app.capo_override == Some(0) {
+                } else if app.chords_on && app.sheet_info().is_some_and(|i| i.1 > 0) {
                     tag("Capo:", "none".into())
                 } else {
                     return None;

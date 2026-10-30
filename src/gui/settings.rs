@@ -7,7 +7,7 @@
 use super::model::Model;
 use crate::app::LANGS;
 use egui::{RichText, Ui};
-use music_display::cli::{AnnotationMode, AnnotationScroll, Args, TranslateEngine, TranslateMode};
+use music_display::cli::{AnnotationMode, AnnotationScroll, Args, MemberPosition, TranslateEngine, TranslateMode, TranslationPosition};
 use music_display::guiconf::GuiConf;
 use music_display::layout::{Layout, PRESETS, PanelId};
 use music_display::{ai, genius, player, spotifyd, AppEvent};
@@ -112,6 +112,21 @@ impl Model {
     pub fn set_chords_ug(&mut self, on: bool) {
         self.args.chords_ug = on;
         self.persist("Ultimate Guitar", &[("chords_ug", on.into())]);
+    }
+
+    pub fn set_auto_zero_capo(&mut self, on: bool) {
+        self.args.auto_zero_capo = on;
+        self.persist("Capo 0 for every sheet", &[("auto_zero_capo", on.into())]);
+    }
+
+    pub fn set_translation_position(&mut self, p: music_display::cli::TranslationPosition) {
+        self.args.translation_position = p;
+        self.persist("Translation position", &[("translation_position", p.name().into())]);
+    }
+
+    pub fn set_member_position(&mut self, p: music_display::cli::MemberPosition) {
+        self.args.member_position = p;
+        self.persist("Member parts position", &[("member_position", p.name().into())]);
     }
 
     pub fn set_chords_match(&mut self, n: u32) {
@@ -679,6 +694,9 @@ fn chords(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = check(ui, "Also look on Ultimate Guitar (from the next track)", m.args.chords_ug) {
         m.set_chords_ug(v);
     }
+    if let Some(v) = check(ui, "Capo 0 for every sheet (a sheet's \"capo 2\" is shown as the sounding chords)", m.args.auto_zero_capo) {
+        m.set_auto_zero_capo(v);
+    }
     let mut n = m.args.chords_match;
     let (ch, done) = slider(ui, "Chord match threshold", &mut n, 0..=100, "%");
     if ch {
@@ -713,6 +731,16 @@ fn chords(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = check(ui, "Member parts: who sings which line (experimental)", m.args.member_parts) {
         m.set_member_parts(v);
     }
+    let places = [
+        (MemberPosition::Auto, "automatic (under the line)"),
+        (MemberPosition::Below, "under the line"),
+        (MemberPosition::Above, "above the line"),
+        (MemberPosition::Inline, "in front of the line"),
+    ];
+    if let Some(v) = combo(ui, "mpos", "Place the member parts", &m.args.member_position, &places) {
+        m.set_member_position(v);
+    }
+    weak(ui, "\"In front\" needs left-aligned lyrics. The size is in the Appearance tab.");
 }
 
 fn translation(ui: &mut Ui, m: &mut Model) {
@@ -721,6 +749,11 @@ fn translation(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = combo(ui, "tmode", "Show", &m.translate_mode, &modes) {
         m.set_translate_mode_saved(v);
     }
+    let places = [(TranslationPosition::Below, "under the line"), (TranslationPosition::Above, "above the line")];
+    if let Some(v) = combo(ui, "tpos", "Place the translation", &m.args.translation_position, &places) {
+        m.set_translation_position(v);
+    }
+    weak(ui, "Only for \"original + translation\". The size is in the Appearance tab.");
     let mut langs: Vec<String> = LANGS.iter().map(|l| l.to_string()).collect();
     if !langs.contains(&m.args.translate_lang) {
         langs.push(m.args.translate_lang.clone());
@@ -966,6 +999,16 @@ mod tests {
             assert!(music_display::config::KEYS.iter().any(|x| x.name == k), "{k} is not a config key");
         }
         let _ = std::fs::remove_file(p);
+    }
+
+    #[tokio::test]
+    async fn the_translation_and_member_positions_are_saved() {
+        let (mut m, p, _rx) = model("positions");
+        m.set_translation_position(TranslationPosition::Above);
+        m.set_member_position(MemberPosition::Inline);
+        let t = saved(&p);
+        assert_eq!(t["translation_position"].as_str(), Some("above"));
+        assert_eq!(t["member_position"].as_str(), Some("inline"));
     }
 
     #[tokio::test]

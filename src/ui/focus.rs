@@ -46,6 +46,8 @@ pub struct Focus<'a> {
     /// This song has member data: keep one row free above the stage for the tag on every
     /// line, so the layout doesn't jump between tagged and untagged lines.
     pub reserve_tag: bool,
+    /// The tag goes under the stage instead of above it (`member_position = below`).
+    pub tag_below: bool,
     /// Karaoke: how much of the active line is sung (0..=1); `None` = plain bold line.
     pub progress: Option<f64>,
 }
@@ -74,6 +76,8 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
     let hits = std::cell::RefCell::new(vec![None; inner.height as usize]);
     let spans = std::cell::RefCell::new(vec![(inner.x, inner.right()); inner.height as usize]);
     let tag_rows = (fc.reserve_tag && c.is_some()) as u16;
+    // (the one reserved row is above the stage, or below it with `tag_below`)
+    let (rows_above, rows_below) = if fc.tag_below { (0, tag_rows) } else { (tag_rows, 0) };
     type Stage = (Vec<String>, Style, Option<usize>, Option<bigfont::Rendered>);
     let (stage, stage_style, stage_li, map): Stage = match c {
         Some(c) => match big_stage_map(&lines[c], width, inner.height, fc.scale, tag_rows) {
@@ -89,7 +93,7 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
     };
     let sh = (stage.len() as u16).min(inner.height);
     // the spare row for the tag sits above the stage, so the stage moves down by half of it
-    let top = inner.y + (inner.height - sh + tag_rows) / 2;
+    let top = inner.y + (inner.height - sh + rows_above).saturating_sub(rows_below) / 2;
 
     let put = |f: &mut Frame, y: i32, li: Option<usize>, text: &str, style: Style| {
         if y >= inner.y as i32 && y < inner.bottom() as i32 && !text.is_empty() {
@@ -182,8 +186,9 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
             put(f, top as i32 - 1, Some(c), &v.join("   "), bold);
             has_summary = true;
         }
-        // who sings it: one dim row right above the big text, or above the chord summary
-        let y = top as i32 - 1 - has_summary as i32;
+        // who sings it: one dim row right above the big text (or above the chord summary), or
+        // right under the stage
+        let y = if fc.tag_below { top as i32 + sh as i32 } else { top as i32 - 1 - has_summary as i32 };
         let tag = member_tag_line(fc.members, width);
         if tag_rows > 0 && !tag.is_empty() && y >= inner.y as i32 {
             f.render_widget(
@@ -193,7 +198,7 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
         }
     }
     // chords played during an instrumental break, right under the stage
-    let mut after = top as i32 + sh as i32 + 1;
+    let mut after = top as i32 + sh as i32 + 1 + rows_below as i32;
     if let (Some(c), Some(a), true) = (c, fc.chords, fc.in_break) {
         for g in a.gaps.get(c).into_iter().flatten() {
             put(f, after, None, &names(g), bold);
@@ -211,7 +216,7 @@ pub(super) fn draw_focus_spans(f: &mut Frame, inner: Rect, th: &Theme, fc: &Focu
     };
 
     // Earlier lines, nearest first, growing upward (above the tag row when there is one).
-    let mut y = top as i32 - 2 - tag_rows as i32;
+    let mut y = top as i32 - 2 - rows_above as i32;
     for k in 1..=c.unwrap_or(0) {
         let li = c.unwrap_or(0) - k;
         let style = fade_style(th, k, true);

@@ -174,11 +174,13 @@ impl Model {
     // ── capo ──
 
     /// `[` / `]`: capo ±1 (0..=12) as a per-track override, remembered across restarts.
-    /// Landing on the sheet's own capo clears the override.
+    /// Landing on the default capo (the sheet's own, or none with `auto_zero_capo`) clears the override.
     pub fn change_capo(&mut self, d: i32) {
-        let Some(sheet_capo) = self.sheet.as_ref().map(|s| s.capo) else { return };
+        if self.sheet.is_none() {
+            return;
+        }
         let n = (self.effective_capo() as i32 + d).clamp(0, 12) as u8;
-        self.set_capo_override((n != sheet_capo).then_some(n));
+        self.set_capo_override((n != self.default_capo()).then_some(n));
     }
 
     pub fn set_capo_override(&mut self, o: Option<u8>) {
