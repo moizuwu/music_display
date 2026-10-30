@@ -10,10 +10,39 @@ pub enum AnnotationMode {
     Genius,
     // Short notes written by the AI engine, labelled as AI-generated.
     Ai,
+    // Genius first, then the AI adds what Genius does not already say (labelled).
+    #[value(name = "genius+ai", alias = "genius-ai", alias = "both")]
+    GeniusAi,
 }
 
 impl AnnotationMode {
-    pub const NAMES: &'static [&'static str] = &["genius", "ai"];
+    pub const NAMES: &'static [&'static str] = &["genius", "ai", "genius+ai"];
+
+    /// The label of the panel title and the GUI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Genius => "Genius",
+            Self::Ai => crate::annotations::AI_LABEL,
+            Self::GeniusAi => "Genius + AI",
+        }
+    }
+
+    /// The next mode in the settings menu.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Genius => Self::Ai,
+            Self::Ai => Self::GeniusAi,
+            Self::GeniusAi => Self::Genius,
+        }
+    }
+
+    pub fn uses_genius(self) -> bool {
+        self != Self::Ai
+    }
+
+    pub fn uses_ai(self) -> bool {
+        self != Self::Genius
+    }
 
     pub fn name(self) -> &'static str {
         Self::NAMES[self as usize]
@@ -23,8 +52,108 @@ impl AnnotationMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "genius" => Some(Self::Genius),
             "ai" => Some(Self::Ai),
+            "genius+ai" | "genius-ai" | "both" => Some(Self::GeniusAi),
             _ => None,
         }
+    }
+}
+
+/// How a long annotation that does not fit the panel moves.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AnnotationScroll {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // Scrolled by hand (mouse wheel over the panel, `e` / `E`).
+    #[default]
+    Manual,
+    // Scrolls slowly through the note while the line is sung.
+    Auto,
+}
+
+impl AnnotationScroll {
+    pub const NAMES: &'static [&'static str] = &["manual", "auto"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
+/// Where the translation sits when it is shown next to the original line.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TranslationPosition {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // Under the original line.
+    #[default]
+    Below,
+    // Above the original line.
+    Above,
+}
+
+impl TranslationPosition {
+    pub const NAMES: &'static [&'static str] = &["below", "above"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "below" => Some(Self::Below),
+            "above" => Some(Self::Above),
+            _ => None,
+        }
+    }
+
+    /// The next (`dir` = 1) or previous value, wrapping, for the settings rows.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
+    }
+}
+
+/// Where the "who sings this line" tag sits.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MemberPosition {
+    // plain comments: doc comments on variants make clap print --help in its long layout
+    // The terminal UI puts it before the line, the window under it.
+    #[default]
+    Auto,
+    // Under the line (and its translation).
+    Below,
+    // Above the line (and its translation).
+    Above,
+    // In front of the line, on the same row.
+    Inline,
+}
+
+impl MemberPosition {
+    pub const NAMES: &'static [&'static str] = &["auto", "below", "above", "inline"];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "below" => Some(Self::Below),
+            "above" => Some(Self::Above),
+            "inline" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+
+    /// The next (`dir` = 1) or previous value, wrapping, for the settings rows.
+    pub fn step(self, dir: i32) -> Self {
+        let n = Self::NAMES.len() as i32;
+        Self::parse(Self::NAMES[(self as i32 + dir).rem_euclid(n) as usize]).unwrap_or_default()
     }
 }
 
@@ -222,6 +351,11 @@ pub struct Args {
     #[arg(long)]
     pub chords_ug: bool,
 
+    /// A sheet that says "capo 2" is shown with capo 0, so its chords are the sounding ones
+    /// (your own `[` `]` choice for a track still wins) [config: auto_zero_capo]
+    #[arg(long)]
+    pub auto_zero_capo: bool,
+
     /// Experimental: show which group member sings each line, scraped from Genius
     /// (unofficial, off by default; results are cached) [config: member_parts]
     #[arg(long)]
@@ -269,6 +403,11 @@ pub struct Args {
     #[arg(long, default_value_t = DEFAULT_LYRICS_RETRIES, value_parser = clap::value_parser!(u32).range(0..=10))]
     pub lyrics_retries: u32,
 
+    /// When lrclib has no lyrics (or could not be asked often enough), try NetEase, lyrics.ovh
+    /// and the Genius page next (unofficial sites) [config: lyrics_fallback]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
+    pub lyrics_fallback: bool,
+
     /// Show lyrics translated (Google Translate, unofficial; toggle with `K`) [config: translate]
     #[arg(long)]
     pub translate: bool,
@@ -277,6 +416,15 @@ pub struct Args {
     /// or translated (the translation replaces the line). Wins over --translate [config: translate_mode]
     #[arg(long, value_enum, value_name = "MODE")]
     pub translate_mode: Option<TranslateMode>,
+
+    /// With the translation next to the original: below the line or above it [config: translation_position]
+    #[arg(long, value_enum, default_value = "below", value_name = "WHERE")]
+    pub translation_position: TranslationPosition,
+
+    /// Where the member tag goes: auto (terminal: in front of the line, window: under it), below,
+    /// above or inline [config: member_position]
+    #[arg(long, value_enum, default_value = "auto", value_name = "WHERE")]
+    pub member_position: MemberPosition,
 
     /// Look the genre up on MusicBrainz when neither the player nor the file's tags have one
     /// [config: genre_lookup]
@@ -312,10 +460,21 @@ pub struct Args {
     #[arg(long)]
     pub annotations: bool,
 
-    /// Source of the annotations: genius (free client token) or ai (short notes by the AI engine,
-    /// labelled) [config: annotations_mode]
+    /// Source of the annotations: genius (free client token), ai (notes by the AI engine,
+    /// labelled) or genius+ai (Genius, then AI extras that Genius does not already say)
+    /// [config: annotations_mode]
     #[arg(long, value_enum, default_value = "genius", value_name = "MODE")]
     pub annotations_mode: AnnotationMode,
+
+    /// Longest annotation shown, in characters (cut at a word with "…"); 0 = the whole note
+    /// [config: annotation_max_chars]
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub annotation_max_chars: usize,
+
+    /// A note longer than the panel: manual (wheel, e / E) or auto (scrolls while the line is
+    /// sung) [config: annotation_scroll]
+    #[arg(long, value_enum, default_value = "manual", value_name = "MODE")]
+    pub annotation_scroll: AnnotationScroll,
 
     /// Genius API client token (free: genius.com/api-clients). Better in the config file or the
     /// GENIUS_TOKEN environment variable than on the command line [config: genius_token]

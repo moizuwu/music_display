@@ -50,7 +50,10 @@ pub const KEYS: &[Key] = &[
     k!("hide_color_warning", Kind::Bool, "hide_color_warning"),
     k!("chords", Kind::Bool, "chords"),
     k!("chords_ug", Kind::Bool, "chords_ug"),
+    k!("auto_zero_capo", Kind::Bool, "auto_zero_capo"),
     k!("member_parts", Kind::Bool, "member_parts"),
+    k!("translation_position", Kind::Choice(crate::cli::TranslationPosition::NAMES), "translation_position"),
+    k!("member_position", Kind::Choice(crate::cli::MemberPosition::NAMES), "member_position"),
     k!("chords_dir", Kind::Str, "chords_dir"),
     k!("chords_context", Kind::Int(0, 99), "chords_context"),
     k!("volume_step", Kind::Int(1, 50), "volume_step"),
@@ -59,8 +62,11 @@ pub const KEYS: &[Key] = &[
     k!("translate", Kind::Bool, "translate"),
     k!("translate_mode", Kind::Choice(crate::cli::TranslateMode::NAMES), "translate_mode"),
     k!("genre_lookup", Kind::Bool, "genre_lookup"),
+    k!("lyrics_fallback", Kind::Bool, "lyrics_fallback"),
     k!("annotations", Kind::Bool, "annotations"),
     k!("annotations_mode", Kind::Choice(crate::cli::AnnotationMode::NAMES), "annotations_mode"),
+    k!("annotation_max_chars", Kind::Int(0, 4000), "annotation_max_chars"),
+    k!("annotation_scroll", Kind::Choice(crate::cli::AnnotationScroll::NAMES), "annotation_scroll"),
     k!("genius_token", Kind::Text, "genius_token"),
     k!("translate_engine", Kind::Choice(crate::cli::TranslateEngine::NAMES), "translate_engine"),
     k!("translate_lang", Kind::Str, "translate_lang"),
@@ -153,7 +159,10 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "hide_color_warning" => args.hide_color_warning = b(),
         "chords" => args.chords = b(),
         "chords_ug" => args.chords_ug = b(),
+        "auto_zero_capo" => args.auto_zero_capo = b(),
         "member_parts" => args.member_parts = b(),
+        "translation_position" => args.translation_position = crate::cli::TranslationPosition::parse(&st()).unwrap_or_default(),
+        "member_position" => args.member_position = crate::cli::MemberPosition::parse(&st()).unwrap_or_default(),
         "chords_dir" => args.chords_dir = Some(PathBuf::from(st())),
         "chords_context" => args.chords_context = i() as u16,
         "volume_step" => args.volume_step = i() as u32,
@@ -162,8 +171,11 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "translate" => args.translate = b(),
         "translate_mode" => args.translate_mode = crate::cli::TranslateMode::parse(&st()),
         "genre_lookup" => args.genre_lookup = b(),
+        "lyrics_fallback" => args.lyrics_fallback = b(),
         "annotations" => args.annotations = b(),
         "annotations_mode" => args.annotations_mode = crate::cli::AnnotationMode::parse(&st()).unwrap_or_default(),
+        "annotation_max_chars" => args.annotation_max_chars = i() as usize,
+        "annotation_scroll" => args.annotation_scroll = crate::cli::AnnotationScroll::parse(&st()).unwrap_or_default(),
         "genius_token" => args.genius_token = st(),
         "translate_engine" => {
             args.translate_engine = crate::cli::TranslateEngine::parse(&st()).unwrap_or_default()
@@ -253,8 +265,8 @@ pub fn apply(
             read_ai(args, m, v, &mut |msg| problems.push((line_of(&raw, "ai"), format!("{}: {msg}", at("ai")))));
             continue;
         }
-        if name == "keys" || name == "layout" {
-            continue; // the [keys] section is read by keymap::load
+        if name == "keys" || name == "layout" || name == "gui" {
+            continue; // [keys] is read by keymap::load, [layout] by load_layout, [gui] by guiconf::load
         }
         let line = line_of(&raw, name);
         let Some(key) = KEYS.iter().find(|k| k.name == name) else {
@@ -411,7 +423,10 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("hide_color_warning", args.hide_color_warning.to_string());
     line("chords", args.chords.to_string());
     line("chords_ug", args.chords_ug.to_string());
+    line("auto_zero_capo", args.auto_zero_capo.to_string());
     line("member_parts", args.member_parts.to_string());
+    line("translation_position", q(args.translation_position.name()));
+    line("member_position", q(args.member_position.name()));
     match &args.chords_dir {
         Some(d) => line("chords_dir", q(&d.display().to_string())),
         None => line("# chords_dir", "\"~/.local/share/music_display/chords\"  # default".into()),
@@ -423,9 +438,12 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("translate", args.translate.to_string());
     line("translate_mode", q(args.start_translate_mode().name()));
     line("genre_lookup", args.genre_lookup.to_string());
+    line("lyrics_fallback", args.lyrics_fallback.to_string());
     line("translate_engine", q(args.translate_engine.name()));
     line("annotations", args.annotations.to_string());
     line("annotations_mode", q(args.annotations_mode.name()));
+    line("annotation_max_chars", args.annotation_max_chars.to_string());
+    line("annotation_scroll", q(args.annotation_scroll.name()));
     if args.genius_token.is_empty() {
         line("# genius_token", "\"…\"  # or GENIUS_TOKEN in the environment; free at genius.com/api-clients".into());
     } else {
@@ -455,5 +473,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("model", q(&args.ai_model));
     line("endpoint", q(&args.ai_endpoint));
     line("api_key_env", q(&args.ai_key_env));
+    // the --gui window's look, as the file has it (the GUI reads it itself)
+    o.push_str(&crate::guiconf::load(path, &mut |_| {}).render());
     o
 }

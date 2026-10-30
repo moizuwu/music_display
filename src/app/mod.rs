@@ -109,6 +109,9 @@ const PRELOAD_DELAY: Duration = Duration::ZERO;
 const PRELOAD_GAP: Duration = Duration::from_millis(150);
 
 
+/// The steps of the "Annotation length" row (0 = the whole note).
+const ANNOTATION_LENGTHS: [usize; 6] = [0, 200, 400, 800, 1500, 3000];
+
 /// Click targets recorded during the last render.
 #[derive(Default)]
 pub struct Hits {
@@ -130,6 +133,8 @@ pub struct Hits {
     pub fields: Vec<(crate::layout::MetaField, Rect)>,
     /// The borders between columns that can be dragged.
     pub borders: Vec<Border>,
+    /// The annotations panel (mouse-wheel target).
+    pub notes: Rect,
     /// The rows of the open field menu.
     pub menu_items: Vec<Rect>,
     /// Chord diagrams share the annotations column (drawn above the notes) instead of docking
@@ -165,6 +170,10 @@ pub struct App {
     pub theme: Theme,
     /// The accent from config/CLI, restored whenever there is no cover to take one from.
     base_primary: Option<Rgb>,
+    /// The colour files the theme was read from and their modification times, and when they
+    /// were last looked at: a wallpaper tool that rewrites them changes the colours live.
+    theme_watch: Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
+    theme_polled: Instant,
     pub big_lyrics: bool,
     pub ctl: player::Ctl,
     pub client: reqwest::Client,
@@ -292,6 +301,13 @@ pub struct App {
     pub anns: Vec<crate::annotations::Annotation>,
     pub ann_match: Vec<Option<usize>>,
     pub ai_notes: Vec<Option<String>>,
+    /// genius+ai: the AI part's own state (`ann_state` is the Genius part), and why Genius gave
+    /// nothing (shown as a line above the AI notes).
+    pub ai_state: AnnState,
+    pub genius_err: Option<String>,
+    /// How far a note that does not fit the panel is scrolled, and the line it belongs to.
+    pub ann_scroll: u16,
+    pub ann_scroll_line: Option<usize>,
     /// Test hook: another Genius API address.
     pub annotations_base: Option<String>,
     /// What MusicBrainz said for the playing track.
@@ -356,6 +372,8 @@ impl App {
             placement,
             big_lyrics: args.big_lyrics,
             base_primary: theme.primary,
+            theme_watch: crate::theme::watch_list(args.colors.as_deref()),
+            theme_polled: Instant::now(),
             args,
             theme,
             client,
@@ -424,6 +442,10 @@ impl App {
             anns: Vec::new(),
             ann_match: Vec::new(),
             ai_notes: Vec::new(),
+            ai_state: AnnState::Idle,
+            genius_err: None,
+            ann_scroll: 0,
+            ann_scroll_line: None,
             annotations_base: None,
             mb_genre: None,
             customizing: false,
@@ -491,8 +513,12 @@ impl App {
                         self.snap = None;
                         self.track_key = 0;
                         self.dirty = true;
+                        for t in self.tasks.drain(..) {
+                            t.abort();
+                        }
                     }
-                    if let Some(s) = self.remote_snapshot() {
+                    // a blip of the MPRIS player must not bring back an old API answer
+                    if let Some(s) = self.remote_snapshot_within(spotify::REMOTE_FRESH) {
                         self.on_snapshot(s);
                     }
                 }
@@ -518,6 +544,11 @@ impl App {
                 self.realign_members();
                 self.ensure_translation();
                 self.rematch_annotations();
+                // AI notes are per line number: another lyrics version needs its own (cached
+                // per text, so the same lines cost no request)
+                if self.args.annotations_mode.uses_ai() && !matches!(self.ann_state, AnnState::Idle) {
+                    self.reset_annotations();
+                }
                 self.ensure_annotations();
                 self.dirty = true;
             }
@@ -588,8 +619,13 @@ impl App {
                     self.local_tags.insert(url.clone(), t);
                 }
                 // re-run the current snapshot with the tags merged in
-                if let Some(s) = self.snap.clone().filter(|s| s.url == url) {
+                // (as if from the player, but it says nothing new: leave the clock and the
+                // "last heard from the player" time alone)
+                if let Some(mut s) = self.snap.clone().filter(|s| s.url == url) {
+                    let seen = self.player_seen;
+                    s.position = self.position();
                     self.on_snapshot(s);
+                    self.player_seen = seen;
                 }
                 self.dirty = true;
             }
@@ -654,14 +690,8 @@ impl App {
         }
         // Several players at once (`any`, a list): stay with the one being shown while it
         // reports in, unless another one starts playing while ours doesn't.
-        if let Some(o) = &self.snap {
-            if !s.player.is_empty() && !o.player.is_empty() && s.player != o.player {
-                let ours_quiet = self.player_seen.elapsed() > Duration::from_secs(3);
-                let takeover = s.status == Status::Playing && o.status != Status::Playing;
-                if !ours_quiet && !takeover {
-                    return;
-                }
-            }
+        if crate::identity::ignore_other_player(self.snap.as_ref(), &s, self.player_seen.elapsed()) {
+            return;
         }
         self.player_seen = Instant::now();
         let mut key = s.key();
@@ -673,21 +703,8 @@ impl App {
         // is already on screen and only fill in what was missing.
         if !new_track {
             if let Some(o) = &self.snap {
-                let keep = |old: &str, new: &mut String| {
-                    if !old.is_empty() {
-                        *new = old.to_string();
-                    }
-                };
-                keep(&o.title, &mut s.title);
-                keep(&o.artist, &mut s.artist);
-                keep(&o.album, &mut s.album);
-                keep(&o.content_created, &mut s.content_created);
-                keep(&o.genre, &mut s.genre);
-                if !self.art_url.is_empty() && !matches!(self.cover, CoverState::Failed) {
-                    s.art_url = self.art_url.clone();
-                }
-                s.track_no = o.track_no.or(s.track_no);
-                s.disc_no = o.disc_no.or(s.disc_no);
+                let art = (!matches!(self.cover, CoverState::Failed)).then_some(self.art_url.as_str());
+                crate::identity::keep_known(o, &mut s, art);
             }
         }
         let new_art = s.art_url != self.art_url;
@@ -754,6 +771,7 @@ impl App {
             let (c, tx) = (self.client.clone(), self.tx.clone());
             let policy = lyrics::Policy {
                 retries: self.args.lyrics_retries,
+                extra: self.args.lyrics_fallback.then(Default::default),
                 ..Default::default()
             };
             let (a, t, al, len) =
@@ -798,13 +816,13 @@ impl App {
         if let Some(v) = s.volume {
             // External changes (keyboard media keys, the Spotify app) show up here; our
             // own changes win for a moment so the poller doesn't flicker them back.
-            if self.vol_hold.elapsed() > Duration::from_millis(1500)
+            if crate::identity::volume_settled(self.vol_hold.elapsed())
                 && self.volume.is_none_or(|o| (o - v).abs() > 0.004)
             {
                 self.volume = Some(v);
                 self.dirty = true;
             }
-            if v > 0.004 && self.vol_hold.elapsed() > Duration::from_millis(1500) {
+            if v > 0.004 && crate::identity::volume_settled(self.vol_hold.elapsed()) {
                 self.vol_last = v;
             }
         } else if self.volume.is_some() {
@@ -835,19 +853,7 @@ impl App {
     }
 
     fn same_recording(&self, s: &Snapshot) -> bool {
-        let Some(o) = &self.snap else { return false };
-        if self.track_key == 0 || o.player != s.player {
-            return false;
-        }
-        if !s.track_id.is_empty() && s.track_id == o.track_id {
-            return true;
-        }
-        if !s.url.is_empty() && s.url == o.url {
-            return true;
-        }
-        let same_len = o.length > 0.0 && (o.length - s.length).abs() <= 1.0;
-        let runs_on = s.position > 2.0 && (self.position() - s.position).abs() < 1.5;
-        same_len && runs_on
+        crate::identity::same_recording(self.snap.as_ref(), self.track_key, self.position(), s)
     }
 
     /// Fill what the player left empty from the file's own tags; ask for them once.
@@ -862,22 +868,7 @@ impl App {
             }
             return;
         };
-        let fill = |dst: &mut String, src: &str| {
-            if dst.is_empty() && !src.is_empty() {
-                *dst = src.to_string();
-            }
-        };
-        // a title that is only the file name gives way to the real one
-        if !t.title.is_empty() && s.title == tags::title_from_url(&s.url) {
-            s.title = t.title.clone();
-        }
-        fill(&mut s.artist, &t.artist);
-        fill(&mut s.album, &t.album);
-        fill(&mut s.content_created, &t.year);
-        fill(&mut s.genre, &t.genre);
-        fill(&mut s.art_url, &t.art_url);
-        s.track_no = s.track_no.or(t.track);
-        s.disc_no = s.disc_no.or(t.disc);
+        crate::identity::merge_tags(s, t);
     }
 
     fn capo_path(key: u64) -> std::path::PathBuf {
@@ -895,13 +886,13 @@ impl App {
     }
 
     /// `[` / `]`: capo ±1 (0..=12) as a per-track override, remembered across restarts.
-    /// Landing on the sheet's own capo clears the override.
+    /// Landing on the default capo (the sheet's own, or none with `auto_zero_capo`) clears the override.
     fn change_capo(&mut self, d: i32) {
-        let Some(sheet_capo) = self.sheet.as_ref().map(|s| s.capo) else {
+        if self.sheet.is_none() {
             return;
-        };
+        }
         let n = (self.effective_capo() as i32 + d).clamp(0, 12) as u8;
-        self.set_capo_override((n != sheet_capo).then_some(n));
+        self.set_capo_override((n != self.default_capo()).then_some(n));
     }
 
     fn set_capo_override(&mut self, o: Option<u8>) {
@@ -981,10 +972,14 @@ impl App {
         self.sheet.as_ref().map(|s| (s.source.as_str(), s.capo))
     }
 
-    /// The capo in effect: the per-track override, else the sheet's own.
+    /// The capo a track starts with: the sheet's own, or none with `auto_zero_capo`.
+    pub fn default_capo(&self) -> u8 {
+        if self.args.auto_zero_capo { 0 } else { self.sheet.as_ref().map_or(0, |s| s.capo) }
+    }
+
+    /// The capo in effect: the per-track override, else the default.
     pub fn effective_capo(&self) -> u8 {
-        self.capo_override
-            .unwrap_or_else(|| self.sheet.as_ref().map_or(0, |s| s.capo))
+        self.capo_override.unwrap_or_else(|| self.default_capo())
     }
 
     /// Semitones to shift the sheet's chord shapes by: a higher capo means lower shapes,
@@ -1146,7 +1141,13 @@ impl App {
                 if let (true, Ok((done, backend))) = (keep, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
-                let _ = tx.send(AppEvent::Translated { key, lang, lines: r.map(|(l, b)| (l, tag(b))) });
+                let _ = tx.send(AppEvent::Translated { key, lang, lines: r
+                    .map(|(l, b)| (l, tag(b)))
+                    // Google failing too: the reason the AI gave up is still worth knowing
+                    .map_err(|e| match &ai_failed {
+                        Some(why) if !translate::is_held(&e) => format!("{e}; AI failed: {why}"),
+                        _ => e,
+                    }) });
                 return;
             }
         }));
@@ -1326,11 +1327,14 @@ impl App {
             Setting::Player => format!("< {} >", self.args.player),
             Setting::Chords => onoff(self.chords_on),
             Setting::ChordsUg => onoff(self.args.chords_ug),
+            Setting::AutoZeroCapo => onoff(self.args.auto_zero_capo),
             Setting::ChordsMatch => match &self.settings_edit {
                 Some((Setting::ChordsMatch, input)) => input.shown(),
                 _ => format!("{} %", self.args.chords_match),
             },
             Setting::MemberParts => onoff(self.args.member_parts),
+            Setting::MemberPosition => format!("< {} >", self.args.member_position.name()),
+            Setting::TranslationPosition => format!("< {} >", self.args.translation_position.name()),
             Setting::Translate => onoff(self.translate_on),
             Setting::TranslateMode => format!("< {} >", self.translate_mode().name()),
             Setting::TranslateEngine => format!("< {} >", self.args.translate_engine.name()),
@@ -1359,8 +1363,14 @@ impl App {
             Setting::Minimal => onoff(self.minimal),
             Setting::Customize => "enter →".to_string(),
             Setting::GenreLookup => onoff(self.args.genre_lookup),
+            Setting::LyricsFallback => onoff(self.args.lyrics_fallback),
             Setting::Annotations => onoff(self.annotations_shown()),
             Setting::AnnotationsMode => format!("< {} >", self.args.annotations_mode.name()),
+            Setting::AnnotationMaxChars => match self.args.annotation_max_chars {
+                0 => "< whole note >".into(),
+                n => format!("< {n} characters >"),
+            },
+            Setting::AnnotationScroll => format!("< {} >", self.args.annotation_scroll.name()),
             Setting::GeniusToken => match &self.settings_edit {
                 Some((Setting::GeniusToken, input)) => input.shown(),
                 _ if !self.args.genius_token.is_empty() => "set (hidden)".to_string(),
@@ -1445,11 +1455,23 @@ impl App {
             }
             Setting::Chords => self.toggle_chords(),
             Setting::ChordsUg => self.args.chords_ug = !self.args.chords_ug,
+            Setting::AutoZeroCapo => {
+                self.args.auto_zero_capo = !self.args.auto_zero_capo;
+                self.snap_scroll = true;
+            }
             Setting::ChordsMatch => {
                 self.settings_edit = Some((s, TextInput::with(&self.args.chords_match.to_string())));
                 return;
             }
             Setting::MemberParts => self.toggle_member_parts(),
+            Setting::MemberPosition => {
+                self.args.member_position = self.args.member_position.step(dir);
+                self.snap_scroll = true;
+            }
+            Setting::TranslationPosition => {
+                self.args.translation_position = self.args.translation_position.step(dir);
+                self.snap_scroll = true;
+            }
             Setting::Translate => self.toggle_translate(),
             Setting::TranslateMode => self.set_translate_mode(self.translate_mode().step(dir)),
             Setting::TranslateEngine => {
@@ -1516,15 +1538,27 @@ impl App {
                 return;
             }
             Setting::GenreLookup => self.args.genre_lookup = !self.args.genre_lookup,
+            Setting::LyricsFallback => self.args.lyrics_fallback = !self.args.lyrics_fallback,
             Setting::Annotations => self.toggle_annotations(),
             Setting::AnnotationsMode => {
-                let next = if self.args.annotations_mode == crate::cli::AnnotationMode::Genius {
-                    crate::cli::AnnotationMode::Ai
-                } else {
-                    crate::cli::AnnotationMode::Genius
-                };
-                self.args.annotations_mode = next;
+                let mut m = self.args.annotations_mode.next();
+                if dir < 0 {
+                    m = m.next(); // three modes: two steps forward is one back
+                }
+                self.args.annotations_mode = m;
                 self.restart_annotations();
+            }
+            Setting::AnnotationMaxChars => {
+                let cur = ANNOTATION_LENGTHS.iter().position(|n| *n == self.args.annotation_max_chars).unwrap_or(0) as i32;
+                self.args.annotation_max_chars = ANNOTATION_LENGTHS[(cur + dir).rem_euclid(ANNOTATION_LENGTHS.len() as i32) as usize];
+                self.ann_scroll = 0;
+            }
+            Setting::AnnotationScroll => {
+                self.args.annotation_scroll = match self.args.annotation_scroll {
+                    crate::cli::AnnotationScroll::Manual => crate::cli::AnnotationScroll::Auto,
+                    crate::cli::AnnotationScroll::Auto => crate::cli::AnnotationScroll::Manual,
+                };
+                self.ann_scroll = 0;
             }
             Setting::GeniusToken => {
                 self.settings_edit = Some((s, TextInput::with("")));
@@ -1663,11 +1697,17 @@ impl App {
             ("player", S(self.args.player.clone())),
             ("chords", B(self.chords_on)),
             ("chords_ug", B(self.args.chords_ug)),
+            ("auto_zero_capo", B(self.args.auto_zero_capo)),
+            ("member_position", S(self.args.member_position.name().to_string())),
+            ("translation_position", S(self.args.translation_position.name().to_string())),
             ("chords_match", I(self.args.chords_match as i64)),
             ("member_parts", B(self.args.member_parts)),
             ("genre_lookup", B(self.args.genre_lookup)),
+            ("lyrics_fallback", B(self.args.lyrics_fallback)),
             ("annotations", B(self.annotations_shown())),
             ("annotations_mode", S(self.args.annotations_mode.name().to_string())),
+            ("annotation_max_chars", I(self.args.annotation_max_chars as i64)),
+            ("annotation_scroll", S(self.args.annotation_scroll.name().to_string())),
             ("genius_token", S(self.args.genius_token.clone())),
             ("translate", B(self.translate_on)),
             ("translate_mode", S(self.translate_mode().name().to_string())),
@@ -1766,6 +1806,36 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Read the colour files again when one of them changed (looked at every two seconds).
+    /// A cover accent stays while `cover_theme` is on; the configured one is updated for later.
+    pub fn refresh_theme(&mut self) {
+        if self.theme_polled.elapsed() >= Duration::from_secs(2) {
+            self.theme_polled = Instant::now();
+            self.refresh_theme_now();
+        }
+    }
+
+    /// [`refresh_theme`](Self::refresh_theme) without waiting for the next look.
+    pub fn refresh_theme_now(&mut self) {
+        if self.args.terminal_colors {
+            return;
+        }
+        let watch = crate::theme::watch_list(self.args.colors.as_deref());
+        if watch == self.theme_watch {
+            return;
+        }
+        self.theme_watch = watch;
+        let t = crate::theme::load(&self.args);
+        self.base_primary = t.primary;
+        self.theme.surface = t.surface;
+        self.theme.on_surface = t.on_surface;
+        self.theme.source = t.source;
+        if !self.args.cover_theme {
+            self.theme.primary = t.primary;
+        }
+        self.dirty = true;
     }
 
     /// Back to the configured accent (no cover to take one from).
@@ -1917,6 +1987,12 @@ impl App {
             }
             Event::Mouse(m)
                 if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                    && self.hits.notes.contains(Position::new(m.column, m.row)) =>
+            {
+                self.scroll_notes(if m.kind == MouseEventKind::ScrollUp { -2 } else { 2 });
+            }
+            Event::Mouse(m)
+                if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
                     && self.lyric_hits.area.contains(Position::new(m.column, m.row)) =>
             {
                 self.browse_by(if m.kind == MouseEventKind::ScrollUp { -3.0 } else { 3.0 });
@@ -1994,6 +2070,8 @@ impl App {
             Action::CapoUp => self.change_capo(1),
             Action::CapoReset => self.set_capo_override(None),
             Action::Annotations => self.toggle_annotations(),
+            Action::NotesDown => self.scroll_notes(2),
+            Action::NotesUp => self.scroll_notes(-2),
             Action::Diagrams => {
                 self.show_diagrams = !self.show_diagrams;
                 self.layout.panels.set(crate::layout::PanelId::Chords, self.show_diagrams);
@@ -2017,6 +2095,8 @@ impl App {
             Action::Like => self.toggle_like(),
             Action::PlayHere => self.spot_cmd(spotify::Cmd::Transfer),
             Action::Devices => self.open_devices(),
+            // (the window's own theme; a terminal has the colours of the terminal)
+            Action::ToggleTheme => self.set_note("the dark / light theme is for the window (--gui)"),
             Action::Help => {
                 self.show_help = true;
                 self.help_scroll = 0;

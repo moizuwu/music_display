@@ -26,7 +26,8 @@ pub(super) fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 format!("chords: weak match ({}%) — hidden", a.percent())
             }
             (CS::Ready, Some(a)) => {
-                let (src, capo) = app.sheet_info().unwrap_or(("", 0));
+                let src = app.sheet_info().map_or("", |i| i.0);
+                let capo = app.effective_capo();
                 let mut t = format!("chords: {src} {}%", a.percent());
                 if let Some(tu) = app.tuning() {
                     t.push_str(&format!(" · {tu}"));

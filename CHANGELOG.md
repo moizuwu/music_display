@@ -8,6 +8,16 @@ which turns the `Unreleased` section into that version.
 ## [Unreleased]
 
 ### Added
+- On Hyprland, sway and niri the settings, keys, library, devices and AI-question windows and the pop-out panels open floating (`float_windows` in `[gui]`, on by default, checkbox in the Appearance tab); they have their own Wayland classes `music_display.floating` and `music_display.popout` for rules of your own.
+- `colors` (`off`, `file`, `gtk`, `auto`) and `colors_file` in `[gui]`: the window can take its base colour, text and accent from a colour file (matugen / noctalia, the files the terminal UI reads) or the GTK theme, and follows them when they change; the terminal UI re-reads its colour file when it changes.
+- `effects` and `effects_intensity` in `[gui]`: snow, autumn leaves, dandelion seeds, wind, pollen, embers, fog, bats and eggs as a layer of their own over any background and look (`auto` = the look's own); the backgrounds are now `solid`, `cover-blur`, `gradient`, `image`, `sky`, `meadow` and `lawn`, and files with the old moving backgrounds keep working.
+- `lyrics_fallback` (on by default): when lrclib has no lyrics, or fails more often than `lyrics_retries` allows, NetEase (synced), lyrics.ovh and the plain lyrics of the Genius page are tried; a find from them is looked up again after a day. Config key, flag, settings row.
+- A dark / light toggle for the window (`v`, a top-bar button) that works with every look; Halloween has a light palette now, picking a look keeps the theme.
+- The settings, keys, library, devices and AI-question windows are windows of their own with the window's background and opacity; the sizes of panels inside a column are remembered.
+- The translated line and the member tag of the active line light up with it, and the glow covers all three.
+- GUI looks Christmas, Easter and Midsummer next to Halloween, with the backgrounds `snow`, `eggs` and `meadow`; the light looks also work in the dark theme.
+- Placement and size of the translated line and of the member tag: `translation_position` (`below`, `above`), `member_position` (`auto`, `below`, `above`, `inline`) in the terminal UI and the window, and `translation_size` / `member_size` in `[gui]`.
+- `auto_zero_capo`: a sheet that says "capo 2" is shown with capo 0 (the sounding chords); your own capo for a track still wins. Config key, `--auto-zero-capo`, settings row and GUI checkbox.
 - `CHANGELOG.md` and `scripts/release.sh X.Y.Z` (bumps `Cargo.toml` / `Cargo.lock`, dates the
   `Unreleased` section, commits and tags `vX.Y.Z`).
 - `--version` and the settings menu show the build as `0.1.0 (a1b2c3d, dirty)`: the version, the
@@ -51,6 +61,7 @@ which turns the `Unreleased` section into that version.
 - Toggling lyrics, cava or the diagrams with their keys now keeps the layout's panel list in step.
 
 ### Changed
+- Previous, play / pause and next are the same size and look alike (play no longer has a larger accent disc).
 - The top row is always there (it holds the new buttons and, with Spotify, `[ library ]`).
 - The core (players, lyrics, chords, translation, Spotify, config, cover decoding, cava) is now a
   library crate with no terminal code, so another front end can reuse it. `ui.rs` and `app.rs`

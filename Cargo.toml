@@ -43,13 +43,15 @@ lofty = "0.24.0"
 
 # GUI (`--gui`), only with `--features gui`: the default build gets none of this
 eframe = { version = "0.37", optional = true, default-features = false, features = [
-    "glow", "wayland", "x11", "default_fonts", "system_fonts", "clipboard",
+    "glow", "wayland", "x11", "default_fonts", "system_fonts", "clipboard", "persistence",
 ] }
 egui = { version = "0.37", optional = true, default-features = false }
+# the installed font families, for the font picker in the Appearance tab (already in the tree via eframe)
+fontique = { version = "0.11", optional = true }
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:egui"]
+gui = ["dep:eframe", "dep:egui", "dep:fontique"]
 
 [lints.clippy]
 # rust-version 1.90 (what the dependencies need) makes clippy suggest let chains for 19 nested

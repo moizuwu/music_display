@@ -2,7 +2,9 @@
 //! (`genius_token` in the config, or `GENIUS_TOKEN` in the environment): the song's referents
 //! (the annotated fragments) are matched to the synced lyric lines by their quoted text. An
 //! optional second mode asks the AI engine for short notes instead; those are labelled
-//! [`AI_LABEL`]. Only short excerpts are kept for display, with the source named. Misses are
+//! [`AI_LABEL`]. A third mode does both: Genius first, then one AI request that sees the Genius
+//! notes and only adds what they do not already say. The whole note is kept (up to
+//! [`MAX_STORE_CHARS`]); the panels cut it to `annotation_max_chars` when drawing. Misses are
 //! cached for a week, errors never; a circuit breaker stops asking after repeated failures.
 //! The token is never put in an error message, a log or the cache.
 use crate::util::{cache_dir, fnv1a, now_secs};
@@ -20,10 +22,14 @@ const BREAKER_SECS: u64 = 10 * 60;
 const MIN_FRAGMENT: usize = 12;
 /// Shortest lyric line that may be matched inside a longer quoted fragment.
 const MIN_LINE: usize = 8;
-/// How much of an annotation is kept for display.
-pub const EXCERPT_CHARS: usize = 280;
+/// Safety cap on what is stored of one annotation (the panels scroll through the rest).
+pub const MAX_STORE_CHARS: usize = 4000;
 pub const SOURCE: &str = "Genius";
 pub const AI_LABEL: &str = "AI-generated";
+/// The source of an AI note that adds to a Genius one.
+pub const AI_EXTRA_LABEL: &str = "AI-generated · extra";
+/// Share of an AI note's words that may also be in the Genius note before it counts as a repeat.
+const REPEAT_SHARE: f32 = 0.7;
 
 static FAILS: AtomicU32 = AtomicU32::new(0);
 static LAST_FAIL: AtomicU64 = AtomicU64::new(0);
@@ -94,6 +100,29 @@ pub fn excerpt(text: &str, max: usize) -> String {
     format!("{}…", cut.trim_end_matches([' ', ',', ';', ':', '.', '-']))
 }
 
+pub const NO_TOKEN: &str = "no token: set genius_token or GENIUS_TOKEN (free at genius.com/api-clients)";
+
+/// The notes for lyric line `i` in `mode` (shared with the window front end): the Genius note the
+/// line matched, then the AI note, labelled as an extra when Genius has one too.
+pub fn notes_for(mode: crate::cli::AnnotationMode, anns: &[Annotation], matched: &[Option<usize>], ai: &[Option<String>], i: usize) -> Vec<Annotation> {
+    let genius = mode
+        .uses_genius()
+        .then(|| matched.get(i).copied().flatten().and_then(|m| anns.get(m)).cloned())
+        .flatten();
+    let ai = mode.uses_ai().then(|| ai.get(i).cloned().flatten()).flatten().map(|text| Annotation {
+        fragment: String::new(),
+        text,
+        source: if genius.is_some() { AI_EXTRA_LABEL } else { AI_LABEL }.into(),
+        url: None,
+    });
+    genius.into_iter().chain(ai).collect()
+}
+
+/// The note as a panel shows it: whitespace collapsed, cut to `max` characters (0 = whole).
+pub fn shown(text: &str, max: usize) -> String {
+    excerpt(text, if max == 0 { usize::MAX } else { max })
+}
+
 /// The annotations of a Genius `/referents` response.
 pub fn parse_referents(v: &Value) -> Vec<Annotation> {
     let Some(list) = v.pointer("/response/referents").and_then(Value::as_array) else {
@@ -113,7 +142,7 @@ pub fn parse_referents(v: &Value) -> Vec<Annotation> {
         }
         out.push(Annotation {
             fragment,
-            text: excerpt(body, EXCERPT_CHARS),
+            text: excerpt(body, MAX_STORE_CHARS),
             source: SOURCE.to_string(),
             url: ann.and_then(|a| a["url"].as_str()).or_else(|| r["url"].as_str()).map(str::to_string),
         });
@@ -180,7 +209,8 @@ struct CacheEntry {
 #[doc(hidden)]
 pub fn cache_path(artist: &str, title: &str) -> std::path::PathBuf {
     let first = artist.split(", ").next().unwrap_or(artist);
-    cache_dir().join(format!("annot-{:016x}.json", fnv1a(&format!("{first}\0{}", crate::year::base_title(title)))))
+    // (annot2: the whole note; annot- files hold notes cut at 280 characters)
+    cache_dir().join(format!("annot2-{:016x}.json", fnv1a(&format!("{first}\0{}", crate::year::base_title(title)))))
 }
 
 /// A usable cache entry: `Some(vec)` (possibly empty = a known miss), `None` = ask again.
@@ -277,8 +307,8 @@ fn urlenc(s: &str) -> String {
 
 /// (system, user) prompts asking for one short note per lyric line, or null.
 pub fn ai_note_prompt(title: &str, artist: &str, lines: &[String]) -> (String, String) {
-    let system = "You annotate song lyrics. For each numbered lyric line, give at most one SHORT note \
-        (under 200 characters) when the line contains a cultural reference, an idiom, wordplay or needs backstory \
+    let system = "You annotate song lyrics. For each numbered lyric line, give at most one note \
+        (one to three sentences) when the line contains a cultural reference, an idiom, wordplay or needs backstory \
         to be understood; otherwise null. Be factual; if you are not sure, use null. \
         Output ONLY a JSON array with exactly one entry per input line, in order: a string or null. No commentary."
         .to_string();
@@ -289,8 +319,53 @@ pub fn ai_note_prompt(title: &str, artist: &str, lines: &[String]) -> (String, S
     (system, user)
 }
 
-/// The model's answer as one optional note per line (empty strings become `None`, long notes are
-/// shortened); an array of the wrong length or with other entries is an error.
+/// (system, user) prompts for the genius+ai mode: every line with what Genius already says about
+/// it, asking only for what Genius does not say.
+pub fn ai_extra_prompt(title: &str, artist: &str, lines: &[String], genius: &[Option<String>]) -> (String, String) {
+    let system = "You add fun facts to song lyrics that already have Genius annotations. For each numbered lyric line, \
+        give at most one note (one to three sentences) with something NEW: a cultural reference, backstory, trivia, \
+        wordplay, a sample or production detail, or how the line was received. When a line is followed by \
+        [Genius already says: ...], never repeat or paraphrase that; add a different fact or use null. \
+        Be factual; if you are not sure, use null. Prefer null over a repeat. \
+        Output ONLY a JSON array with exactly one entry per input line, in order: a string or null. No commentary."
+        .to_string();
+    let mut user = format!("Title: {title}\nArtist: {artist}\n\nThere are {} numbered lines.\n\n", lines.len());
+    for (i, l) in lines.iter().enumerate() {
+        user.push_str(&format!("{}. {}\n", i + 1, l));
+        if let Some(g) = genius.get(i).and_then(|g| g.as_deref()) {
+            user.push_str(&format!("   [Genius already says: {}]\n", excerpt(g, 600)));
+        }
+    }
+    (system, user)
+}
+
+/// For each lyric line, the text of the Genius note it matched, if any.
+pub fn genius_per_line(lines: &[String], anns: &[Annotation]) -> Vec<Option<String>> {
+    match_lines(lines, anns).into_iter().map(|m| m.map(|i| anns[i].text.clone())).collect()
+}
+
+/// The longer words of a note (short ones like "the" or "song" say nothing about repeats).
+fn content_words(s: &str) -> std::collections::HashSet<String> {
+    norm(s).split(' ').filter(|w| w.chars().count() >= 4).map(str::to_string).collect()
+}
+
+/// True when the AI note says what the Genius note already says: it is inside it, or most of its
+/// words are in it.
+pub fn is_repeat(ai: &str, genius: &str) -> bool {
+    let (a, g) = (norm(ai), norm(genius));
+    if a.is_empty() || g.contains(&a) {
+        return true;
+    }
+    let (aw, gw) = (content_words(ai), content_words(genius));
+    if aw.is_empty() {
+        return false;
+    }
+    aw.intersection(&gw).count() as f32 / aw.len() as f32 >= REPEAT_SHARE
+}
+
+/// The model's answer as one optional note per line (empty strings become `None`, very long
+/// notes are cut at [`MAX_STORE_CHARS`]); an array of the wrong length or with other entries is
+/// an error.
 pub fn parse_ai_notes(raw: &str, n: usize) -> Result<Vec<Option<String>>, String> {
     let Some(Value::Array(a)) = crate::ai::extract_array(raw) else {
         return Err("the model did not return a JSON array".into());
@@ -301,7 +376,7 @@ pub fn parse_ai_notes(raw: &str, n: usize) -> Result<Vec<Option<String>>, String
     a.iter()
         .map(|v| match v {
             Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(excerpt(s, EXCERPT_CHARS)).filter(|s| !s.is_empty())),
+            Value::String(s) => Ok(Some(excerpt(s, MAX_STORE_CHARS)).filter(|s| !s.is_empty())),
             _ => Err("the model returned an entry that is neither text nor null".to_string()),
         })
         .collect()
@@ -312,10 +387,25 @@ pub fn ai_cache_for_test(cfg: &crate::ai::Cfg, artist: &str, title: &str, lines:
     ai_cache(cfg, artist, title, lines)
 }
 
+#[doc(hidden)]
+pub fn ai_extra_cache_for_test(cfg: &crate::ai::Cfg, artist: &str, title: &str, lines: &[String], genius: &[Option<String>]) -> std::path::PathBuf {
+    ai_extra_cache(cfg, artist, title, lines, genius)
+}
+
 fn ai_cache(cfg: &crate::ai::Cfg, artist: &str, title: &str, lines: &[String]) -> std::path::PathBuf {
+    // (annot-ai2: notes of up to three sentences; annot-ai files hold the old one-line notes)
     cache_dir().join(format!(
-        "annot-ai-{:016x}.json",
+        "annot-ai2-{:016x}.json",
         fnv1a(&format!("{artist}\0{title}\0{}\0{}\0{}", cfg.provider.name(), cfg.model, fnv1a(&lines.join("\n"))))
+    ))
+}
+
+/// Like [`ai_cache`], plus the Genius notes the model was shown (new notes, new answer).
+fn ai_extra_cache(cfg: &crate::ai::Cfg, artist: &str, title: &str, lines: &[String], genius: &[Option<String>]) -> std::path::PathBuf {
+    let g = fnv1a(&serde_json::to_string(genius).unwrap_or_default());
+    cache_dir().join(format!(
+        "annot-aix-{:016x}.json",
+        fnv1a(&format!("{artist}\0{title}\0{}\0{}\0{}\0{g:016x}", cfg.provider.name(), cfg.model, fnv1a(&lines.join("\n"))))
     ))
 }
 
@@ -327,22 +417,55 @@ pub async fn ai_notes(
     title: &str,
     lines: &[String],
 ) -> Result<Vec<Option<String>>, String> {
-    let path = ai_cache(cfg, artist, title, lines);
-    if let Ok(txt) = tokio::fs::read_to_string(&path).await {
+    let (system, user) = ai_note_prompt(title, artist, lines);
+    ask_notes(c, cfg, &ai_cache(cfg, artist, title, lines), &system, &user, lines.len(), |_, n| n).await
+}
+
+/// The genius+ai mode: AI notes that add to the Genius ones (`genius[i]` is what Genius says
+/// about line `i`). Still one request for the whole song, one retry, cached; a note that repeats
+/// Genius anyway is dropped.
+pub async fn ai_extras(
+    c: &reqwest::Client,
+    cfg: &crate::ai::Cfg,
+    artist: &str,
+    title: &str,
+    lines: &[String],
+    genius: &[Option<String>],
+) -> Result<Vec<Option<String>>, String> {
+    let (system, user) = ai_extra_prompt(title, artist, lines, genius);
+    let path = ai_extra_cache(cfg, artist, title, lines, genius);
+    ask_notes(c, cfg, &path, &system, &user, lines.len(), |i, n| {
+        n.filter(|t| !genius.get(i).and_then(|g| g.as_deref()).is_some_and(|g| is_repeat(t, g)))
+    })
+    .await
+}
+
+/// One request (one retry on a malformed answer) for `n` notes, `keep` applied to each, the
+/// result cached at `path`.
+async fn ask_notes(
+    c: &reqwest::Client,
+    cfg: &crate::ai::Cfg,
+    path: &std::path::Path,
+    system: &str,
+    user: &str,
+    n: usize,
+    keep: impl Fn(usize, Option<String>) -> Option<String>,
+) -> Result<Vec<Option<String>>, String> {
+    if let Ok(txt) = tokio::fs::read_to_string(path).await {
         if let Ok(v) = serde_json::from_str::<Vec<Option<String>>>(&txt) {
-            if v.len() == lines.len() {
+            if v.len() == n {
                 return Ok(v);
             }
         }
     }
-    let (system, user) = ai_note_prompt(title, artist, lines);
     let mut last = String::new();
     for _ in 0..2 {
-        let raw = crate::ai::complete(c, cfg, &system, &user).await?;
-        match parse_ai_notes(&raw, lines.len()) {
+        let raw = crate::ai::complete(c, cfg, system, user).await?;
+        match parse_ai_notes(&raw, n) {
             Ok(v) => {
+                let v: Vec<Option<String>> = v.into_iter().enumerate().map(|(i, t)| keep(i, t)).collect();
                 if let Ok(j) = serde_json::to_string(&v) {
-                    let _ = tokio::fs::write(&path, j).await;
+                    let _ = tokio::fs::write(path, j).await;
                 }
                 return Ok(v);
             }
@@ -468,10 +591,46 @@ mod tests {
         assert!(parse_ai_notes(r#"["a"]"#, 2).is_err());
         assert!(parse_ai_notes("no json here", 1).is_err());
         assert!(parse_ai_notes("[1, 2]", 2).is_err());
+        // a long note is kept whole (only the safety cap applies)
         let long = format!("[\"{}\"]", "word ".repeat(200));
-        assert!(parse_ai_notes(&long, 1).unwrap()[0].as_ref().unwrap().chars().count() <= EXCERPT_CHARS);
+        assert_eq!(parse_ai_notes(&long, 1).unwrap()[0].as_ref().unwrap().chars().count(), 999);
+        let huge = format!("[\"{}\"]", "word ".repeat(2000));
+        assert!(parse_ai_notes(&huge, 1).unwrap()[0].as_ref().unwrap().chars().count() <= MAX_STORE_CHARS);
         let (sys, user) = ai_note_prompt("T", "A", &lines(&["x", "y"]));
         assert!(sys.contains("null") && sys.contains("JSON") && user.contains("2. y"));
+    }
+
+    #[test]
+    fn genius_notes_are_kept_whole_and_cut_only_when_shown() {
+        let body = "word ".repeat(150);
+        let v = json!({"response": {"referents": [{"fragment": "a line", "annotations": [{"body": {"plain": body}}]}]}});
+        let a = parse_referents(&v);
+        assert_eq!(a[0].text.chars().count(), 749);
+        assert!(!a[0].text.contains('…'));
+        assert_eq!(shown(&a[0].text, 0), a[0].text);
+        let cut = shown(&a[0].text, 100);
+        assert!(cut.chars().count() <= 100 && cut.ends_with('…'), "{cut}");
+    }
+
+    #[test]
+    fn the_extra_prompt_shows_what_genius_says() {
+        let genius = vec![None, Some("A metaphor for fragile things.".to_string())];
+        let (sys, user) = ai_extra_prompt("T", "A", &lines(&["intro", "castles in the sand"]), &genius);
+        assert!(sys.contains("never repeat") && sys.contains("JSON") && sys.contains("null"));
+        assert!(user.contains("2. castles in the sand\n   [Genius already says: A metaphor for fragile things.]"), "{user}");
+        assert!(!user.contains("1. intro\n   ["));
+        let anns = vec![ann("castles in the sand", "fragile")];
+        assert_eq!(genius_per_line(&lines(&["intro", "Castles in the sand"]), &anns), vec![None, Some("fragile".into())]);
+    }
+
+    #[test]
+    fn repeats_of_genius_are_recognised() {
+        let g = "Castles in the sand is a metaphor for fragile things people work hard on, washed away by the tide.";
+        assert!(is_repeat("A metaphor for fragile things people work hard on.", g));
+        assert!(is_repeat("castles in the sand is a metaphor", g));
+        assert!(is_repeat("This metaphor describes fragile things people work hard on", g));
+        assert!(!is_repeat("Jimi Hendrix released a song with the same title in 1967.", g));
+        assert!(!is_repeat("The tide image returns in the band's next album, recorded in Iceland.", g));
     }
 
     #[test]

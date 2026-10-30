@@ -148,13 +148,17 @@ lyric_pad = 0                  # 0..10 blank columns on each side of the lyrics
 big_scale = 1                  # 1..3, size of the big-font line
 chords = false
 chords_ug = false
+auto_zero_capo = false         # a sheet that says "capo 2" is shown with capo 0, so its chords are the sounding ones (your [ ] choice for a track still wins)
 chords_match = 40              # percent of the lyric lines that must match a sheet for its chords to show (0 = always)
 member_parts = false           # experimental: show who sings each line (Genius, unofficial)
+member_position = "auto"       # auto | below | above | inline: where the member tag goes (auto: terminal in front of the line, window under it)
+translation_position = "below" # below | above: where the translation goes with translate_mode = "both"
 # chords_dir = "~/.local/share/music_display/chords"
 chords_context = 99            # 99 = chords on every line; N = active line + N upcoming
 volume_step = 5                # percent per + / - / wheel notch
 interlude_threshold_secs = 8   # silence longer than this shows [ Instrumental / Solo ]
 lyrics_retries = 3             # retries (exponential backoff) after a failed lyrics request
+lyrics_fallback = true         # when lrclib has nothing (or fails more often than allowed): try NetEase (synced), lyrics.ovh and the Genius page (plain), unofficial sites
 translate = false              # start with translated lyrics (toggle with K; k keeps the original line too)
 translate_mode = "off"         # off | both (original, translation underneath) | translated; wins over `translate`
 translate_lang = "en"          # language lyrics are translated into
@@ -220,6 +224,8 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--translate-engine ENGINE` | `standard` (default: Google Translate, LibreTranslate as the fallback) or `ai`: a language model translates the **whole song in one request**. Config: `translate_engine`; a row in the settings menu. See [AI translation](#ai-translation-optional). |
 | `--ai-provider P` / `--ai-model M` / `--ai-endpoint URL` / `--ai-key-env VAR` | the AI engine's settings (`[ai]` in the config file: `provider`, `model`, `endpoint`, `api_key_env`; rows in the settings menu). |
 | `--translate-mode MODE` | how a translation is shown: `off` (original only), `both` (the original line with its translation underneath) or `translated` (the translation replaces the line). Config: `translate_mode`; a row in the settings menu ("Translation shown as", ←/→) saves it. `--translate-mode` beats everything; `--translate` on the command line beats a mode from the file; without a mode, `translate = true` means `translated`. |
+| `--translation-position WHERE` | with `both`, where the translation goes: `below` the original (default) or `above` it. Config: `translation_position`; a row in the settings menu ("Translation placed") saves it. In the window the size of the translated line is `translation_size` in the Appearance tab. |
+| `--member-position WHERE` | where the member tag goes: `auto` (terminal: in front of the line, window: under it), `below`, `above` or `inline`. Config: `member_position`; a row in the settings menu ("Member parts shown"). |
 | `--translate` / `--translate-lang CODE` | start with lyrics translated (Google Translate, unofficial endpoint) into CODE (default `en`); toggle with `K`. Chords stay on while a translation is shown, each moved to the same relative place in the translated line. |
 | `--member-parts` | experimental, off by default: tag lyric lines with the member singing them (`[Jimin]`), read from Genius' section headers (`[Verse 1: Jimin]`, `[Chorus: Jungkook, V]`). Also in the settings menu as "Member parts (experimental)". See "Korean lyrics and member parts" below. |
 | `--volume-step N` | percent per volume change. |
@@ -257,6 +263,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `L` | next lyrics version from lrclib: lrclib often has several entries for a song (for example romanized Korean instead of Hangul); each press shows the next one (best first) and the song opens with that version from then on |
 | `K` | translate lyrics on / off: the translation replaces the original line (cached per song while the app runs) |
 | `k` | translation on / off with the original kept: each line is followed by its translation (italic). With big lyrics the translation replaces the line as with `K`. `K` and `k` switch between the two modes |
+| `e` / `E` | scroll a long annotation down / up (the mouse wheel over the panel does the same) |
 | `b` | big-font active line |
 | `a` | word-by-word highlight: the active line lights up from left to right while it is sung (also big-font lines). lrclib only has one time per line, so the speed inside a line is estimated from its length and the time to the next line: it fits evenly sung lines and drifts on long held notes. Redraws about 30 times a second while it is on and a synced song plays (`--karaoke`, `karaoke = true`, or the settings menu) |
 | `x` | big-font size 1 → 2 → 3 → 1 (`big_scale`; the line steps down by itself when it doesn't fit) |
@@ -266,9 +273,10 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `g` | chords on / off |
 | `t` / `T` | transpose chords up / down one semitone |
 | `]` / `[` | capo up / down (0–12), remembered per track |
-| `0` | back to the sheet's own capo |
+| `0` | back to the default capo: the sheet's own, or none with `auto_zero_capo` |
 | `D` | chord diagram panel |
 | `M` | minimal teleprompter view |
+| `v` | dark / light theme (the window only; the terminal keeps the colours of the terminal) |
 | `s` / `S` | settings menu (`Esc`, `q`, `s` or `S` close it): toggles and steppers for the player source (Spotify, VLC, mpv, Rhythmbox, local, any), chords, translation, minimal view, big lyrics, spacing, cava and more, and a **Spotify** group (on / off, Client ID, log in / out, spotifyd name, status). Rows that take text (`Enter` starts typing, `Enter` saves, `Esc` cancels) swallow every key, so `q` and `s` are letters while you type. Changes apply immediately and are saved to the config file (comments in it are not kept); items marked `*` need a restart |
 | `c` | toggle cava (process is killed while hidden) |
 | `?` | help overlay (↑/↓ scroll, `e` edits the keys, any other key closes). In the key editor ↑/↓ pick an action, `Enter` then the new key sets it, `Backspace` goes back to the built-in key and `Esc` leaves; a key another action already has is refused. Changes are written to `[keys]` in the config file at once (`*` marks a changed action) |
@@ -300,7 +308,7 @@ big_scale = "2"                # unshifted keys work on any layout
 
 **Key syntax.** One character (`"n"`, `"T"`, `"["`, `"+"`; case matters, `"T"` is a capital T), or a name: `space`, `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`, `home`, `end`, `f1` … `f12`. Modifiers (`ctrl+x`, `alt+x`, `shift+x`) are not supported: the key handler ignores Ctrl and Alt, so use the plain key, a capital for Shift.
 
-**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `karaoke` (`a`), `next_lyrics` (`L`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `translate_both` (`k`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `toggle_cava` (`c`), `minimal` (`M`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
+**Actions** (default keys in brackets): `quit` (`q`, `Esc`), `play_pause` (`space`), `next` (`n`), `prev` (`p`), `shuffle` (`z`), `repeat` (`r`), `seek_back` (`←`), `seek_fwd` (`→`), `vol_up` (`+`, `=`), `vol_down` (`-`), `mute` (`m`), `sync_earlier` (`,`), `sync_later` (`.`), `toggle_lyrics` (`l`), `toggle_big` (`b`), `karaoke` (`a`), `next_lyrics` (`L`), `big_scale` (`x`), `line_spacing` (`i`), `lyric_pad` (`u`), `browse_up` (`↑`), `browse_down` (`↓`), `browse_page_up` (`PgUp`), `browse_page_down` (`PgDn`), `browse_end` (`End`), `translate` (`K`), `translate_both` (`k`), `toggle_chords` (`g`), `transpose_up` (`t`), `transpose_down` (`T`), `capo_up` (`]`), `capo_down` (`[`), `capo_reset` (`0`), `diagrams` (`D`), `notes_down` (`e`), `notes_up` (`E`), `toggle_cava` (`c`), `minimal` (`M`), `toggle_theme` (`v`), `settings` (`s`, `S`), `help` (`?`), `library` (`o`), `like` (`f`), `play_here` (`H`), `devices` (`d`).
 
 **Rules.**
 - An entry **replaces** that action's default keys. An action you don't mention keeps its keys.
@@ -319,25 +327,99 @@ cargo install --path . --features gui      # or: cargo build --release --feature
 music_display --gui
 ```
 
-It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Shortcuts: `space` play/pause, `←` / `→` seek 5 s, `,` / `.` lyrics 0.1 s earlier / later, `c` chords, `d` chord diagrams, `n` annotations. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** has the translation, chord and annotation switches and the layout editor.
+It uses egui/eframe (MIT / Apache-2.0, Wayland and X11; the reasoning is in [docs/gui-design.md](docs/gui-design.md)). System fonts are used as the fallback, so Hangul, Japanese and Chinese lyrics show up if the system has such a font. Keys: the window uses **the terminal UI's key table**, so a key does the same in both (`space`, `n` `p` `z` `r`, `←` `→`, `+` `-` `m`, `,` `.`, `l` `L` `b` `a` `x` `i` `u`, `g` `t` `T` `[` `]` `0` `D`, `N` `e` `E`, `M` `c`, `K` `k`, `s`, `?`, `o` `f` `H` `d`, `q` / `Esc`), including your `[keys]` remaps. `?` (or the **?** button) opens a help window generated from that table; `Esc` / `q` close the open window first and quit when none is open; keys are ignored while a text field has focus. `t` / `T` show the transposition as a signed number (`-1`). With the library window open, `↑ ↓ PgUp PgDn` move, `Enter` plays, `→` / `←` open / back, `Tab` switches tab. With `spotify = true` (and a login, see Spotify) the transport row also gets a heart (like / unlike), **devices** and **play here** buttons, and the top row a **library** button next to settings (it follows `spotify_button`); the library window has the TUI's tabs (Recent, Playlists, Liked, Albums, Artists, Search, Queue), play / open / back / `+q` (queue) / `+list` (add to a playlist) / like per row, and shows errors and rate limits in the note line. With no MPRIS player the window follows what the Spotify API says plays, and the transport buttons then control that. The volume has a mute button; the wheel over the slider changes it by `volume_step` and a click on the percentage mutes. Click a lyric line to seek to it; click Key, BPM, Capo or Tuning to open the diagrams; with Spotify on, click Track, Artist, Album or Genre to show it in the library; right-click a metadata field for Hide / Move up / Move down; drag the border between two columns to resize (saved to `[layout.size]`); **settings** (`s`) has tabs that mirror the terminal menu: General (player source, genre lookup, volume step, song in the window title, minimal view, cava, cava bars and cava as third column, layout preset, shown with the current one), Lyrics (word by word, big line and size, spacing, padding, interlude threshold, where member parts go, other lyric sites, default lyric offset, lookup retries), Chords (on/off, Ultimate Guitar, capo 0 for every sheet, match threshold, lines of chords around the active one, sheet folder, member parts and where they go), Translation (mode, placement, language, engine, AI provider / model / endpoint / key *variable name* always visible, never-translate list, LibreTranslate fallback with URL and key, keep translations), Annotations (panel, source, Genius token hidden, `annotation_scroll`, note length in characters), Spotify (on/off, Client ID, log in / log out through the browser, spotifyd name / use / stop on exit, library button, queue tab; the client is rebuilt when these change), Appearance (below) and Layout (the editor). Everything uses the terminal menu's config keys, applies at once and is saved: text fields on Enter or when they lose focus (Esc undoes), sliders when released, with a brief "saved" note. Before lyrics go to a non-local AI provider for the first time a window asks (the answer is shared with the terminal UI) and nothing is sent until you press Send.
+
+### Look of the window (`[gui]`)
+
+The **Appearance** tab of the GUI's settings window (sliders, colour picker, font list, **Reset appearance**) shows every change at once and writes the `[gui]` table of `config.toml`; you can also edit it by hand. All keys are optional, numbers outside their range are clamped (with a warning), and `music_display --print-config` shows the effective table.
+
+```toml
+[gui]
+opacity = 100            # window background, 0-100 %; below 100 the window is see-through (needs a compositor)
+panel_opacity = 100      # the panel cards on top of it, 0-100 %
+theme = "system"         # system | dark | light
+accent = "cover"         # cover (taken from the album art) | a hex colour such as "#3a7bd5"
+background = "solid"     # solid | cover-blur | gradient | image | sky | meadow | lawn
+effects = "auto"        # what moves over it: auto (the look's own) | none | snow | winter | leaves | seeds | wind | embers | fog | bats | haunt | pollen | eggs
+effects_intensity = 60   # 0-100 %: how many pieces and how strong (0 = nothing moves)
+colors = "off"           # off | file | gtk | auto: take the window's colours from a colour file and / or the GTK theme
+colors_file = ""         # the colour file for `file` / `auto`; empty = the usual places (see Notes)
+font = ""                # an installed font family, e.g. "Noto Sans"; empty = built-in
+lyrics_size = 18         # 10-64 pt
+active_size = 24         # 14-72 pt, the current line
+meta_size = 14           # 8-40 pt, metadata and buttons
+active_weight = "regular" # regular | medium | bold (needs a medium / bold face of the font)
+corner_radius = 8        # 0-32 px
+panel_spacing = 8        # 0-32 px
+panel_borders = true
+lyrics_align = "left"    # left | center
+inactive_fade = 40       # 0-100 %: lines fade the further they are from the current one
+lyrics_animation = "smooth"  # smooth | instant (scrolling and size change of the current line)
+remember_window = true   # reopen at the last size and place (applies from the next start)
+always_on_top = false
+decorations = true       # false = no title bar or border
+ui_scale = 100           # 50-200 %: the size of everything (Ctrl and + / - / 0 change it too)
+theme_preset = "none"    # none | halloween | christmas | easter | midsummer: a named look, picked in the Appearance tab
+background_image = ""    # the picture of background = "image" (png, jpg…; "~/" is your home folder)
+lyrics_glow = 0          # 0-100 %: a halo behind the current line
+lock_layout = false      # true = the column borders cannot be dragged
+float_windows = true     # on Hyprland, sway or niri the extra windows are asked to float instead of being tiled
+translation_size = 0     # 0 = automatic, else 8-64 pt: the translated line next to the original
+member_size = 0          # 0 = automatic, else 8-40 pt: the member tag
+popped = []              # panels in a window of their own: metadata, lyrics, cava, annotations, chords
+```
+
+**Looks and backgrounds.** *Look* in the Appearance tab sets a bundle of the values above; every look has a window colour, an accent, a background, a glow and a line weight, and works in the light and the dark theme:
+
+| look | window | accent | background | effects (`auto`) |
+| --- | --- | --- | --- | --- |
+| Halloween | dark purple | orange | `solid` | fog, rising embers and bats |
+| Christmas | dark pine green | gold | `solid` | falling snow and a string of lights |
+| Easter | light cream | pink | `lawn`: grass at the bottom | dandelion seeds on the breeze and painted eggs drifting down |
+| Midsummer | light, sunny | blue (`#006aa7`) with a gold glow | `meadow`: a warm sky with a low sun and flowers | pollen and gusts of wind |
+
+Everything is drawn live, with no files. After picking a look every value can be changed; `theme_preset` only keeps its own window and card colours. `background = "image"` uses the file in `background_image` (cover-fitted, dimmed so the text stays readable); a file that cannot be read shows a note.
+
+**Colours from the system.** With `colors = "file"`, `"gtk"` or `"auto"` (colour file first, then GTK) the window takes its base colour, its text colour and its accent from the system instead of the look; the look still provides the background and the effects. Off by default. The *colour file* is one of the JSON files the terminal UI reads (the list is in Notes; a wallpaper tool such as matugen or noctalia rewrites it when the wallpaper changes) or the file named by `colors_file`. The *GTK theme* is read from `~/.config/gtk-4.0` and `gtk-3.0` (`gtk.css` with its `@import`s and `settings.ini`), else from the named theme's own sheet in `~/.themes`, `~/.local/share/themes` or `/usr/share/themes`, with the accent colour and the dark preference from `gsettings` when it is installed. The window looks at the files every few seconds and restyles itself when one changed (the terminal UI does the same with its colour file, keeping a cover accent while `cover_theme` is on). A source gives its colours for its own mode: with `theme = "system"` the window follows the dark or light of the desktop, and the dark / light toggle shows the look's own palette in the other mode. The Appearance tab has the choice and says which source is in use.
+
+**Effects.** `effects` is separate from the background and the look, so any effect can run over any background: `snow`, `winter` (snow and a string of lights), `leaves` (autumn leaves), `seeds` (dandelion seeds), `wind`, `embers`, `fog`, `bats`, `haunt` (fog, embers and bats), `pollen`, `eggs`; `auto` takes the look's own, `none` turns them off, and `effects_intensity` sets how many pieces there are (0 stops the drawing altogether). Effects, the sun and the grass redraw the window about 30 times a second, only while it has the focus. Older files that say `background = "snow"`, `"eggs"`, `"bats"`, `"fog"` or `"particles"` still work: they are read as the matching background plus effect (and `"meadow"` with its pollen) unless the file has an `effects` key of its own.
+
+**Dark and light.** Every look has a dark and a light palette. **v**, the **dark / light** button in the top row and the Theme choice in the Appearance tab flip the whole window (`theme` in `[gui]`, saved); picking a look keeps the theme you have.
+
+**Tiling window managers.** The settings, keys, library, devices and AI-question windows and the pop-out panels are windows of their own, and a tiling compositor would tile them next to the main window and shrink it. Toolkits cannot ask for "floating" on Wayland, so when the environment says the compositor is **Hyprland** (`HYPRLAND_INSTANCE_SIGNATURE`), **sway** (`SWAYSOCK`) or **niri** (`NIRI_SOCKET`), the window is floated once through that compositor's own command (`hyprctl`, `swaymsg`, `niri msg`) after it has opened; it is found by this program's process id and its exact title, and on Hyprland it is also given its size and centred. It may show tiled for a moment first. `float_windows = false` (or the checkbox in the Appearance tab) turns it off; on other desktops it does nothing. The windows also have their own Wayland class, so a rule of your own works too: `music_display.floating` for these windows and `music_display.popout` for the pop-out panels (match on the class in your compositor's window rules; the syntax depends on the compositor version). On Hyprland 0.55 and later, whose dispatchers are Lua calls, the Lua form is used (`hl.dsp.window.float`, `resize`, `center`); older versions get the classic `dispatch setfloating` calls.
+
+**Size, opacity and windows.** `ui_scale` scales the whole window; **Ctrl** with **+**, **-** or **0** zooms and the result is saved. **Ctrl+Shift+Up / Down** change the window opacity by 5 %. The **windows** menu in the top row shows a panel (now playing, lyrics, cava, annotations, chord diagrams) in an OS window of its own, which uses the same background, opacity and title-bar settings; closing that window docks the panel again, and `popped` remembers the choice for the next start. Without multi-window support from the display server the panel stays in the main window. The settings, keys, Spotify library, devices and AI-question windows are windows of their own in the same way: they have the window's background and opacity and can be dragged out of the main window. The sizes of the panels inside a column (cava under the lyrics, the chord diagrams, the diagrams above the notes) are remembered when you drag them (`[gui.inner_sizes]`).
+
+Window opacity, always-on-top and the decorations change while the window is open. Drawing, transparency and window placement depend on the compositor (Wayland and X11 both go through winit) and have not been checked on every one.
 
 | feature | TUI | GUI |
 | --- | :-: | :-: |
 | metadata (all fields, order and visibility from `[layout]`), cover, progress, transport, volume | yes | yes |
-| synced lyrics, offset nudging, click to seek, karaoke fill, member tags | yes | yes |
-| chords above the lyrics, transpose, capo, key / BPM / tuning | yes | yes |
+| synced lyrics, offset nudging, click to seek, karaoke fill, member tags, `[ Instrumental / Solo ]` countdown | yes | yes |
+| browsing the lyrics by hand (scroll; the view follows the playing line again after 6 s) | yes | yes (mouse wheel, scrollbar or drag; the title says `browsing`) |
+| footer line: offset, chord status, Spotify device, notes | yes | yes |
+| `window_title` option | yes | yes (sets the window title) |
+| `layout.direction = "vertical"` | yes | yes |
+| chords above the lyrics (placed over the word, remapped for translated lines, `chords_context`, intro and solo chords), transpose, capo, key / BPM / tuning | yes | yes |
 | chord diagrams | yes (text) | yes (drawn) |
 | translation: `off` / `both` / `translated`, AI engine with fallback, never-translate list in the config | yes | yes |
 | genre field, annotations panel (Genius or AI) | yes | yes |
 | settings and the layout editor (panels, fields, buttons, sizes), saved to `config.toml` | yes | yes |
 | panel order and sizes from `[layout]` | yes | yes (drag to resize) |
-| cava bars | yes | no |
-| big block-font active line | yes | no (just a large font) |
-| terminal graphics protocols, ASCII cover, window-title option | yes | no |
-| key remapping (`[keys]`, the `?` key editor) | yes | no (fixed shortcuts) |
-| minimal view, three-panel presets | yes | no (resize the panels instead) |
-| Spotify library browser, likes, queue, devices, `--setup` | yes | no (the window follows whatever the MPRIS player reports) |
-| lyric versions (`L`), per-track capo memory, chord-sheet Ultimate Guitar toggle in the menu | yes | partly (capo and transpose are per session) |
+| cava bars (`c`, same `cava` process; a note where cava is missing or on Windows) | yes | yes |
+| big block-font active line | yes | no (a large font, size and weight configurable) |
+| colour files (`--colors`) and the cover tint, `--surface`, `--primary`, `terminal_colors`, `ascii_cover`, `mouse` | yes | the colour file and the GTK theme through `colors` in `[gui]`; the rest no |
+| panels in windows of their own, interface size, looks (Halloween, Christmas, Easter, Midsummer), picture backgrounds, separate effects (snow, leaves, seeds, wind…), glow, locked layout | no | yes |
+| terminal graphics protocols, ASCII cover | yes | no |
+| the same keys, `[keys]` remaps, a help window from the key table | yes | yes (**Change keys** in the help window rebinds and saves to `[keys]`) |
+| minimal view (`M`), layout presets (picker in settings) | yes | yes |
+| Spotify library browser, search, queue, likes, devices, play here, remote playback | yes | yes (window on `o`, buttons in the transport row; clicks instead of the browser's keys) |
+| Spotify login from the settings, `--setup` | yes | login yes (Spotify tab), lists preloaded in the background; no `--setup` |
+| lyric versions (`L`), per-track capo memory (same files) | yes | yes |
+| chord-sheet Ultimate Guitar toggle in the menu, transpose memory | yes | yes (transpose is per session) |
+| `transparent` / `cover_theme` of the main config | yes | `transparent` sets `[gui] opacity` to 85 % when `[gui]` has none; the accent follows the cover by default |
+| one front-end-independent set of track-identity rules (same recording under another spelling, a second player, tags read from the file, volume hold) | yes | yes (`src/identity.rs`) |
+| `use_spotifyd` start / stop (`no_kill_spotifyd`), SIGTERM / SIGHUP ends the program cleanly | yes | yes |
 
 ## AI translation (optional)
 
@@ -377,10 +459,15 @@ The answer is checked: it must be valid JSON with exactly as many strings as the
 
 Off by default; `N` (or the settings row, or `annotations = true`) shows a panel that explains the line being sung. It is a column of its own that you can move, hide and resize like the others (see below).
 
-- **Genius (default).** Needs a free client token: create an API client at <https://genius.com/api-clients>, then put the *client access token* in the config file (`genius_token = "…"`), in the `GENIUS_TOKEN` environment variable, or in the settings menu ("Genius token"; never shown on screen). The song's annotations (Genius calls them referents) are fetched once, each is matched to the synced lyric line(s) it quotes, and the panel shows the one for the active line: the quoted passage, a short excerpt of the note (at most about 280 characters, cut at a word) and `— Genius`. Nothing is shown for lines without a note. Songs Genius doesn't have are remembered for 7 days; errors are shown in the panel and never remembered; after repeated failures it rests for ten minutes.
+- **Genius (default).** Needs a free client token: create an API client at <https://genius.com/api-clients>, then put the *client access token* in the config file (`genius_token = "…"`), in the `GENIUS_TOKEN` environment variable, or in the settings menu ("Genius token"; never shown on screen). The song's annotations (Genius calls them referents) are fetched once, each is matched to the synced lyric line(s) it quotes, and the panel shows the one for the active line: the quoted passage, the whole note (see *Long notes* below) and `— Genius`. Nothing is shown for lines without a note. Songs Genius doesn't have are remembered for 7 days; errors are shown in the panel and never remembered; after repeated failures it rests for ten minutes.
 - **AI notes (`annotations_mode = "ai"`).** With the AI engine set up (see AI translation), one request asks for a short note per line (references, idioms, backstory), `null` for lines that need none. They are labelled `AI-generated` in the panel and cached per model. They can be wrong; the labelled source is there so you can tell.
+- **Genius + AI (`annotations_mode = "genius+ai"`).** Genius goes first and is shown as soon as it arrives. Then one AI request gets the lyrics **and** what Genius already says about each line, and is asked only for something new (a reference, backstory, trivia, wordplay, a production detail), or `null`. The panel stacks both under each other: the Genius note, a rule labelled `AI extra`, then the AI note labelled `AI-generated · extra`. An AI note that repeats the Genius note (it is inside it, or most of its longer words are in it) is dropped, so the same thing is never printed twice. Without a Genius token or when Genius has nothing, the AI notes still come (labelled `AI-generated`) and the panel says why Genius is missing; without an AI model the Genius notes still show. The AI part is cached per model and per set of Genius notes.
 
-Experimental: it depends on Genius' unofficial-for-this-use API, matching is by text, and short quoted fragments are deliberately ignored to avoid false matches. Flags: `--annotations`, `--annotations-mode genius|ai`, `--genius-token TOKEN` (prefer the file or the variable: command lines are visible to other users of the machine). `--print-config` never prints the token.
+**One request per song, never per line.** Genius is one search plus one `referents` call per song. Every AI path, translation and notes alike (`genius+ai` included), sends the whole song in a single request, with one retry only when the answer is not a valid list; the answers are cached on disk, so a song costs nothing the second time. After three failures in a row the AI engine rests for ten minutes. A new request happens only for a new song, another lyrics version (`L`), another model or language, or another annotations mode.
+
+**Long notes.** The whole note is kept (up to 4000 characters) and nothing is cut with `…` unless you ask for it. A note that is taller than the panel scrolls: the mouse wheel over the panel, or `e` (down) / `E` (up), both remappable (`notes_down`, `notes_up`); a `↓ more` hint sits on the bottom border. `annotation_scroll = "auto"` makes it scroll by itself while the line is sung. `annotation_max_chars = N` (settings row *Annotation length*) cuts notes at a word after N characters; `0`, the default, shows them whole.
+
+Experimental: it depends on Genius' unofficial-for-this-use API, matching is by text, and short quoted fragments are deliberately ignored to avoid false matches. Flags: `--annotations`, `--annotations-mode genius|ai|genius+ai`, `--annotation-max-chars N`, `--annotation-scroll manual|auto`, `--genius-token TOKEN` (prefer the file or the variable: command lines are visible to other users of the machine). `--print-config` never prints the token.
 
 ## Customizing the layout
 
@@ -397,7 +484,7 @@ Open the settings menu (`s`, or click `[ settings ]` in the top row) and pick **
 | `r` | reset the whole layout |
 | `Esc` | back to the settings menu |
 
-With the mouse: **right-click a metadata field** for a small menu (Hide, Move up, Move down); **drag a field** onto another to reorder; **drag the border between two columns** to resize; **click Key, BPM, Capo or Tuning** to open the chord diagrams. `[ settings ]` and `[ ? ]` in the top row open the settings menu and this help.
+With the mouse: **right-click a metadata field** for a small menu (Hide, Move up, Move down); **drag a field** onto another to reorder; **drag the border between two columns** to resize; **click Key, BPM, Capo or Tuning** to open the chord diagrams; with Spotify on, **click Track, Artist, Album or Genre** to show it in the library (the artist or album level when the Spotify API supplied its link, otherwise a search for the name). `[ settings ]` and `[ ? ]` in the top row open the settings menu and this help.
 
 Every change is saved at once to the `[layout]` table of `config.toml` (the rest of the file, including `[keys]`, is kept; comments are not):
 
@@ -511,7 +598,7 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 
 - A song counts as the same track across its releases: first artist plus the bare title (no edition, live, remaster or guest suffixes; the album is ignored), except that a release marked as another language or instrumental (`English Version`, `Japanese Ver.`, `Instrumental` in the title or album) is its own track with its own lyrics; for those, Hangul lyrics are never picked. If the player's strings change while the same item keeps playing (same track id, or the position running on at the same length), nothing is refetched and the panel keeps what it showed. With several players running, the one on screen is kept until it goes quiet or another starts playing while it doesn't.
 - `MUSIC_DISPLAY_DEBUG=1` appends every player snapshot to `~/.cache/music_display/snapshots.log` (or set it to a file path).
-- Colour files are checked in order: `~/.config/noctalia/colors.json`, `~/.cache/noctalia/colors.json`, `~/.config/matugen/colors.json`, `~/.cache/matugen/colors.json`, `~/.config/noctalia/theme.json`.
+- The terminal UI follows its colour file live (it is looked at every two seconds). Colour files are checked in order: `~/.config/noctalia/colors.json`, `~/.cache/noctalia/colors.json`, `~/.config/matugen/colors.json`, `~/.cache/matugen/colors.json`, `~/.config/noctalia/theme.json`.
 - Cover art uses Kitty graphics when available, then Sixel / iTerm2, then unicode half-blocks. The bitmap is scaled to exactly fill its cell box.
 - If cava can't start or dies, the cava panel shows why (cava's own error message); press `c` twice to retry.
 - Two editions of the same track ("Metallica" vs "Metallica (Remastered Deluxe Box Set)", different casing) are the same track: no flicker, no refetch.
@@ -524,7 +611,7 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 
 **Hangul in big mode.** A terminal can't pick a font, so the big Hangul is drawn from character-cell blocks (`▀ ▄ █`, which every terminal font has). A line with Hangul is tried on the fine 12×12 grid first at the chosen `big_scale`, then on the 8×8 grid at the same scale, then one scale smaller, and so on; the compact font can't draw Hangul, so a very narrow panel shows the line as bold text. The fine grid gives a final consonant four rows instead of three and tells more syllables apart (about 10 460 of the 11 172 blocks have a distinct shape, against about 10 050 on 8×8), but its syllables are wider (13 columns instead of 9), so fewer fit on one row and a long line wraps into more pieces. Quadrant and braille blocks were considered and left out: a quadrant cell doubles only the horizontal resolution (the cramped direction is vertical) and braille depends on the terminal font.
 
-**Member parts (experimental).** With `member_parts = true` / `--member-parts` the song is looked up on Genius (unauthenticated search, then the song page; the title and artist must match closely). Section headers such as `[Verse 1: Jimin]`, `[Chorus: Jungkook, V]` and `[Pre-Chorus: RM & SUGA]` give the members for the lines below them, and those lines are matched in order onto the synced lyrics. The active line and its neighbours get a dim `[Jimin]` tag, each member in a stable colour of the terminal palette. In the normal scrolling layout the tag sits in front of the line; in the big-font layout it is one dim, centred row directly above the big active line (above the chord row when chords are shown, with a row kept free for it on every line of a song that has member data, so nothing jumps). On a narrow panel the tag shortens, `[Jimin, V, Jungkook]` → `[Jimin +2]` → `[Jim…]`, and is left out when there is no room. Lines that can't be matched (for example romanized vs. Hangul wording) are left untagged. Results are cached per track (misses for 7 days); failures are silent. This scrapes a website that has no public API, so it can stop working at any time.
+**Member parts (experimental).** With `member_parts = true` / `--member-parts` the song is looked up on Genius (unauthenticated search, then the song page; the title and artist must match closely). Section headers such as `[Verse 1: Jimin]`, `[Chorus: Jungkook, V]` and `[Pre-Chorus: RM & SUGA]` give the members for the lines below them, and those lines are matched in order onto the synced lyrics. The active line and its neighbours get a dim `[Jimin]` tag, each member in a stable colour of the terminal palette. `member_position` chooses where the tag goes: `inline` (in front of the line, on its row), `above` or `below` the line (and its translation) or `auto` (the default: in front of the line in the terminal, under it in the window); in the window `inline` needs left-aligned lyrics and otherwise falls back to `above`, and the **Appearance** tab's `member_size` sets its size (a terminal has one text size). In the normal scrolling layout the default tag sits in front of the line; in the big-font layout it is one dim, centred row directly above the big active line (above the chord row when chords are shown, with a row kept free for it on every line of a song that has member data, so nothing jumps; `below` puts that row under the big line, `inline` counts as `above` there). On a narrow panel the tag shortens, `[Jimin, V, Jungkook]` → `[Jimin +2]` → `[Jim…]`, and is left out when there is no room. Lines that can't be matched (for example romanized vs. Hangul wording) are left untagged. Results are cached per track (misses for 7 days); failures are silent. This scrapes a website that has no public API, so it can stop working at any time.
 
 ## Releasing
 

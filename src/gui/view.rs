@@ -2,17 +2,14 @@
 //! and layout config as the terminal front end decide what is shown and in which order.
 use super::model::{Chords, Model, Notes};
 use egui::{Align2, Color32, FontId, RichText, Sense, Stroke, Ui, Vec2};
-use music_display::cli::TranslateMode;
-use music_display::layout::{Button, MetaField};
-use music_display::lyrics::Lyrics;
-use music_display::player::Status;
+use music_display::layout::MetaField;
 
 pub fn fmt_time(s: f64) -> String {
     let s = s.max(0.0) as u64;
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-fn accent(ui: &Ui) -> Color32 {
+pub fn accent(ui: &Ui) -> Color32 {
     ui.visuals().hyperlink_color
 }
 
@@ -24,6 +21,8 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
         return;
     };
     let mut clicked_diagrams = false;
+    let mut to_library: Option<MetaField> = None;
+    let spotify_on = m.spot.on();
     let mut hide: Option<MetaField> = None;
     let mut mv: Option<(MetaField, i32)> = None;
     let capo = m.effective_capo();
@@ -33,7 +32,10 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
         .visible()
         .filter_map(|f| {
             let v = match f {
-                MetaField::Title => s.title.clone(),
+                MetaField::Title => match m.spot.liked {
+                    Some(on) if m.spot.on() => format!("{} {}", s.title, if on { "♥" } else { "♡" }),
+                    _ => s.title.clone(),
+                },
                 MetaField::Artist => s.artist.clone(),
                 MetaField::Album => s.album.clone(),
                 MetaField::TrackNo => format!(
@@ -42,15 +44,33 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
                     s.track_no.map(|t| format!("{t:02}")).unwrap_or_else(|| "--".into())
                 ),
                 MetaField::Release => {
-                    music_display::year::full_date(&s.content_created).or_else(|| m.year.clone()).unwrap_or_else(|| "…".into())
+                    music_display::year::full_date(&s.content_created)
+                        .or_else(|| m.year.clone())
+                        .unwrap_or_else(|| if m.year_done { "N/A".into() } else { "...".into() })
                 }
                 MetaField::Genre => m.genre.clone()?,
-                MetaField::Tuning => m.sheet.as_ref().and_then(|x| x.tuning.clone())?,
-                MetaField::Capo => {
-                    if !(m.chords_on && capo > 0) {
+                MetaField::Tuning => {
+                    if !(m.chords_on || m.show_diagrams) {
                         return None;
                     }
-                    capo.to_string()
+                    m.sheet.as_ref().and_then(|x| x.tuning.clone())?
+                }
+                MetaField::Capo => {
+                    if m.chords_on && capo > 0 {
+                        let mut v = capo.to_string();
+                        if let Some((_, shapes)) = m.keys() {
+                            v.push_str(&format!(" ({})", shapes.short()));
+                        }
+                        let sheet_capo = m.sheet.as_ref().map_or(0, |x| x.capo);
+                        if capo != sheet_capo {
+                            v.push_str(&format!(" [sheet {sheet_capo}]"));
+                        }
+                        v
+                    } else if m.chords_on && m.sheet.as_ref().is_some_and(|x| x.capo > 0) {
+                        "none".into()
+                    } else {
+                        return None;
+                    }
                 }
                 MetaField::Bpm => m.sheet.as_ref().and_then(|x| x.bpm)?.to_string(),
                 MetaField::Key => {
@@ -61,14 +81,32 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
             Some((f, if v.is_empty() { "—".into() } else { v }))
         })
         .collect();
-    egui::Grid::new("meta").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+    let meta = m.gui.meta_size as f32;
+    let gap = 6.0 + m.gui.panel_spacing as f32 * 0.4;
+    egui::Grid::new("meta").num_columns(2).spacing([12.0, gap]).show(ui, |ui| {
         for (f, v) in &rows {
             let label = ui.add(egui::Label::new(RichText::new(f.label()).color(accent(ui)).strong()).sense(Sense::click()));
-            let value = ui.add(egui::Label::new(v.as_str()).wrap().sense(Sense::click()));
+            // the title is the headline of the card
+            let text = if *f == MetaField::Title { RichText::new(v.as_str()).size(meta + 4.0).strong() } else { RichText::new(v.as_str()) };
+            let value = ui.add(egui::Label::new(text).wrap().sense(Sense::click()));
             for r in [&label, &value] {
                 // clicking Key, BPM, Capo or Tuning opens the chord diagrams
-                if r.clicked() && f.opens_diagrams() {
-                    clicked_diagrams = true;
+                if f.opens_diagrams() {
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if r.clicked() {
+                        clicked_diagrams = true;
+                    }
+                }
+                // with the Spotify library on, Track, Artist, Album and Genre open it there
+                if f.opens_library() && spotify_on {
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if r.clicked() {
+                        to_library = Some(*f);
+                    }
                 }
                 r.context_menu(|ui| {
                     if ui.button("Hide").clicked() {
@@ -91,6 +129,10 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     if clicked_diagrams {
         m.show_diagrams = true;
         m.layout.panels.set(music_display::layout::PanelId::Chords, true);
+    }
+    if let Some(f) = to_library {
+        let genre = m.genre.clone().unwrap_or_default();
+        m.spot.open_for(f, &s, &genre);
     }
     if let Some(f) = hide {
         m.layout.fields.set(f, false);
@@ -119,215 +161,55 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     }
 }
 
-pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>) {
-    let side = ui.available_width().min(ui.available_height()).clamp(64.0, 480.0);
-    match tex {
+pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>, radius: u8) {
+    // square, as wide as the column allows but at most 40% of the window's height (so the
+    // metadata and the controls stay on screen), centred
+    let side = super::controls::cover_side(ui.available_width(), ui.ctx().content_rect().height(), 0.4);
+    let radius = egui::CornerRadius::same(radius.saturating_add(2));
+    ui.vertical_centered(|ui| match tex {
         Some(t) => {
-            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(side)).corner_radius(6.0));
+            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(side)).corner_radius(radius));
         }
         None => {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(side.min(160.0)), Sense::hover());
-            ui.painter().rect_stroke(r, 6.0, Stroke::new(1.0, ui.visuals().weak_text_color()), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(r, radius, Stroke::new(1.0, ui.visuals().weak_text_color()), egui::StrokeKind::Inside);
             ui.painter().text(r.center(), Align2::CENTER_CENTER, "♪", FontId::proportional(32.0), ui.visuals().weak_text_color());
         }
-    }
-}
-
-pub fn controls(ui: &mut Ui, m: &mut Model) {
-    let Some(s) = m.snap.clone() else { return };
-    // progress bar: click or drag to seek
-    let pos = m.position();
-    ui.horizontal(|ui| {
-        ui.monospace(fmt_time(pos));
-        let w = (ui.available_width() - 48.0).max(40.0);
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 14.0), Sense::click_and_drag());
-        let frac = if s.length > 0.0 { (pos / s.length).clamp(0.0, 1.0) as f32 } else { 0.0 };
-        let mid = r.center().y;
-        let p = ui.painter();
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(3.0, ui.visuals().widgets.inactive.bg_fill));
-        let x = r.left() + r.width() * frac;
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(3.0, accent(ui)));
-        p.circle_filled(egui::pos2(x, mid), 5.0, accent(ui));
-        if (resp.clicked() || resp.dragged()) && s.length > 0.0 {
-            if let Some(pt) = resp.interact_pointer_pos() {
-                let f = ((pt.x - r.left()) / r.width()).clamp(0.0, 1.0) as f64;
-                m.seek(f * s.length);
-            }
-        }
-        ui.monospace(fmt_time(s.length));
     });
-    ui.horizontal(|ui| {
-        let shown = m.layout.buttons.clone();
-        let b = |f: Button| shown.shown(f);
-        if b(Button::Shuffle) {
-            if let Some(on) = s.shuffle {
-                if ui.selectable_label(on, "shuffle").clicked() {
-                    m.toggle_shuffle();
-                }
-            }
-        }
-        if b(Button::Repeat) {
-            if let Some(r) = s.repeat {
-                let label = match r {
-                    music_display::player::Loop::None => "repeat",
-                    music_display::player::Loop::Track => "repeat 1",
-                    music_display::player::Loop::Playlist => "repeat all",
-                };
-                if ui.selectable_label(r != music_display::player::Loop::None, label).clicked() {
-                    m.cycle_repeat();
-                }
-            }
-        }
-        if b(Button::Prev) && ui.button("⏮").clicked() {
-            m.prev();
-        }
-        if b(Button::Play) && ui.button(if s.status == Status::Playing { "⏸" } else { "▶" }).clicked() {
-            m.play_pause();
-        }
-        if b(Button::Next) && ui.button("⏭").clicked() {
-            m.next();
-        }
-        if b(Button::Volume) {
-            if let Some(v) = s.volume {
-                let mut pct = (v * 100.0) as f32;
-                if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(true)).changed() {
-                    m.set_volume(pct as f64 / 100.0);
-                }
-            }
-        }
-    });
-}
-
-// ── lyrics ──────────────────────────────────────────────────────────────────
-
-pub fn lyrics(ui: &mut Ui, m: &mut Model) {
-    let title = match (m.translate_mode, m.translation()) {
-        (TranslateMode::Off, _) | (_, None) => "Lyrics".to_string(),
-        (_, Some(_)) if m.translate_backend.starts_with("AI ") => format!("Lyrics · translated by {}", m.args.ai_model),
-        (_, Some(_)) if m.translate_backend.starts_with("fallback:") => {
-            format!("Lyrics · translated ({})", m.translate_backend.trim_start_matches("fallback: "))
-        }
-        (TranslateMode::Both, _) => format!("Lyrics · original + translated ({})", m.args.translate_lang),
-        _ => format!("Lyrics · translated ({})", m.args.translate_lang),
-    };
-    ui.horizontal(|ui| {
-        ui.heading(title);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("+").on_hover_text("lyrics 0.1 s later").clicked() {
-                m.nudge(0.1);
-            }
-            ui.label(format!("{:+.1}s", m.offset));
-            if ui.small_button("−").on_hover_text("lyrics 0.1 s earlier").clicked() {
-                m.nudge(-0.1);
-            }
-        });
-    });
-    if m.snap.is_none() {
-        return;
-    }
-    let (lines, stamps): (Vec<String>, Vec<f64>) = match &m.lyrics {
-        None => return drop(ui.label(RichText::new("fetching lyrics…").weak())),
-        Some(Lyrics::NotFound) => return drop(ui.label(RichText::new("no synced lyrics found").weak())),
-        Some(Lyrics::Instrumental) => return drop(ui.label(RichText::new("♪  instrumental  ♪").color(accent(ui)))),
-        Some(Lyrics::Error(e)) => return drop(ui.label(RichText::new(e.as_str()).weak())),
-        Some(Lyrics::Synced(l)) => (l.iter().map(|x| x.1.clone()).collect(), l.iter().map(|x| x.0).collect()),
-        Some(Lyrics::Plain(l)) => (l.clone(), Vec::new()),
-    };
-    let cur = m.active_line();
-    let frac = m.line_fraction() as f32;
-    let tr = m.translation().cloned().filter(|t| t.len() == lines.len());
-    let both = m.translate_mode == TranslateMode::Both;
-    let karaoke = m.args.karaoke;
-    let mut seek_to: Option<f64> = None;
-    let mut want_scroll = false;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for (i, line) in lines.iter().enumerate() {
-            let shown = match (&tr, both) {
-                (Some(t), false) if !t[i].trim().is_empty() => t[i].clone(),
-                _ => line.clone(),
-            };
-            let active = cur == Some(i);
-            let past = cur.is_some_and(|c| i < c);
-            // chords sit above the words
-            if m.chords_on {
-                let ch = m.chords_of(i);
-                if !ch.is_empty() {
-                    let mut row = String::new();
-                    for (col, name) in ch {
-                        let at = col.max(row.chars().count() + usize::from(!row.is_empty()));
-                        row.push_str(&" ".repeat(at.saturating_sub(row.chars().count())));
-                        row.push_str(&name);
-                    }
-                    ui.label(RichText::new(row).monospace().color(accent(ui)).strong());
-                }
-            }
-            let size = if active { 24.0 } else { 18.0 };
-            let color = if active {
-                ui.visuals().strong_text_color()
-            } else if past {
-                ui.visuals().weak_text_color()
-            } else {
-                ui.visuals().text_color()
-            };
-            let resp = if active && karaoke {
-                // the sung part is lit, the rest dimmer
-                let chars: Vec<char> = shown.chars().collect();
-                let lit = ((chars.len() as f32) * frac).round() as usize;
-                let (a, b): (String, String) = (chars[..lit.min(chars.len())].iter().collect(), chars[lit.min(chars.len())..].iter().collect());
-                let mut job = egui::text::LayoutJob::default();
-                job.append(&a, 0.0, egui::TextFormat { font_id: FontId::proportional(size), color: accent(ui), ..Default::default() });
-                job.append(&b, 0.0, egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
-                ui.add(egui::Label::new(job).sense(Sense::click()))
-            } else {
-                ui.add(egui::Label::new(RichText::new(shown).size(size).color(color)).sense(Sense::click()))
-            };
-            if both {
-                if let Some(t) = &tr {
-                    ui.label(RichText::new(&t[i]).italics().weak());
-                }
-            }
-            if let Some(mem) = m.members.get(i).filter(|x| !x.is_empty()) {
-                ui.label(RichText::new(mem.join(" · ")).small().weak());
-            }
-            if active {
-                resp.scroll_to_me(Some(egui::Align::Center));
-                want_scroll = true;
-            }
-            if resp.clicked() && !stamps.is_empty() {
-                seek_to = Some((stamps[i] - m.offset).max(0.0));
-            }
-        }
-    });
-    let _ = want_scroll;
-    if let Some(t) = seek_to {
-        m.seek(t);
-    }
 }
 
 // ── chord diagrams ──────────────────────────────────────────────────────────
 
 pub fn diagrams(ui: &mut Ui, m: &mut Model) {
-    ui.heading("Chords");
+    ui.horizontal(|ui| {
+        ui.heading("Chords");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("✕").on_hover_text("close the chord diagrams (d)").clicked() {
+                m.show_diagrams = false;
+                m.layout.panels.set(music_display::layout::PanelId::Chords, false);
+            }
+        });
+    });
     ui.horizontal(|ui| {
         if ui.small_button("t −").clicked() {
             m.transpose = (m.transpose - 1).rem_euclid(12);
         }
-        ui.label(format!("transpose {:+}", m.transpose));
+        ui.label(format!("transpose {:+}", super::footer::signed_transpose(m.transpose)));
         if ui.small_button("t +").clicked() {
             m.transpose = (m.transpose + 1).rem_euclid(12);
         }
         ui.separator();
         if ui.small_button("capo −").clicked() {
-            m.capo_override = Some(m.effective_capo().saturating_sub(1));
+            m.change_capo(-1);
         }
         ui.label(format!("capo {}", m.effective_capo()));
         if ui.small_button("capo +").clicked() {
-            m.capo_override = Some((m.effective_capo() + 1).min(12));
+            m.change_capo(1);
         }
     });
     match &m.chords_state {
         Chords::Idle if !m.chords_on => {
-            ui.label(RichText::new("chords are off (settings → Chords)").weak());
+            ui.label(RichText::new("chords are off: press g, or tick them in settings").weak());
         }
         Chords::Fetching => {
             ui.label(RichText::new("looking for a chord sheet…").weak());
@@ -397,11 +279,8 @@ pub fn draw_shape(ui: &mut Ui, shape: &music_display::diagram::Shape, color: Col
 // ── annotations ─────────────────────────────────────────────────────────────
 
 pub fn annotations(ui: &mut Ui, m: &mut Model) {
-    let mode = match m.args.annotations_mode {
-        music_display::cli::AnnotationMode::Genius => "Genius",
-        music_display::cli::AnnotationMode::Ai => music_display::annotations::AI_LABEL,
-    };
-    ui.heading(format!("Annotations · {mode}"));
+    let mode = m.args.annotations_mode;
+    ui.heading(format!("Annotations · {}", mode.label()));
     ui.label(RichText::new("experimental").small().weak());
     match &m.notes {
         Notes::Idle => return drop(ui.label(RichText::new("waiting for lyrics…").weak())),
@@ -412,14 +291,51 @@ pub fn annotations(ui: &mut Ui, m: &mut Model) {
     let Some(i) = m.active_line() else {
         return drop(ui.label(RichText::new("annotations follow the synced lyrics").weak()));
     };
-    match m.note_for(i) {
-        None => drop(ui.label(RichText::new("no annotation for this line").weak())),
-        Some(n) => {
+    let notes = m.notes_for(i);
+    let max = m.args.annotation_max_chars;
+    // a long note scrolls; back to the top when the line changes
+    // e / E scroll by hand; `annotation_scroll = "auto"` follows the song through the line instead
+    let auto = m.args.annotation_scroll == music_display::cli::AnnotationScroll::Auto;
+    let by = m.ux.take_ann_rows();
+    let progress = m.note_line_progress(i);
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    // (the overflow of the last frame is what auto scroll maps the progress onto)
+    let over_id = ui.make_persistent_id(("notes-over", m.track_key, i));
+    let over: f32 = ui.data(|d| d.get_temp(over_id)).unwrap_or(0.0);
+    let mut area = egui::ScrollArea::vertical().id_salt(("notes", m.track_key, i)).auto_shrink([false, true]);
+    if auto {
+        area = area.vertical_scroll_offset(progress as f32 * over);
+    }
+    let out = area.show(ui, |ui| {
+        if by != 0.0 && !auto {
+            ui.scroll_with_delta(Vec2::new(0.0, -by * line));
+        }
+        if let Some(e) = &m.genius_err {
+            ui.add(egui::Label::new(RichText::new(format!("Genius: {e}")).small().weak()).wrap());
+        }
+        if notes.is_empty() {
+            ui.label(RichText::new("no annotation for this line").weak());
+        }
+        for (k, n) in notes.iter().enumerate() {
+            if k > 0 {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.label(RichText::new("AI extra").small().weak());
+            }
             if !n.fragment.is_empty() {
                 ui.label(RichText::new(format!("“{}”", n.fragment)).italics().color(accent(ui)));
             }
-            ui.add(egui::Label::new(n.text).wrap());
+            let text = RichText::new(music_display::annotations::shown(&n.text, max));
+            ui.add(egui::Label::new(if k > 0 { text.italics() } else { text }).wrap());
             ui.label(RichText::new(format!("— {}", n.source)).weak());
         }
-    }
+        if mode == music_display::cli::AnnotationMode::GeniusAi {
+            match &m.ai_state {
+                Notes::Loading => drop(ui.label(RichText::new("AI extras: looking up…").small().weak())),
+                Notes::Failed(e) => drop(ui.add(egui::Label::new(RichText::new(format!("AI extras: {e}")).small().weak()).wrap())),
+                _ => {}
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(over_id, (out.content_size.y - out.inner_rect.height()).max(0.0)));
 }

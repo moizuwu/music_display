@@ -1,6 +1,8 @@
 use crate::util::{cache_dir, fnv1a, now_secs};
 use serde::{Deserialize, Serialize};
 
+/// A find from the other sites is looked up again after this long (a day).
+const EXTRA_TTL: u64 = 24 * 3600;
 const NEG_TTL: u64 = 3 * 24 * 3600;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -21,6 +23,8 @@ struct Rec {
     plain: Option<String>,
     instrumental: Option<bool>,
     duration: Option<f64>,
+    #[serde(rename = "trackName")]
+    track_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,7 +101,8 @@ fn parse_stamp(tag: &str) -> Option<f64> {
 }
 
 pub fn to_lyrics(kind: &str, text: &str) -> Lyrics {
-    match kind {
+    // ("x-…": found somewhere other than lrclib)
+    match kind.strip_prefix("x-").unwrap_or(kind) {
         "synced" => {
             let l = parse_lrc(text);
             if l.is_empty() {
@@ -201,6 +206,8 @@ pub struct Policy {
     pub retries: u32,
     /// First backoff; doubles each retry (500 ms, 1 s, 2 s …).
     pub backoff: std::time::Duration,
+    /// Where to look when lrclib has nothing (`None` = nowhere else).
+    pub extra: Option<crate::lyricsrc::Extra>,
 }
 
 impl Default for Policy {
@@ -208,6 +215,7 @@ impl Default for Policy {
         Policy {
             retries: 3,
             backoff: std::time::Duration::from_millis(500),
+            extra: None,
         }
     }
 }
@@ -292,6 +300,15 @@ async fn get(
     }
 }
 
+/// Does a search hit's `name` belong to the song `title`? Compared without case, editions and
+/// credits, either one containing the other.
+pub(crate) fn names_title(name: Option<&str>, title: &str) -> bool {
+    let Some(name) = name.filter(|n| !n.trim().is_empty()) else { return true };
+    let norm = |s: &str| crate::util::normalize_track(&crate::year::base_title(s));
+    let (a, b) = (norm(name), norm(title));
+    a.is_empty() || b.is_empty() || a.contains(&b) || b.contains(&a)
+}
+
 async fn search(
     c: &reqwest::Client,
     base: &str,
@@ -303,7 +320,8 @@ async fn search(
     let q = [("artist_name", artist), ("track_name", title)];
     match request(c, &format!("{base}/api/search"), &q, retries, p.backoff).await {
         Reply::Body(t) => match serde_json::from_str::<Vec<Rec>>(&t) {
-            Ok(v) => Step::Hit(v),
+            // a search also returns other songs: only the one asked for (a hit without a name stays)
+            Ok(v) => Step::Hit(v.into_iter().filter(|r| names_title(r.track_name.as_deref(), title)).collect()),
             Err(_) => Step::Failed("unreadable reply"),
         },
         Reply::NotFound => Step::Nothing,
@@ -413,7 +431,11 @@ pub async fn fetch_with(
     if use_cache {
         if let Ok(txt) = tokio::fs::read_to_string(&path).await {
             if let Ok(e) = serde_json::from_str::<CacheEntry>(&txt) {
-                if e.kind != "none" || now_secs().saturating_sub(e.saved) < NEG_TTL {
+                // a miss, and a find from another site, are asked again after a while: lrclib
+                // may have it by then (and synced)
+                let age = now_secs().saturating_sub(e.saved);
+                let stale = (e.kind == "none" && age >= NEG_TTL) || (e.kind.starts_with("x-") && age >= EXTRA_TTL);
+                if !stale {
                     return to_lyrics(&e.kind, &e.text);
                 }
             }
@@ -512,6 +534,14 @@ pub async fn fetch_with(
         }
     }
 
+    // lrclib has nothing, or could not be asked often enough: the other sources, one by one
+    let mut elsewhere = false;
+    if result.is_none() {
+        if let Some(x) = policy.extra {
+            result = crate::lyricsrc::find(c, &x, artist, title, length).await;
+            elsewhere = result.is_some();
+        }
+    }
     let save = |kind: &str, text: &str| {
         let e = CacheEntry {
             kind: kind.into(),
@@ -523,7 +553,8 @@ pub async fn fetch_with(
     match result {
         Some((kind, text)) => {
             if use_cache {
-                if let Some(s) = save(kind, &text) {
+                let kind = if elsewhere { format!("x-{kind}") } else { kind.to_string() };
+                if let Some(s) = save(&kind, &text) {
                     let _ = tokio::fs::write(&path, s).await;
                 }
             }
@@ -554,7 +585,15 @@ mod tests {
             plain: (!plain.is_empty()).then(|| plain.to_string()),
             instrumental: None,
             duration: Some(duration),
+            track_name: None,
         }
+    }
+
+    #[test]
+    fn a_search_hit_must_be_the_song_asked_for() {
+        assert!(names_title(Some("Into The Sun (Remastered)"), "Into The Sun"));
+        assert!(names_title(None, "My Universe"));
+        assert!(!names_title(Some("Into The Sun"), "My Universe"));
     }
 
     #[test]

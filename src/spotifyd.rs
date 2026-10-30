@@ -44,3 +44,42 @@ pub fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// A spotifyd this program started for `use_spotifyd`; stopped when dropped (unless
+/// `no_kill_spotifyd`), so every way out of a front end cleans up.
+pub struct Daemon {
+    child: Option<Child>,
+    kill: bool,
+}
+
+impl Daemon {
+    /// Start spotifyd when `on` (nothing happens, and nothing is killed later, if one already runs).
+    pub fn start(on: bool, kill_on_exit: bool) -> Self {
+        Daemon { child: if on { start() } else { None }, kill: kill_on_exit }
+    }
+
+    /// Did this program start the daemon it holds?
+    pub fn started(&self) -> bool {
+        self.child.is_some()
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let (true, Some(c)) = (self.kill, self.child.as_mut()) {
+            stop(c);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_is_started_when_off_or_in_tests() {
+        crate::util::enter_test_mode();
+        assert!(!Daemon::start(false, true).started());
+        assert!(!Daemon::start(true, true).started(), "tests never start a real daemon");
+    }
+}

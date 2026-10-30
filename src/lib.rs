@@ -17,6 +17,7 @@ pub mod smtc;
 pub mod spotify;
 pub mod spotifyd;
 pub mod lyrics;
+pub mod lyricsrc;
 pub mod translate;
 pub mod chords;
 pub mod ug;
@@ -29,9 +30,11 @@ pub mod diagram;
 pub mod shutdown;
 pub mod setup;
 pub mod layout;
+pub mod guiconf;
 pub mod genre;
 pub mod ai;
 pub mod annotations;
+pub mod identity;
 
 /// What the background tasks report to whichever front end owns the state. Results are tagged
 /// with the track they were requested for, so stale ones can be dropped.

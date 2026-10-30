@@ -162,6 +162,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             in_break,
             members: current.and_then(|c| app.members.get(c)).map_or(&[][..], |m| m.as_slice()),
             reserve_tag: app.members.iter().any(|m| !m.is_empty()),
+            tag_below: app.args.member_position == crate::cli::MemberPosition::Below,
             progress: kar_progress,
         };
         let (rows, spans) = draw_focus_spans(f, inner, &th, &focus);
@@ -185,6 +186,8 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         marker: Option<Mk>,
         /// A chord row played during this break; drawn only while the break is active.
         gap: Option<Mk>,
+        /// The `[member, member]` tag of the line (member parts above or below it).
+        tag: bool,
     }
     #[derive(Clone, Copy, PartialEq)]
     enum Mk {
@@ -202,6 +205,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         intro: false,
         marker: Some(m),
         gap: None,
+        tag: false,
     };
     // Time before the first lyric: an instrumental marker, then the intro chords.
     if !plain && stamps.first().is_some_and(|t| *t > threshold) {
@@ -213,11 +217,11 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             let names: Vec<String> = names.iter().map(|n| chords::transpose(n, tr, flats)).collect();
             let text = names.join("   ");
             let x = width.saturating_sub(crate::util::width(&text)) / 2;
-            rows.push(Row { li: 0, text, chord_x: Some(x), intro: true, marker: None, gap: None });
+            rows.push(Row { li: 0, text, chord_x: Some(x), intro: true, marker: None, gap: None, tag: false });
         }
         if !a.intro.is_empty() {
             for _ in 0..gap.max(1) {
-                rows.push(Row { li: 0, text: String::new(), chord_x: None, intro: true, marker: None, gap: None });
+                rows.push(Row { li: 0, text: String::new(), chord_x: None, intro: true, marker: None, gap: None, tag: false });
             }
         }
     }
@@ -229,14 +233,39 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             let names: Vec<String> = names.iter().map(|n| chords::transpose(n, tr, flats)).collect();
             let text = names.join("   ");
             let x = width.saturating_sub(crate::util::width(&text)) / 2;
-            rows.push(Row { li, text, chord_x: Some(x), intro: false, marker: None, gap: Some(m) });
+            rows.push(Row { li, text, chord_x: Some(x), intro: false, marker: None, gap: Some(m), tag: false });
         }
     };
     let mut sub_rows: std::collections::HashSet<usize> = Default::default();
+    // where the translation and the member tag go (`auto`: the tag in front of the line)
+    let sub_above = app.args.translation_position == crate::cli::TranslationPosition::Above;
+    let member_at = match app.args.member_position {
+        crate::cli::MemberPosition::Auto => crate::cli::MemberPosition::Inline,
+        p => p,
+    };
+    let member_row = |rows: &mut Vec<Row>, i: usize| {
+        let m = current.filter(|c| i.abs_diff(*c) <= 2).and_then(|_| app.members.get(i)).filter(|m| !m.is_empty());
+        if let Some(m) = m {
+            rows.push(Row { li: i, text: format!("[{}]", m.join(", ")), chord_x: None, intro: false, marker: None, gap: None, tag: true });
+        }
+    };
     let mut starts = Vec::with_capacity(lines.len());
     let mut ends = Vec::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
         starts.push(rows.len());
+        if member_at == crate::cli::MemberPosition::Above {
+            member_row(&mut rows, i);
+        }
+        // `k`: the translation as extra rows of the same line (skipped when it adds nothing)
+        let translation: Vec<String> = match subs.get(i).filter(|t| !t.trim().is_empty() && t.trim() != l.trim()) {
+            Some(t) => wrap(t, width),
+            None => Vec::new(),
+        };
+        let sub_row = |r: &String| Row { li: i, text: r.clone(), chord_x: None, intro: false, marker: None, gap: None, tag: false };
+        if sub_above {
+            sub_rows.extend(rows.len()..rows.len() + translation.len());
+            rows.extend(translation.iter().map(sub_row));
+        }
         let line_chords = aligned
             .as_ref()
             .and_then(|a| a.per_line.get(i))
@@ -244,7 +273,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         match line_chords {
             None => {
                 for r in wrap(l, width) {
-                    rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None, gap: None });
+                    rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None, gap: None, tag: false });
                 }
             }
             Some(cs) => {
@@ -267,20 +296,20 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                             intro: false,
                             marker: None,
                             gap: None,
+                            tag: false,
                         });
                     }
-                    rows.push(Row { li: i, text, chord_x: None, intro: false, marker: None, gap: None });
+                    rows.push(Row { li: i, text, chord_x: None, intro: false, marker: None, gap: None, tag: false });
                 }
             }
         }
-        // `k`: the translation as extra rows of the same line (skipped when it adds nothing)
-        let sub_from = rows.len();
-        if let Some(t) = subs.get(i).filter(|t| !t.trim().is_empty() && t.trim() != l.trim()) {
-            for r in wrap(t, width) {
-                rows.push(Row { li: i, text: r, chord_x: None, intro: false, marker: None, gap: None });
-            }
+        if !sub_above {
+            sub_rows.extend(rows.len()..rows.len() + translation.len());
+            rows.extend(translation.iter().map(sub_row));
         }
-        sub_rows.extend(sub_from..rows.len());
+        if member_at == crate::cli::MemberPosition::Below {
+            member_row(&mut rows, i);
+        }
         ends.push(rows.len());
         // A long silence after this line (solo / instrumental break).
         if !plain && l.trim() != "♪" {
@@ -298,7 +327,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         for _ in 0..gap {
-            rows.push(Row { li: i, text: String::new(), chord_x: None, intro: false, marker: None, gap: None });
+            rows.push(Row { li: i, text: String::new(), chord_x: None, intro: false, marker: None, gap: None, tag: false });
         }
     }
     if rows.is_empty() {
@@ -389,7 +418,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     let mut kar: std::collections::HashMap<usize, usize> = Default::default();
     if let (Some(fr), Some(c)) = (kar_progress, current) {
         let ids: Vec<usize> = (starts[c]..ends[c])
-            .filter(|r| rows[*r].chord_x.is_none() && !sub_rows.contains(r))
+            .filter(|r| rows[*r].chord_x.is_none() && !sub_rows.contains(r) && !rows[*r].tag)
             .collect();
         let counts: Vec<usize> = ids.iter().map(|r| non_space(&rows[*r].text)).collect();
         kar.extend(ids.into_iter().zip(spread_lit(&counts, fr)));
@@ -400,7 +429,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         if idx < 0 || idx as usize >= rows.len() {
             continue;
         }
-        let Row { li, text, chord_x, intro, marker, gap } = &rows[idx as usize];
+        let Row { li, text, chord_x, intro, marker, gap, tag: is_tag } = &rows[idx as usize];
         if text.is_empty() {
             continue;
         }
@@ -420,6 +449,15 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                 ),
             }
         };
+        if *is_tag {
+            if let Some(m) = app.members.get(*li) {
+                f.render_widget(
+                    Paragraph::new(Line::from(member_tag_line(m, width, current == Some(*li)))).alignment(Alignment::Center),
+                    Rect { y: inner.y + y, height: 1, ..inner },
+                );
+            }
+            continue;
+        }
         if let (Some(m), Some(x)) = (gap, chord_x) {
             // play-along chords of a solo / instrumental break, only while it lasts
             if !break_state(*m).0 {
@@ -497,17 +535,22 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             None => Style::new().fg(th.fade(0.55)),
         };
         // the translation under an original line is italic and not bold
+        // (the active line's translation keeps the bold: it lights up with the line)
         let style = if sub_rows.contains(&(idx as usize)) {
-            style.remove_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC)
+            if current == Some(*li) { style.add_modifier(Modifier::ITALIC) } else { style.remove_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC) }
         } else {
             style
         };
         // `[Jimin]` tag before the first text row of the active line and its neighbours
         let tag = current
-            .filter(|c| li.abs_diff(*c) <= 2)
+            .filter(|c| li.abs_diff(*c) <= 2 && member_at == crate::cli::MemberPosition::Inline)
             .and_then(|_| app.members.get(*li))
-            .filter(|m| !m.is_empty() && (starts[*li]..idx as usize).all(|j| rows[j].chord_x.is_some()))
-            .map(|m| member_tag(m, width, crate::util::width(text.as_str())))
+            .filter(|m| {
+                !m.is_empty()
+                    && !sub_rows.contains(&(idx as usize))
+                    && (starts[*li]..idx as usize).all(|j| rows[j].chord_x.is_some() || sub_rows.contains(&j))
+            })
+            .map(|m| member_tag(m, width, crate::util::width(text.as_str()), current == Some(*li)))
             .filter(|t| !t.is_empty());
         if let Some(tag) = tag {
             // the tag is part of the row: widen its clickable span to cover it

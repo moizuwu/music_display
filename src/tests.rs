@@ -897,6 +897,7 @@ fn member_tag_shows_above_the_big_line_and_never_overlaps() {
             in_break: false,
             members,
             reserve_tag: reserve,
+            tag_below: false,
             progress: None,
         };
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -974,6 +975,7 @@ fn focus_layout_puts_chord_rows_on_neighbours_without_hits() {
         in_break,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress: None,
     };
     let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
@@ -1304,7 +1306,7 @@ fn scripted_site(routes: Vec<(&'static str, Vec<R>)>) -> (String, std::sync::Arc
 }
 
 fn fast() -> lyrics::Policy {
-    lyrics::Policy { retries: 3, backoff: Duration::from_millis(1) }
+    lyrics::Policy { retries: 3, backoff: Duration::from_millis(1), extra: None }
 }
 
 fn run_lyrics(base: &str, policy: lyrics::Policy) -> lyrics::Lyrics {
@@ -2137,6 +2139,7 @@ fn chords_sit_above_their_glyphs_in_the_big_layout() {
         in_break: false,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress: None,
     };
     let (w, h) = (40u16, 12u16);
@@ -3463,6 +3466,7 @@ fn karaoke_colours_the_sung_part_of_the_big_line() {
         in_break: false,
         members: &[],
         reserve_tag: false,
+        tag_below: false,
         progress,
     };
     let (w, h) = (40u16, 12u16);
@@ -4017,6 +4021,21 @@ async fn ai_that_keeps_failing_falls_back_to_the_standard_engine_and_says_so() {
 }
 
 #[tokio::test]
+async fn when_google_fails_after_the_ai_the_error_still_names_the_ai_reason() {
+    let (site, _log) = scripted_site(vec![
+        ("/chat/completions", vec![chat_reply(r#"["only one"]"#)]),
+        ("/g/dict", vec![R::Http(429, "", String::new())]),
+        ("/g?", vec![R::Http(429, "", String::new())]),
+    ]);
+    let (mut app, mut rx) = ai_app(&site, "ai_both_fail");
+    app.translate_base = Some(format!("{site}/g"));
+    app.ensure_translation();
+    pump(&mut app, &mut rx, |a| matches!(a.translate_state, app::TranslateState::Failed(_))).await;
+    let app::TranslateState::Failed(e) = &app.translate_state else { unreachable!() };
+    assert!(e.contains("AI failed") && e.contains("translation failed"), "{e}");
+}
+
+#[tokio::test]
 async fn ai_without_a_model_uses_the_standard_engine_with_a_note() {
     let (site, _log) = scripted_site(vec![("/g", vec![R::Http(200, "Content-Type: application/json\r\n", r#"[[["x","y"]],null,"sv"]"#.into())])]);
     let (mut app, _rx) = ai_app(&site, "ai_nomodel");
@@ -4237,6 +4256,176 @@ async fn the_annotations_key_and_settings_rows_work_and_persist() {
     assert!(a.annotations && a.annotations_mode == cli::AnnotationMode::Ai && a.genius_token == "t");
 }
 
+#[tokio::test]
+async fn genius_ai_stacks_both_and_asks_each_service_once_per_song() {
+    let artist = "NotesTest GeniusAI Band";
+    let lines = vec!["Intro line goes here".to_string(), "We build castles in the sand".to_string()];
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (gsite, glog) = genius_site(artist);
+    // line 2 repeats Genius and must be dropped; line 1 is new
+    let reply = chat_reply(r#"["The intro was recorded in one take.", "A metaphor for fragile things people work hard on."]"#);
+    let (asite, alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, &gsite);
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite.clone();
+    let cfg = app.ai_cfg().unwrap();
+    let genius = vec![None, Some("A metaphor for fragile things people work hard on.".to_string())];
+    let extra_cache = annotations::ai_extra_cache_for_test(&cfg, artist, "Roygbiv", &lines, &genius);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert!(matches!(app.ann_state, app::AnnState::Ready));
+    // one Genius search, one referents call, one AI request for the whole song
+    assert_eq!(glog.lock().unwrap().len(), 2, "{:?}", glog.lock().unwrap());
+    assert_eq!(alog.lock().unwrap().len(), 1, "{:?}", alog.lock().unwrap());
+    assert_eq!(app.ai_notes, vec![Some("The intro was recorded in one take.".to_string()), None]);
+    // the line Genius covers: Genius only (the AI repeat was dropped)
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("fragile") && s.contains("— Genius") && !s.contains("AI extra"), "{s}");
+    // the intro: the AI note alone, labelled as AI
+    app.set_position_for_test(2.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("recorded in one") && s.contains("AI-generated"), "{s}");
+    // the next play of the song asks nobody
+    let (mut again, mut rx2) = notes_app(artist, &gsite);
+    again.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    again.args.ai_model = "tester".into();
+    again.args.ai_endpoint = asite;
+    again.ensure_annotations();
+    pump(&mut again, &mut rx2, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert_eq!(glog.lock().unwrap().len(), 2);
+    assert_eq!(alog.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn genius_ai_shows_the_ai_extra_under_the_genius_note() {
+    let artist = "NotesTest GeniusAI Stack";
+    let lines = vec!["Intro line goes here".to_string(), "We build castles in the sand".to_string()];
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (gsite, _glog) = genius_site(artist);
+    let reply = chat_reply(r#"[null, "Jimi Hendrix released a song with the same title in 1967."]"#);
+    let (asite, _alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, &gsite);
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite;
+    let genius = vec![None, Some("A metaphor for fragile things people work hard on.".to_string())];
+    let extra_cache = annotations::ai_extra_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &lines, &genius);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    app.set_position_for_test(11.0);
+    let rows = render(&mut app, 120, 40);
+    let at = |t: &str| rows.iter().position(|r| r.contains(t)).unwrap_or_else(|| panic!("{t}: {}", rows.join("\n")));
+    assert!(at("fragile") < at("AI extra") && at("AI extra") < at("Hendrix"));
+    assert!(at("Hendrix") < at("AI-generated"));
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn genius_ai_without_a_token_still_asks_the_ai() {
+    let artist = "NotesTest GeniusAI NoToken";
+    let reply = chat_reply(r#"[null, "Sand castles are a common image for impermanence."]"#);
+    let (asite, alog) = scripted_site(vec![("/chat/completions", vec![reply])]);
+    let (mut app, mut rx) = notes_app(artist, "http://127.0.0.1:1");
+    app.args.genius_token.clear();
+    if app.genius_token().is_some() {
+        return; // (a developer machine with GENIUS_TOKEN set)
+    }
+    app.args.annotations_mode = cli::AnnotationMode::GeniusAi;
+    app.args.ai_model = "tester".into();
+    app.args.ai_endpoint = asite;
+    let lines = app.lyric_lines().unwrap();
+    let extra_cache = annotations::ai_extra_cache_for_test(&app.ai_cfg().unwrap(), artist, "Roygbiv", &lines, &[None, None]);
+    let _ = std::fs::remove_file(&extra_cache);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ai_state, app::AnnState::Ready)).await;
+    assert_eq!(alog.lock().unwrap().len(), 1);
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("impermanence") && s.contains("no token"), "{s}");
+    let _ = std::fs::remove_file(&extra_cache);
+}
+
+#[tokio::test]
+async fn a_long_annotation_is_whole_scrolls_and_can_be_cut() {
+    let artist = "NotesTest Long Band";
+    let long = format!("Start of the note. {} End of the note.", "More context about the line. ".repeat(40));
+    let referents = serde_json::json!({"response": {"referents": [
+        {"fragment": "We build castles in the sand", "annotations": [{"body": {"plain": long}}]}
+    ]}});
+    let search = serde_json::json!({"response": {"hits": [{"result": {"id": 77, "title": "Roygbiv", "primary_artist": {"name": artist}}}]}});
+    let (site, _log) = scripted_site(vec![
+        ("/search", vec![R::Http(200, GENIUS_JSON, search.to_string())]),
+        ("/referents", vec![R::Http(200, GENIUS_JSON, referents.to_string())]),
+    ]);
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+    annotations::reset_breaker();
+    let (mut app, mut rx) = notes_app(artist, &site);
+    app.ensure_annotations();
+    pump(&mut app, &mut rx, |a| matches!(a.ann_state, app::AnnState::Ready)).await;
+    assert!(app.anns[0].text.ends_with("End of the note."), "stored whole");
+    app.set_position_for_test(11.0);
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Start of the") && s.contains("more") && !s.contains("End of the note"), "{s}");
+    // e scrolls down to the end, E back up
+    use crossterm::event::KeyCode as K;
+    for _ in 0..200 {
+        app.handle(key(K::Char('e')));
+    }
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("End of the") && !s.contains("Start of the"), "{s}");
+    for _ in 0..200 {
+        app.handle(key(K::Char('E')));
+    }
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains("Start of the"), "{s}");
+    // a configured limit cuts it with …
+    app.args.annotation_max_chars = 60;
+    let s = render(&mut app, 120, 30).join("\n");
+    assert!(s.contains('…') && !s.contains("more"), "{s}");
+    let _ = std::fs::remove_file(annotations::cache_path(artist, "Roygbiv"));
+}
+
+#[tokio::test]
+async fn the_annotation_settings_rows_cycle_and_persist() {
+    use crossterm::event::KeyCode as K;
+    let (mut app, cfg) = settings_app("notes_settings2");
+    app.show_settings = true;
+    let row = |s| app::Setting::ALL.iter().position(|x| *x == s).unwrap();
+    app.settings_sel = row(app::Setting::AnnotationsMode);
+    for want in [cli::AnnotationMode::Ai, cli::AnnotationMode::GeniusAi, cli::AnnotationMode::Genius] {
+        app.handle(key(K::Enter));
+        assert_eq!(app.args.annotations_mode, want);
+    }
+    app.handle(key(K::Left));
+    assert_eq!(app.args.annotations_mode, cli::AnnotationMode::GeniusAi);
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("annotations_mode = \"genius+ai\""));
+    app.settings_sel = row(app::Setting::AnnotationMaxChars);
+    app.handle(key(K::Right));
+    assert_eq!(app.args.annotation_max_chars, 200);
+    app.settings_sel = row(app::Setting::AnnotationScroll);
+    app.handle(key(K::Enter));
+    assert_eq!(app.args.annotation_scroll, cli::AnnotationScroll::Auto);
+    let saved = std::fs::read_to_string(&cfg).unwrap();
+    assert!(saved.contains("annotation_max_chars = 200") && saved.contains("annotation_scroll = \"auto\""), "{saved}");
+    let (a, w) = cfg_run("annotations_mode = \"genius+ai\"\nannotation_max_chars = 500\nannotation_scroll = \"auto\"\n", &[]);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!((a.annotations_mode, a.annotation_max_chars, a.annotation_scroll), (cli::AnnotationMode::GeniusAi, 500, cli::AnnotationScroll::Auto));
+    let a = cli::Args::parse_from(["music_display", "--annotations-mode", "genius+ai"]);
+    assert_eq!(a.annotations_mode, cli::AnnotationMode::GeniusAi);
+    for n in cli::AnnotationMode::NAMES {
+        assert_eq!(cli::AnnotationMode::parse(n).unwrap().name(), *n);
+    }
+}
+
 // ── fixes: cava placement, cover above the track info, annotations next to the diagrams ──
 
 #[tokio::test]
@@ -4338,4 +4527,178 @@ async fn annotations_and_diagrams_share_one_column() {
     // roughly half the height each (the column is 40 - top row - footer rows tall)
     assert!(notes_row.abs_diff(chords_row + (40 - 2) / 2) <= 3, "{chords_row} {notes_row}");
     let _ = PanelId::Chords;
+}
+
+#[test]
+fn metadata_links_use_uris_only_for_the_same_song() {
+    use browser::{library_link, LibLink};
+    use layout::MetaField as F;
+    let mut s = snap("Coldplay, BTS", "My Universe", "Music of the Spheres");
+    s.track_id = "spotify:track:abc".into();
+    let remote = |id: &str| spotify::Remote {
+        snap: {
+            let mut r = s.clone();
+            r.track_id = id.into();
+            r
+        },
+        local: true,
+        device: String::new(),
+        album_uri: "spotify:album:al".into(),
+        artist_uris: vec!["spotify:artist:co".into(), "spotify:artist:bts".into()],
+    };
+    // same song: the first artist and the album open by URI
+    let r = remote("spotify:track:abc");
+    let Some(LibLink::Open(a)) = library_link(F::Artist, &s, "", Some(&r)) else { panic!("artist") };
+    assert_eq!((a.kind.as_str(), a.uri.as_str(), a.name.as_str()), ("artist", "spotify:artist:co", "Coldplay"));
+    let Some(LibLink::Open(al)) = library_link(F::Album, &s, "", Some(&r)) else { panic!("album") };
+    assert_eq!(al.uri, "spotify:album:al");
+    // another song in the API state (stale): never its URIs
+    let old = remote("spotify:track:other");
+    assert_eq!(library_link(F::Artist, &s, "", Some(&old)), Some(LibLink::Search("Coldplay".into())));
+    // MPRIS only: searches
+    assert_eq!(library_link(F::Title, &s, "", None), Some(LibLink::Search("My Universe Coldplay".into())));
+    assert_eq!(library_link(F::Album, &s, "", None), Some(LibLink::Search("Music of the Spheres Coldplay".into())));
+    assert_eq!(library_link(F::Genre, &s, "Pop", None), Some(LibLink::Search("Pop".into())));
+    assert_eq!(library_link(F::Genre, &s, "", None), None);
+    assert_eq!(library_link(F::Key, &s, "Pop", None), None);
+}
+
+#[tokio::test]
+async fn auto_zero_capo_in_the_terminal_ui() {
+    let mut app = test_app();
+    app.apply(AppEvent::Player(Some(snap("Band", "Song", "Album"))));
+    let key = app.track_key;
+    let sheet = chords::parse_chordpro("{capo: 2}\n[Am]hello\n");
+    app.apply(AppEvent::Chords { key, sheet: Ok(Some(sheet)), capo: None });
+    assert_eq!(app.effective_capo(), 2);
+    assert_eq!(app.chord_shift(), 0);
+    app.args.auto_zero_capo = true;
+    assert_eq!((app.effective_capo(), app.chord_shift()), (0, 2));
+    // a capo remembered for the track wins
+    let sheet = chords::parse_chordpro("{capo: 2}\n[Am]hello\n");
+    app.apply(AppEvent::Chords { key, sheet: Ok(Some(sheet)), capo: Some(1) });
+    assert_eq!((app.effective_capo(), app.chord_shift()), (1, 1));
+}
+
+#[tokio::test]
+async fn translation_and_member_tag_go_where_the_settings_say() {
+    use cli::{MemberPosition as MP, TranslationPosition as TP};
+    let mut app = test_app();
+    app.apply(AppEvent::Player(Some(snap("Band", "Song", "Album"))));
+    let key = app.track_key;
+    app.apply(AppEvent::Lyrics { key, lyrics: lyrics::Lyrics::Synced(vec![(0.0, "hello there".into()), (30.0, "second line".into())]) });
+    let lang = app.args.translate_lang.clone();
+    app.apply(AppEvent::Translated { key, lang, lines: Ok((vec!["hej da".into(), "andra raden".into()], "test".into())) });
+    app.translate_on = true;
+    app.translate_both = true;
+    app.members = vec![vec!["Jimin".into()], vec![]];
+    // the rows (top to bottom) of the first line: original, translation, tag
+    let order = |app: &mut app::App| -> Vec<&'static str> {
+        let screen = render(app, 60, 20);
+        let at = |needle: &str| screen.iter().position(|r| r.contains(needle));
+        let mut found: Vec<(usize, &'static str)> =
+            [("hello there", "original"), ("hej da", "translation"), ("[Jimin]", "tag")].into_iter().filter_map(|(n, w)| at(n).map(|y| (y, w))).collect();
+        found.sort();
+        found.into_iter().map(|(_, w)| w).collect()
+    };
+    app.args.member_position = MP::Below;
+    assert_eq!(order(&mut app), ["original", "translation", "tag"]);
+    app.args.translation_position = TP::Above;
+    assert_eq!(order(&mut app), ["translation", "original", "tag"]);
+    app.args.member_position = MP::Above;
+    assert_eq!(order(&mut app), ["tag", "translation", "original"]);
+    app.args.translation_position = TP::Below;
+    assert_eq!(order(&mut app), ["tag", "original", "translation"]);
+    // inline: the tag shares the row of the original
+    app.args.member_position = MP::Inline;
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.iter().any(|r| r.contains("[Jimin") && r.contains("hello there")), "{screen:#?}");
+    // and with the translation above the line the tag still sits on the original's row
+    app.args.translation_position = TP::Above;
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.iter().any(|r| r.contains("[Jimin") && r.contains("hello there")), "{screen:#?}");
+}
+
+/// The lyric sites of a test server (the strings live as long as the process, like the real ones).
+fn extra_at(base: &str) -> lyrics::Policy {
+    let leak: &'static str = Box::leak(base.to_string().into_boxed_str());
+    lyrics::Policy { extra: Some(music_display::lyricsrc::Extra { netease: leak, ovh: leak, genius: leak }), ..fast() }
+}
+
+const NETEASE_FOUND: &str = r#"{"result":{"songs":[{"id":77,"name":"Enter Sandman","artists":[{"name":"Metallica"}],"duration":331000}]}}"#;
+const NETEASE_LRC: &str = r#"{"lrc":{"lyric":"[00:01.00]Say your prayers little one\n[00:05.00]Dont forget my son\n[00:09.00]To include everyone\n[00:12.00]Tuck you in warm and tight"}}"#;
+const JSON_CT: &str = "Content-Type: application/json\r\n";
+
+#[test]
+fn another_site_is_asked_when_lrclib_has_nothing() {
+    let (base, log) = scripted_site(vec![
+        ("/api/search/get/web", vec![R::Http(200, JSON_CT, NETEASE_FOUND.into())]),
+        ("/api/song/lyric", vec![R::Http(200, JSON_CT, NETEASE_LRC.into())]),
+    ]);
+    // without the setting nothing else is asked
+    assert!(matches!(run_lyrics(&base, fast()), lyrics::Lyrics::NotFound));
+    assert!(!log.lock().unwrap().iter().any(|l| l.contains("netease") || l.contains("song/lyric")));
+    // with it, the synced lyrics of the other site
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Synced(ref v) if v.len() == 4), "{l:?}");
+}
+
+#[test]
+fn lrclib_failing_more_often_than_allowed_still_falls_through() {
+    let body = r#"{"lyrics":"Exit light\nEnter night\nTake my hand\nWe're off to never-never land\nMore here"}"#;
+    let (base, log) = scripted_site(vec![
+        ("/api/", vec![R::Http(503, "", String::new())]),
+        ("/v1/Metallica/", vec![R::Http(200, JSON_CT, body.into())]),
+    ]);
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Plain(ref v) if v.len() == 5 && v[0] == "Exit light"), "{l:?}");
+    // lrclib was asked (and retried) first
+    assert!(log.lock().unwrap().iter().filter(|l| l.contains("/api/get")).count() >= 4);
+}
+
+#[test]
+fn a_different_song_from_another_site_is_not_taken() {
+    let wrong = r#"{"result":{"songs":[{"id":1,"name":"Nothing Else Matters","artists":[{"name":"Metallica"}],"duration":388000},{"id":2,"name":"Enter Sandman","artists":[{"name":"Somebody Else"}],"duration":331000},{"id":3,"name":"Enter Sandman","artists":[{"name":"Metallica"}],"duration":120000}]}}"#;
+    let (base, log) = scripted_site(vec![("/api/search/get/web", vec![R::Http(200, JSON_CT, wrong.into())])]);
+    assert!(matches!(run_lyrics(&base, extra_at(&base)), lyrics::Lyrics::NotFound));
+    assert!(!log.lock().unwrap().iter().any(|l| l.contains("song/lyric")), "no lyrics were fetched for a wrong match");
+}
+
+#[test]
+fn the_genius_page_is_the_last_resort_and_loses_its_section_headers() {
+    let search = r#"{"response":{"sections":[{"hits":[{"type":"song","result":{"title":"Enter Sandman","path":"/Metallica-enter-sandman-lyrics","primary_artist":{"name":"Metallica"}}}]}]}}"#;
+    let page = r#"<div data-lyrics-container="true">[Verse 1]<br/>Say your prayers little one<br/>Dont forget my son<br/>To include everyone<br/>Tuck you in warm and tight</div>"#;
+    let (base, _log) = scripted_site(vec![
+        ("/api/search/multi", vec![R::Http(200, JSON_CT, search.into())]),
+        ("/Metallica-enter-sandman-lyrics", vec![R::Http(200, "", page.into())]),
+    ]);
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Plain(ref v) if v.len() == 4 && v[0].starts_with("Say your prayers")), "{l:?}");
+}
+
+#[tokio::test]
+async fn the_terminal_ui_follows_a_colour_file_that_changes() {
+    use clap::Parser;
+    util::enter_test_mode();
+    let dir = std::env::temp_dir().join(format!("md-theme-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("colors.json");
+    std::fs::write(&file, r##"{"mSurface":"#101010","mPrimary":"#ff0000"}"##).unwrap();
+    let args = cli::Args::parse_from(["music_display", "--colors", file.to_str().unwrap()]);
+    let theme = theme::load(&args);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = app::App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+    assert_eq!(app.theme.primary, Some((255, 0, 0)));
+    // nothing changed: nothing is read again
+    app.dirty = false;
+    app.refresh_theme_now();
+    assert!(!app.dirty);
+    // a wallpaper tool writes new colours
+    std::fs::write(&file, r##"{"mSurface":"#f0f0f0","mPrimary":"#0000ff"}"##).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+    app.refresh_theme_now();
+    assert!(app.dirty);
+    assert_eq!((app.theme.surface, app.theme.primary), (Some((240, 240, 240)), Some((0, 0, 255))));
+    std::fs::remove_dir_all(&dir).ok();
 }

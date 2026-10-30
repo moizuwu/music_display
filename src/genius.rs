@@ -236,6 +236,22 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
     Ok(parts)
 }
 
+/// The plain lyrics of the Genius song page for this song (section headers dropped), for when
+/// no other source has them. `None` when the song is not found or the page has too little text.
+pub async fn plain_lyrics(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Option<String> {
+    let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
+    let reply: Value = serde_json::from_str(&get(c, &format!("{base}/api/search/multi"), &[("q", &q)]).await.ok()?).ok()?;
+    let page = get(c, &format!("{base}{}", best_hit(&reply, artist, title)?), &[]).await.ok()?;
+    let text = containers(&page).into_iter().map(text_of).collect::<Vec<_>>().join("\n");
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !(l.starts_with('[') && l.ends_with(']')))
+        .collect();
+    let text = lines.join("\n").trim().to_string();
+    (text.lines().filter(|l| !l.trim().is_empty()).count() >= 4).then_some(text)
+}
+
 /// Lookup for the app: any failure just means no member tags.
 pub async fn fetch(c: reqwest::Client, artist: String, title: String) -> Vec<Part> {
     lookup(&c, BASE, &artist, &title).await.ok().flatten().unwrap_or_default()

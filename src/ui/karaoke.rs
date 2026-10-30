@@ -2,7 +2,7 @@ use super::*;
 
 /// Rough time a line takes to sing, so the marker appears once the words are over
 /// rather than the moment the line starts.
-pub(super) fn est_sung(text: &str) -> f64 {
+pub fn est_sung(text: &str) -> f64 {
     (text.chars().count() as f64 * 0.08).clamp(2.0, 6.0)
 }
 
@@ -15,12 +15,12 @@ pub fn line_progress(t: f64, start: f64, next: Option<f64>, text: &str) -> f64 {
     ((t - start) / dur * 1.1).clamp(0.0, 1.0)
 }
 
-pub(super) fn non_space(s: &str) -> usize {
+pub fn non_space(s: &str) -> usize {
     s.chars().filter(|c| !c.is_whitespace()).count()
 }
 
 /// How many non-space characters of each wrapped row are lit when `f` of the whole line is.
-pub(super) fn spread_lit(counts: &[usize], f: f64) -> Vec<usize> {
+pub fn spread_lit(counts: &[usize], f: f64) -> Vec<usize> {
     let mut left = (f * counts.iter().sum::<usize>() as f64).round() as usize;
     counts
         .iter()
@@ -33,7 +33,7 @@ pub(super) fn spread_lit(counts: &[usize], f: f64) -> Vec<usize> {
 }
 
 /// `row` cut right after its `lit`-th non-space character.
-pub(super) fn split_lit(row: &str, lit: usize) -> (&str, &str) {
+pub fn split_lit(row: &str, lit: usize) -> (&str, &str) {
     if lit == 0 {
         return ("", row);
     }

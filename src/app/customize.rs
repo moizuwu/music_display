@@ -334,7 +334,9 @@ impl App {
                 if let Some(target) = self.field_at(x, y) {
                     if target == f {
                         // released where it was pressed: a click
-                        self.open_diagrams_for(f);
+                        if !self.open_diagrams_for(f) {
+                            self.open_library_for(f);
+                        }
                     } else if self.layout.fields.move_to(f, target) {
                         self.save_layout();
                     }

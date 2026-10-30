@@ -16,7 +16,7 @@ Off by default. Press `g` at any time to toggle.
 | `g` | chords on / off (also shows the lyrics panel) |
 | `t` / `T` | transpose up / down one semitone (resets on track change) |
 | `]` / `[` | capo up / down, 0–12 (a per-track override, remembered across restarts) |
-| `0` | back to the sheet's own capo |
+| `0` | back to the default capo (the sheet's own, or none with `auto_zero_capo`) |
 | `D` | chord diagram panel |
 | `b` | big-font lyrics; chords are listed in a row above the big line |
 
@@ -112,6 +112,11 @@ lower shapes, and the sounding key stays the same. The metadata panel shows
 `Key: E Minor / 9A` (sounding key + Camelot), `Capo: 3  (shapes in C#m)`, and
 `[sheet: 2]` when you've overridden the sheet's capo. The override is saved per track
 (`~/.cache/music_display/capo-*.txt`); `0` clears it.
+
+With `auto_zero_capo = true` (also a row in the settings menu and the GUI's Chords tab) a sheet
+that says `capo 2` starts at capo 0: the chords are shifted up two semitones, so they are the
+sounding chords (Am shows as Bm) and nothing needs to be transposed in your head. A capo you
+chose for the track yourself is kept, and the metadata row still says `[sheet 2]`.
 
 The key comes from the sheet (`{key: Dm}` / `Key: Dm` / Ultimate Guitar's page data) and is
 taken to be the key of the shapes; no key on the sheet means no Key / Camelot display.

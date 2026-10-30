@@ -2,7 +2,8 @@ use crate::cli::Args;
 use crate::util::shorten_home;
 use ratatui::style::Color;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub use crate::color::{Rgb, luminance, mix, parse_hex};
 
@@ -139,7 +140,8 @@ const ON_SURFACE: &[&str] = &[
     "text",
 ];
 
-type FileColors = (Option<Rgb>, Option<Rgb>, Option<Rgb>);
+/// (surface, primary, on-surface) of a colour file.
+pub type FileColors = (Option<Rgb>, Option<Rgb>, Option<Rgb>);
 
 /// `None` for a missing, unreadable, invalid, empty (`{}`) or colour-less file.
 fn from_file(path: &PathBuf) -> Option<FileColors> {
@@ -151,6 +153,30 @@ fn from_file(path: &PathBuf) -> Option<FileColors> {
         return None;
     }
     Some((s, p, extract(&v, ON_SURFACE)))
+}
+
+/// The colours a colour file gives, and which file it was: `path` alone when it is named,
+/// else the first usable one of the usual places. This is what the window uses too.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn file_colors(path: Option<&Path>) -> Option<(FileColors, PathBuf)> {
+    let files: Vec<PathBuf> = match path {
+        Some(p) => vec![p.to_path_buf()],
+        None => candidates(),
+    };
+    files.into_iter().find_map(|f| from_file(&f).map(|c| (c, f)))
+}
+
+/// Every file `file_colors` looks at with its modification time (`None` = not there): when
+/// any of them changes, so may the colours (a wallpaper tool rewrote them).
+pub fn watch_list(path: Option<&Path>) -> Vec<(PathBuf, Option<SystemTime>)> {
+    let files: Vec<PathBuf> = match path {
+        Some(p) => vec![p.to_path_buf()],
+        None => candidates(),
+    };
+    files.into_iter().map(|f| {
+        let m = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
+        (f, m)
+    }).collect()
 }
 
 pub fn load(args: &Args) -> Theme {

@@ -185,6 +185,27 @@ pub struct Ctl {
     /// poller both send them).
     #[cfg(unix)]
     modes: Arc<std::sync::RwLock<(Option<bool>, Option<Loop>)>>,
+    /// Counts the lines the follow task has sent; a poll that was running while it changed
+    /// holds older data than the push and is dropped.
+    #[cfg(unix)]
+    pushes: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Of several players' snapshots: the playing one, else the first one `wanted` lists (any
+/// player when it is empty).
+#[cfg(unix)]
+fn pick_player(all: Vec<Snapshot>, wanted: &[String]) -> Option<Snapshot> {
+    let rank = |s: &Snapshot| wanted.iter().position(|w| s.player == *w || s.player.starts_with(&format!("{w}.")));
+    let mut all: Vec<(usize, Snapshot)> = all
+        .into_iter()
+        .filter_map(|s| match rank(&s) {
+            Some(r) => Some((r, s)),
+            None if wanted.is_empty() => Some((0, s)),
+            None => None,
+        })
+        .collect();
+    all.sort_by_key(|(r, s)| (s.status != Status::Playing, *r));
+    all.into_iter().next().map(|(_, s)| s)
 }
 
 #[cfg(unix)]
@@ -228,6 +249,7 @@ impl Ctl {
             repoll: Arc::new(Notify::new()),
             switched: Arc::new(Notify::new()),
             modes: Arc::new(std::sync::RwLock::new((None, None))),
+            pushes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -264,16 +286,28 @@ impl Ctl {
     }
 
     async fn poll_once(&self) -> Option<Snapshot> {
-        let out = self
-            .cmd()
-            .args(["metadata", "--format", FORMAT])
+        let base = self.base.read().map(|b| b.clone()).unwrap_or_default();
+        // `any` or a list: playerctl would answer for the first player it finds, which may
+        // be a paused one next to the one that plays. Ask every player and pick here.
+        let wanted: Vec<String> = match base.get(1) {
+            Some(list) if list.contains(',') => list.split(',').map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        if !base.is_empty() && wanted.is_empty() {
+            let out = self.cmd().args(["metadata", "--format", FORMAT]).output().await.ok()?;
+            return out.status.success().then(|| parse(&String::from_utf8_lossy(&out.stdout))).flatten();
+        }
+        let out = Command::new("playerctl")
+            .args(["-a", "metadata", "--format", FORMAT])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
             .output()
             .await
             .ok()?;
         if !out.status.success() {
             return None;
         }
-        parse(&String::from_utf8_lossy(&out.stdout))
+        pick_player(String::from_utf8_lossy(&out.stdout).lines().filter_map(parse).collect(), &wanted)
     }
 
     /// One `playerctl <cmd>` read; `None` if it failed (no player, or unsupported).
@@ -308,8 +342,12 @@ impl Ctl {
                 self.refresh_modes().await;
                 modes_at = Some(tokio::time::Instant::now());
             }
+            let pushed = self.pushes.load(std::sync::atomic::Ordering::Relaxed);
             let snap = self.poll_once().await.map(|s| self.with_modes(s));
-            if tx.send(AppEvent::Player(snap)).is_err() {
+            // the follow task pushed while this ran: its line is newer than this answer
+            if self.pushes.load(std::sync::atomic::Ordering::Relaxed) == pushed
+                && tx.send(AppEvent::Player(snap)).is_err()
+            {
                 return;
             }
             tokio::select! {
@@ -337,6 +375,7 @@ impl Ctl {
                         tokio::select! {
                             line = lines.next_line() => match line {
                                 Ok(Some(line)) => {
+                                    self.pushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     if tx.send(AppEvent::Player(parse(&line).map(|s| self.with_modes(s)))).is_err() {
                                         return;
                                     }
@@ -427,5 +466,26 @@ fn player_name(player: &str) -> String {
     match player {
         "any" | "local" => String::new(),
         p => p.to_string(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pick_tests {
+    use super::*;
+
+    fn s(player: &str, status: &str, title: &str) -> Snapshot {
+        let line = format!("{status}\x1f0\x1f{title}\x1fBand\x1fAlbum\x1f200000000\x1f\x1f1\x1f1\x1f\x1f0.5\x1f\x1fid\x1f{player}\x1f[]");
+        parse(&line).unwrap()
+    }
+
+    #[test]
+    fn the_playing_player_wins_over_the_first_in_the_list() {
+        let all = vec![s("vlc", "Paused", "Into The Sun"), s("spotify", "Playing", "My Universe")];
+        let list = vec!["vlc".to_string(), "spotify".to_string()];
+        assert_eq!(pick_player(all.clone(), &list).unwrap().title, "My Universe");
+        assert_eq!(pick_player(all.clone(), &[]).unwrap().title, "My Universe");
+        // none plays: the list's order decides, and players outside it do not count
+        let idle = vec![s("spotify", "Paused", "B"), s("vlc", "Paused", "A"), s("mpv", "Paused", "C")];
+        assert_eq!(pick_player(idle, &list).unwrap().title, "A");
     }
 }
