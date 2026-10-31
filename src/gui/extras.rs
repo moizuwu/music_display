@@ -4,7 +4,7 @@
 use super::model::Model;
 use egui::{Align, Sense, Ui, Vec2};
 use music_display::cli::Args;
-use music_display::layout::{Layout, PanelId};
+use music_display::layout::{Item, Layout, PanelId};
 use music_display::lyrics;
 use music_display::{AppEvent, cava};
 use std::path::PathBuf;
