@@ -410,11 +410,6 @@ impl Model {
 
     // ── lyrics / playback numbers ──
 
-    pub fn save_lyric_numbers(&mut self) {
-        let keys = ["lyric_spacing", "lyric_pad", "big_scale", "interlude_threshold_secs", "volume_step"];
-        self.save_lyric_number_keys(&keys);
-    }
-
     /// Persist just the one number whose slider was released (the others may hold per-run values).
     pub fn save_lyric_number(&mut self, key: &str) {
         self.save_lyric_number_keys(&[key]);
@@ -994,7 +989,7 @@ mod tests {
         m.args.big_scale = 3;
         m.args.interlude_secs = 12.0;
         m.args.volume_step = 7;
-        m.save_lyric_numbers();
+        m.save_lyric_number_keys(&["lyric_spacing", "lyric_pad", "big_scale", "interlude_threshold_secs", "volume_step"]);
         m.set_spotify_queue_tab(false);
         m.set_spotify_button(false);
         m.set_kill_spotifyd(false);
