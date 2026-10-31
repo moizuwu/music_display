@@ -1074,7 +1074,7 @@ mod tests {
         assert_eq!(s.lib.tabs[TAB_QUEUE].summary, "1 next");
         // a remote state is kept and its position moves on
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"is_playing":true,"progress_ms":5000,"device":{"name":"Phone"},"item":{"uri":"spotify:track:z","name":"Zed","duration_ms":90000,"artists":[{"name":"Q"}],"album":{"name":"W"}}}"#,
+            r#"{"is_playing":true,"progress_ms":5000,"device":{"name":"Phone"},"item":{"uri":"spotify:track:z","name":"Zed","duration_ms":90000,"artists":[{"name":"Q"}],"album":{"name":"W","artists":[{"name":"WA"}]}}}"#,
         )
         .unwrap();
         let r = spotify::parse_state(&v, |_| false).map(Box::new);

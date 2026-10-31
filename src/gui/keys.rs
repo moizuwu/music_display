@@ -255,7 +255,7 @@ impl super::Gui {
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         let mut codes: Vec<KeyCode> = ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<KeyCode>>(egui::Id::NULL)));
         if !ctx.egui_wants_keyboard_input() {
-            codes.extend(ctx.input(|i| i.events.iter().filter_map(code_of)));
+            codes.extend(ctx.input(|i| i.events.iter().filter_map(code_of).collect::<Vec<_>>()));
         }
         for code in codes {
             if self.m.ux.key_capture.is_some() {

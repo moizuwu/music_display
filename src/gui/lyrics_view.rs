@@ -416,7 +416,8 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
         // ...and grow with it: each part keeps the size chosen for it and is scaled by the same
         // step the original line makes between the plain and the active size
         let grow_by = size / g.lyrics_size.max(1) as f32;
-        let body = |s: egui::TextStyle| ui.style().text_styles.get(&s).map_or(14.0, |f| f.size);
+        let text_size = |s: egui::TextStyle| ui.style().text_styles.get(&s).map_or(14.0, |f| f.size);
+        let (body_size, small_size) = (text_size(egui::TextStyle::Body), text_size(egui::TextStyle::Small));
         let has_tr = both && trans.is_some_and(|t| t.trim() != orig.trim());
         let member_tag = cur
             .filter(|c| i.abs_diff(*c) <= 2)
@@ -424,7 +425,7 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             .filter(|x| !x.is_empty())
             .map(|mem| {
                 let tag = RichText::new(format!("[{}]", mem.join(" · "))).color(part_color);
-                let plain = if g.member_size > 0 { g.member_size as f32 } else { body(egui::TextStyle::Small) };
+                let plain = if g.member_size > 0 { g.member_size as f32 } else { small_size };
                 tag.size(plain * grow_by)
             });
         let (parts, inline) = line_parts(m.args.translation_position, m.args.member_position, has_tr, member_tag.is_some(), center);
@@ -458,7 +459,7 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
                 Part::Translation => {
                     if let Some(tr_text) = trans {
                         let txt = RichText::new(tr_text).italics().color(part_color);
-                        let plain = if g.translation_size > 0 { g.translation_size as f32 } else { body(egui::TextStyle::Body) };
+                        let plain = if g.translation_size > 0 { g.translation_size as f32 } else { body_size };
                         let txt = txt.size(plain * grow_by);
                         let label = egui::Label::new(txt).wrap().sense(Sense::click());
                         let r = if center { ui.vertical_centered(|ui| ui.add(label)).inner } else { ui.add(label) };

@@ -67,7 +67,7 @@ pub(super) fn meta_lines(
             },
             MetaField::Artist => vec![label("Artist"), val(dash(&snap.artist))],
             MetaField::AlbumArtist => {
-                let a = Some(&snap.album_artist).filter(|a| !a.is_empty() && **a != snap.artist)?;
+                let a = Some(&snap.album_artist).filter(|a| !a.is_empty())?;
                 vec![label("Album artist"), val(a.clone())]
             }
             MetaField::Album => vec![label("Album"), val(dash(&snap.album))],

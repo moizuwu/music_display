@@ -511,7 +511,7 @@ hidden = []
 
 The fields below can be hidden and reordered (see above). `Genre` appears once a source knows it.
 
-Track, Artist, Album artist and Album take a full row each. **Artist** lists every artist credited on the song; **Album artist** is the artist the album belongs to and is only drawn when it differs from Artist (Spotify and MPRIS players that report `xesam:albumArtist`). Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
+Track, Artist, Album artist and Album take a full row each. **Artist** lists every artist credited on the song; **Album artist** is the artist the album belongs to; both are shown, and each can be hidden or moved like any other field (the Album artist row is left out when the player reports none: Spotify and MPRIS players that report `xesam:albumArtist`). Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
 
 ```
 Track No  01-03                Tuning: Drop D
