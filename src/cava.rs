@@ -30,7 +30,7 @@ pub async fn run(bars: u16, tx: UnboundedSender<AppEvent>) {
     }
 
     let path = crate::util::tmp_dir().join(format!("cava-{bars}.conf"));
-    if tokio::fs::write(&path, config(bars)).await.is_err() {
+    if crate::util::write_safely(&path, config(bars).as_bytes()).is_err() {
         return fail("couldn't write the cava config in /tmp".into());
     }
     let child = Command::new("cava")

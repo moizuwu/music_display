@@ -167,6 +167,10 @@ impl App {
 
     /// Grow / shrink a panel's share by `steps` * 5 percent.
     pub fn cust_resize(&mut self, p: PanelId, steps: i32) {
+        // only columns have a width to change
+        if !matches!(p, PanelId::Metadata | PanelId::Lyrics | PanelId::Cava | PanelId::Annotations) {
+            return;
+        }
         let now = self.layout.size_of(p).unwrap_or_else(|| default_size(p)) as i32;
         self.layout.set_size(p, (now + steps * 5).clamp(0, u16::MAX as i32) as u16);
         self.save_layout();
@@ -360,5 +364,37 @@ impl App {
             self.show_lyrics = true;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn app() -> App {
+        crate::util::enter_test_mode();
+        let args = crate::cli::Args::parse_from(["music_display"]);
+        let theme = crate::theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx)
+    }
+
+    #[tokio::test]
+    async fn only_columns_are_resized_and_borders_measure_from_their_column() {
+        let mut a = app();
+        a.args.config = Some(std::env::temp_dir().join(format!("md-customize-{}.toml", std::process::id())));
+        a.cust_resize(PanelId::Controls, 1);
+        a.cust_resize(PanelId::Library, 1);
+        assert!(a.layout.is_automatic(), "no size stored for a panel that is not a column");
+        a.cust_resize(PanelId::Lyrics, 1);
+        assert_eq!(a.layout.size_of(PanelId::Lyrics), Some(65));
+        // dragging the second border: the percentage is of the column that starts at `start`
+        a.drag = Some(Drag::Border { left: PanelId::Cava, start: 40, total: 100 });
+        a.mouse_drag(70, 0);
+        assert_eq!(a.layout.size_of(PanelId::Cava), Some(30));
+        if let Some(p) = a.args.config.take() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }

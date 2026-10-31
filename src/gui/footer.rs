@@ -1,5 +1,4 @@
-//! The status line at the bottom of the window: lyrics offset (lit when not zero), the chord
-//! sheet's state, the Spotify device being shown, and the current note (wrapped).
+//! The status line at the bottom of the window: the chord sheet's state, the Spotify device being shown, and the current note (wrapped).
 use super::model::{Chords, Model};
 use egui::{RichText, Ui};
 use music_display::chords::Aligned;
@@ -63,15 +62,15 @@ pub fn footer(ui: &mut Ui, m: &mut Model) {
     let accent = ui.visuals().hyperlink_color;
     let note = m.note.as_ref().map(|(n, _)| n.clone());
     ui.horizontal_wrapped(|ui| {
-        let off = format!("offset {:+.1}s", m.offset);
-        ui.label(if m.offset != 0.0 { RichText::new(off).color(accent) } else { RichText::new(off).weak() });
+        let has_status = status.is_some();
         if let Some(s) = status {
-            ui.separator();
             ui.label(RichText::new(s).small().weak());
         }
         if m.remote_active() {
             if let Some(d) = m.spot.device() {
-                ui.separator();
+                if has_status {
+                    ui.separator();
+                }
                 ui.label(RichText::new(format!("on {d}")).small().color(accent));
             }
         }

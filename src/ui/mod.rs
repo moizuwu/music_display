@@ -300,7 +300,7 @@ fn record_borders(app: &mut App, main: Rect, cols: &[(PanelId, Rect)]) {
         app.hits.borders.push(crate::app::Border {
             rect: Rect { x: edge, y: left.y, width: 2, height: left.height },
             left: id,
-            start: main.x,
+            start: left.x,
             total: main.width,
         });
     }
@@ -381,5 +381,26 @@ fn centered_msg(f: &mut Frame, area: Rect, msgs: &[(&str, Style)]) {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn every_border_starts_where_its_own_column_starts() {
+        crate::util::enter_test_mode();
+        let args = crate::cli::Args::parse_from(["music_display"]);
+        let theme = crate::theme::load(&args);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(args, theme, ratatui_image::picker::Picker::halfblocks(), tx);
+        let main = Rect { x: 0, y: 0, width: 90, height: 20 };
+        let r = |x| Rect { x, y: 0, width: 30, height: 20 };
+        let cols = [(PanelId::Metadata, r(0)), (PanelId::Lyrics, r(30)), (PanelId::Cava, r(60))];
+        record_borders(&mut app, main, &cols);
+        let starts: Vec<u16> = app.hits.borders.iter().map(|b| b.start).collect();
+        assert_eq!(starts, vec![0, 30]);
     }
 }

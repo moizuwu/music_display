@@ -4657,6 +4657,34 @@ fn lrclib_failing_more_often_than_allowed_still_falls_through() {
 }
 
 #[test]
+fn a_failing_extra_site_is_not_a_confirmed_miss() {
+    // lrclib answers 404 (nothing), NetEase cannot answer: an error, which is never cached
+    let (base, _log) = scripted_site(vec![("/api/search/get/web", vec![R::Http(503, "", String::new())])]);
+    let l = run_lyrics(&base, extra_at(&base));
+    assert!(matches!(l, lyrics::Lyrics::Error(_)), "{l:?}");
+}
+
+#[test]
+fn an_empty_wanted_artist_matches_no_artist() {
+    let search = serde_json::json!({"response":{"sections":[{"hits":[{"type":"song","result":{"title":"Dynamite","path":"/x-dynamite-lyrics","primary_artist":{"name":"BTS"}}}]}]}});
+    assert_eq!(genius::best_hit(&search, "", "Dynamite"), None);
+    let ugs = serde_json::json!({"store":{"page":{"data":{"results":[
+        {"song_name":"Dynamite","artist_name":"BTS","type":"Chords","tab_url":"/tab/x/chords-1","rating":5.0,"votes":10}
+    ]}}}});
+    let store = ug::extract_store(&ug_page(&ugs)).unwrap();
+    assert!(ug::candidates(&store, "", "Dynamite").is_empty());
+    assert_eq!(ug::candidates(&store, "BTS", "Dynamite").len(), 1);
+}
+
+#[tokio::test]
+async fn a_complete_translation_is_not_flagged_as_degraded() {
+    let (site, _log) = scripted_site(vec![("/g?", vec![R::Http(200, JSON_HDR, r#"[[["hello","hej"]],null,"sv"]"#.into())])]);
+    let src: Vec<String> = (0..5).map(|i| format!("rad {i}")).collect();
+    let (out, _, degraded) = translate::lines_checked(&reqwest::Client::new(), &skip_cfg(&site, &[], false), "en", &src).await.unwrap();
+    assert!(!degraded && out.iter().all(|l| l == "hello"));
+}
+
+#[test]
 fn a_different_song_from_another_site_is_not_taken() {
     let wrong = r#"{"result":{"songs":[{"id":1,"name":"Nothing Else Matters","artists":[{"name":"Metallica"}],"duration":388000},{"id":2,"name":"Enter Sandman","artists":[{"name":"Somebody Else"}],"duration":331000},{"id":3,"name":"Enter Sandman","artists":[{"name":"Metallica"}],"duration":120000}]}}"#;
     let (base, log) = scripted_site(vec![("/api/search/get/web", vec![R::Http(200, JSON_CT, wrong.into())])]);

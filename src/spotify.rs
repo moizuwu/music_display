@@ -366,7 +366,10 @@ pub async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> a
     loop {
         let (mut sock, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
-        let n = sock.read(&mut buf).await.unwrap_or(0);
+        // an idle speculative connection must not stall the real callback behind it
+        let n = tokio::time::timeout(Duration::from_secs(3), sock.read(&mut buf))
+            .await
+            .map_or(0, |r| r.unwrap_or(0));
         let req = String::from_utf8_lossy(&buf[..n]).to_string();
         let target = req.split_whitespace().nth(1).unwrap_or("/");
         let Ok(u) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
@@ -1242,5 +1245,25 @@ impl Api {
                 _ = self.wake.notified() => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_idle_connection_does_not_block_the_callback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let waiting = tokio::spawn(async move { wait_for_code(&l, "good").await });
+        let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(b"GET /callback?code=abc&state=good HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.contains("Logged in"));
+        assert_eq!(waiting.await.unwrap().unwrap(), "abc");
     }
 }

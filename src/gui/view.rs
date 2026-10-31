@@ -280,7 +280,7 @@ pub fn draw_shape(ui: &mut Ui, shape: &music_display::diagram::Shape, color: Col
 
 pub fn annotations(ui: &mut Ui, m: &mut Model) {
     let mode = m.args.annotations_mode;
-    ui.heading(format!("Annotations · {}", mode.label()));
+    ui.heading(if m.args.panel_sources { format!("Annotations · {}", mode.label()) } else { "Annotations".to_string() });
     ui.label(RichText::new("experimental").small().weak());
     match &m.notes {
         Notes::Idle => return drop(ui.label(RichText::new("waiting for lyrics…").weak())),

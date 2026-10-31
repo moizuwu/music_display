@@ -50,7 +50,7 @@ pub fn full_date(s: &str) -> Option<String> {
     let ok = b[4] == b'-'
         && b[7] == b'-'
         && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
-    let (m, day) = (&d[5..7], &d[8..10]);
+    let (m, day) = (d.get(5..7)?, d.get(8..10)?);
     (ok && m != "00" && day != "00").then(|| d.to_string())
 }
 
@@ -81,6 +81,48 @@ fn rank(d: &str) -> (i32, std::cmp::Reverse<usize>) {
 
 fn lucene(s: &str) -> String {
     s.replace(['"', '\\'], " ")
+}
+
+/// Why a MusicBrainz request gave nothing: it asked us to slow down (503/429, no fault of the
+/// lookup), or it failed.
+#[derive(Debug, PartialEq)]
+pub(crate) enum MbErr {
+    Limited,
+    Failed,
+}
+
+/// MusicBrainz asks for at most one request a second; the year and genre lookups share this.
+const MB_GAP: Duration = Duration::from_millis(1100);
+static MB_LAST: tokio::sync::Mutex<Option<std::time::Instant>> = tokio::sync::Mutex::const_new(None);
+
+/// How long to wait before a request when the previous one started at `last`.
+fn mb_wait(last: Option<std::time::Instant>, now: std::time::Instant, gap: Duration) -> Duration {
+    last.map_or(Duration::ZERO, |t| gap.saturating_sub(now.saturating_duration_since(t)))
+}
+
+fn mb_status(st: reqwest::StatusCode) -> Result<(), MbErr> {
+    if st.is_success() {
+        Ok(())
+    } else if st == reqwest::StatusCode::SERVICE_UNAVAILABLE || st == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        Err(MbErr::Limited)
+    } else {
+        Err(MbErr::Failed)
+    }
+}
+
+/// A MusicBrainz GET, at least `MB_GAP` after the start of the previous one from anywhere in the app.
+pub(crate) async fn mb_get(c: &reqwest::Client, url: &str, q: &[(&str, &str)]) -> Result<Value, MbErr> {
+    {
+        let mut last = MB_LAST.lock().await;
+        let wait = mb_wait(*last, std::time::Instant::now(), MB_GAP);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let r = c.get(url).query(q).timeout(Duration::from_secs(12)).send().await.map_err(|_| MbErr::Failed)?;
+    mb_status(r.status())?;
+    r.json::<Value>().await.map_err(|_| MbErr::Failed)
 }
 
 async fn get_json(c: &reqwest::Client, url: &str, q: &[(&str, &str)]) -> Result<Value, ()> {
@@ -115,12 +157,13 @@ async fn mb_recording(
         lucene(title),
         lucene(artist)
     );
-    let v = get_json(
+    let v = mb_get(
         c,
         &format!("{MB}/recording/"),
         &[("query", &q), ("fmt", "json"), ("limit", "25")],
     )
-    .await?;
+    .await
+    .map_err(|_| ())?;
     Ok(earliest(&v, "recordings"))
 }
 
@@ -134,12 +177,13 @@ async fn mb_release_group(
         lucene(album),
         lucene(artist)
     );
-    let v = get_json(
+    let v = mb_get(
         c,
         &format!("{MB}/release-group/"),
         &[("query", &q), ("fmt", "json"), ("limit", "10")],
     )
-    .await?;
+    .await
+    .map_err(|_| ())?;
     Ok(earliest(&v, "release-groups"))
 }
 
@@ -168,7 +212,7 @@ async fn itunes(c: &reqwest::Client, title: &str, artist: &str) -> Result<Option
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_lowercase();
-            a.contains(&first_artist) && (t.contains(&tl) || tl.contains(&t))
+            !first_artist.trim().is_empty() && a.contains(&first_artist) && (t.contains(&tl) || tl.contains(&t))
         })
         .filter_map(|r| {
             r.get("releaseDate")
@@ -209,16 +253,12 @@ pub async fn resolve(
     let mut had_error = false;
     let mut found: Option<String> = None;
 
-    // MusicBrainz asks for ≤1 req/s — space the calls out.
-    let gap = Duration::from_millis(1100);
+    // (MusicBrainz asks for ≤1 req/s: `mb_get` spaces the calls out.)
     let mut artists = vec![artist.clone()];
     if first_artist != artist {
         artists.push(first_artist.clone());
     }
-    for (i, a) in artists.iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(gap).await;
-        }
+    for a in &artists {
         match mb_recording(&c, &title_c, a).await {
             Ok(Some(y)) => {
                 found = Some(y);
@@ -229,7 +269,6 @@ pub async fn resolve(
         }
     }
     if found.is_none() && !album_c.is_empty() {
-        tokio::time::sleep(gap).await;
         match mb_release_group(&c, &album_c, &first_artist).await {
             Ok(y) => found = y,
             Err(_) => had_error = true,
@@ -255,5 +294,24 @@ pub async fn resolve(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn musicbrainz_requests_are_spaced_and_a_limit_is_not_a_failure() {
+        let t = Instant::now();
+        assert_eq!(mb_wait(None, t, MB_GAP), Duration::ZERO);
+        assert_eq!(mb_wait(Some(t), t + Duration::from_millis(300), MB_GAP), Duration::from_millis(800));
+        assert_eq!(mb_wait(Some(t), t + Duration::from_secs(2), MB_GAP), Duration::ZERO);
+        assert!(MB_GAP >= Duration::from_millis(1100));
+        assert_eq!(mb_status(reqwest::StatusCode::SERVICE_UNAVAILABLE), Err(MbErr::Limited));
+        assert_eq!(mb_status(reqwest::StatusCode::TOO_MANY_REQUESTS), Err(MbErr::Limited));
+        assert_eq!(mb_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR), Err(MbErr::Failed));
+        assert_eq!(mb_status(reqwest::StatusCode::OK), Ok(()));
     }
 }

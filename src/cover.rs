@@ -3,6 +3,9 @@ use crate::util::{fnv1a, tmp_dir};
 use image::DynamicImage;
 use image::imageops::FilterType;
 
+/// Largest cover download accepted.
+const MAX_COVER: u64 = 20 * 1024 * 1024;
+
 async fn bytes(c: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     if let Some(p) = crate::util::path_from_url(url) {
         return tokio::fs::read(p).await.ok();
@@ -12,12 +15,20 @@ async fn bytes(c: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
         if let Ok(b) = tokio::fs::read(&path).await {
             return Some(b);
         }
-        let r = c.get(url).send().await.ok()?;
-        if !r.status().is_success() {
+        let mut r = c.get(url).send().await.ok()?;
+        if !r.status().is_success() || r.content_length().is_some_and(|n| n > MAX_COVER) {
             return None;
         }
-        let b = r.bytes().await.ok()?.to_vec();
-        let _ = tokio::fs::write(&path, &b).await;
+        let mut b = Vec::new();
+        while let Some(chunk) = r.chunk().await.ok()? {
+            b.extend_from_slice(&chunk);
+            if b.len() as u64 > MAX_COVER {
+                return None;
+            }
+        }
+        // Only a real image goes into the permanent cache (not a captive portal's HTML).
+        image::guess_format(&b).ok()?;
+        let _ = crate::util::write_safely(&path, &b);
         return Some(b);
     }
     // bare path
@@ -196,4 +207,13 @@ pub fn ascii_art(img: &DynamicImage, cols: u16, rows: u16) -> AsciiArt {
         })
         .collect();
     AsciiArt { cols, rows, cells }
+}
+
+#[cfg(test)]
+mod sniff_tests {
+    #[test]
+    fn html_is_not_an_image() {
+        assert!(image::guess_format(b"<html>sign in to the wifi</html>").is_err());
+        assert!(image::guess_format(b"\x89PNG\r\n\x1a\n").is_ok());
+    }
 }

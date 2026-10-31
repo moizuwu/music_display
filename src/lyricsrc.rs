@@ -23,17 +23,31 @@ impl Default for Extra {
     }
 }
 
-async fn get(c: &reqwest::Client, url: reqwest::Url) -> Option<String> {
-    let r = c
+/// A reply the site could not give for now (timeout, 429, 5xx): not an answer that there is nothing.
+fn transient(st: reqwest::StatusCode) -> bool {
+    st == reqwest::StatusCode::TOO_MANY_REQUESTS || st.is_server_error()
+}
+
+/// `shaky` is set when the request failed in a way that says nothing about the song.
+async fn get(c: &reqwest::Client, url: reqwest::Url, shaky: &mut bool) -> Option<String> {
+    let sent = c
         .get(url)
         .header(reqwest::header::USER_AGENT, UA)
         .header(reqwest::header::REFERER, "https://music.163.com/")
         .timeout(Duration::from_secs(8))
         .send()
-        .await
-        .ok()?;
-    r.status().is_success().then_some(())?;
-    r.text().await.ok()
+        .await;
+    let Ok(r) = sent else {
+        *shaky = true;
+        return None;
+    };
+    if !r.status().is_success() {
+        *shaky |= transient(r.status());
+        return None;
+    }
+    let body = r.text().await.ok();
+    *shaky |= body.is_none();
+    body
 }
 
 fn url(base: &str, segments: &[&str], query: &[(&str, &str)]) -> Option<reqwest::Url> {
@@ -50,14 +64,22 @@ fn first_artist(artist: &str) -> &str {
 }
 
 /// Try the sources one after the other: `("synced", LRC text)` or `("plain", text)`.
-pub async fn find(c: &reqwest::Client, x: &Extra, artist: &str, title: &str, length: f64) -> Option<(&'static str, String)> {
-    if let Some(hit) = netease(c, x.netease, artist, title, length).await {
-        return Some(hit);
+/// `Ok(None)` is a clean "nothing here"; `Err` that nothing was found but a site could not
+/// answer (timeout, 429, 5xx), so the miss must not be remembered.
+pub async fn find(c: &reqwest::Client, x: &Extra, artist: &str, title: &str, length: f64) -> Result<Option<(&'static str, String)>, &'static str> {
+    let mut shaky = false;
+    if let Some(hit) = netease(c, x.netease, artist, title, length, &mut shaky).await {
+        return Ok(Some(hit));
     }
-    if let Some(text) = ovh(c, x.ovh, artist, title).await {
-        return Some(("plain", text));
+    if let Some(text) = ovh(c, x.ovh, artist, title, &mut shaky).await {
+        return Ok(Some(("plain", text)));
     }
-    crate::genius::plain_lyrics(c, x.genius, artist, title).await.map(|t| ("plain", t))
+    match crate::genius::plain_lyrics(c, x.genius, artist, title).await {
+        Ok(Some(t)) => Ok(Some(("plain", t))),
+        Ok(None) if !shaky => Ok(None),
+        Ok(None) => Err("other lyric sites unreachable"),
+        Err(_) => Err("other lyric sites unreachable"),
+    }
 }
 
 /// A song of a NetEase search that is the one asked for: the title and one artist match, and
@@ -72,7 +94,7 @@ fn netease_pick(reply: &Value, artist: &str, title: &str, length: f64) -> Option
         let by = s.get("artists").and_then(Value::as_array).is_some_and(|a| {
             a.iter().filter_map(|x| x.get("name")?.as_str()).any(|n| {
                 let n = chords::norm(n);
-                !n.is_empty() && (n.contains(&want_a) || want_a.contains(&n) || chords::dice(&n, &want_a) >= 0.7)
+                !n.is_empty() && !want_a.is_empty() && (n.contains(&want_a) || want_a.contains(&n) || chords::dice(&n, &want_a) >= 0.7)
             })
         });
         let secs = s.get("duration").and_then(Value::as_f64).unwrap_or(0.0) / 1000.0;
@@ -81,11 +103,11 @@ fn netease_pick(reply: &Value, artist: &str, title: &str, length: f64) -> Option
     })
 }
 
-async fn netease(c: &reqwest::Client, base: &str, artist: &str, title: &str, length: f64) -> Option<(&'static str, String)> {
+async fn netease(c: &reqwest::Client, base: &str, artist: &str, title: &str, length: f64, shaky: &mut bool) -> Option<(&'static str, String)> {
     let q = format!("{} {}", first_artist(artist), crate::year::clean(title));
-    let found = get(c, url(base, &["api", "search", "get", "web"], &[("s", &q), ("type", "1"), ("offset", "0"), ("limit", "8"), ("total", "true")])?).await?;
+    let found = get(c, url(base, &["api", "search", "get", "web"], &[("s", &q), ("type", "1"), ("offset", "0"), ("limit", "8"), ("total", "true")])?, shaky).await?;
     let id = netease_pick(&serde_json::from_str(&found).ok()?, artist, title, length)?;
-    let body = get(c, url(base, &["api", "song", "lyric"], &[("id", &id), ("lv", "1"), ("kv", "1"), ("tv", "-1")])?).await?;
+    let body = get(c, url(base, &["api", "song", "lyric"], &[("id", &id), ("lv", "1"), ("kv", "1"), ("tv", "-1")])?, shaky).await?;
     let v: Value = serde_json::from_str(&body).ok()?;
     let lrc = v.pointer("/lrc/lyric")?.as_str()?;
     if crate::lyrics::parse_lrc(lrc).len() >= 4 {
@@ -95,8 +117,8 @@ async fn netease(c: &reqwest::Client, base: &str, artist: &str, title: &str, len
     }
 }
 
-async fn ovh(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Option<String> {
-    let body = get(c, url(base, &["v1", first_artist(artist), &crate::year::clean(title)], &[])?).await?;
+async fn ovh(c: &reqwest::Client, base: &str, artist: &str, title: &str, shaky: &mut bool) -> Option<String> {
+    let body = get(c, url(base, &["v1", first_artist(artist), &crate::year::clean(title)], &[])?, shaky).await?;
     let v: Value = serde_json::from_str(&body).ok()?;
     let text = v.get("lyrics")?.as_str()?;
     // (the service puts a "Paroles de la chanson …" line first on some songs)

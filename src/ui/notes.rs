@@ -9,7 +9,7 @@ pub(super) fn draw_annotations(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.theme.clone();
     let mode = app.args.annotations_mode;
     // the source is named in the body too; the title only carries it when there is room
-    let title = if area.width >= 30 { format!("annotations · {}", mode.label()) } else { "annotations".to_string() };
+    let title = if area.width >= 30 && app.args.panel_sources { format!("annotations · {}", mode.label()) } else { "annotations".to_string() };
     let block = panel(app, &title);
     let inner = block.inner(area).inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, area);

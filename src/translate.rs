@@ -265,6 +265,12 @@ pub async fn write_cache(path: &std::path::Path, lines: &[String], backend: &str
 }
 
 pub async fn lines(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -> Result<(Vec<String>, &'static str), String> {
+    lines_checked(c, cfg, lang, src).await.map(|(l, b, _)| (l, b))
+}
+
+/// [`lines`], plus whether some line failed and stayed untranslated: such a result is shown
+/// but must not be kept by [`store`] (the cache cannot tell it from a complete one).
+pub async fn lines_checked(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -> Result<(Vec<String>, &'static str, bool), String> {
     // legacy codes (`iw`, `zh-CN`) in the list meet the codes the services answer with
     let skip: Vec<String> = cfg.skip.iter().map(|s| base_code(s)).filter(|s| !s.is_empty()).collect();
     let cfg = &Cfg { skip: skip.clone(), ..cfg.clone() };
@@ -292,5 +298,5 @@ pub async fn lines(c: &reqwest::Client, cfg: &Cfg, lang: &str, src: &[String]) -
         });
     }
     let backend = if use_fallback.load(Ordering::Relaxed) { "libretranslate" } else { "google" };
-    Ok((out.into_iter().zip(src).map(|(o, s)| o.unwrap_or_else(|| s.clone())).collect(), backend))
+    Ok((out.into_iter().zip(src).map(|(o, s)| o.unwrap_or_else(|| s.clone())).collect(), backend, failed > 0))
 }

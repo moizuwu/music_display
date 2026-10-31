@@ -189,6 +189,10 @@ pub struct Ctl {
     /// holds older data than the push and is dropped.
     #[cfg(unix)]
     pushes: Arc<std::sync::atomic::AtomicU64>,
+    /// The player the last "any"/list poll showed; commands go to it, not to whichever
+    /// player playerctl would pick first.
+    #[cfg(unix)]
+    shown: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 /// Of several players' snapshots: the playing one, else the first one `wanted` lists (any
@@ -206,6 +210,17 @@ fn pick_player(all: Vec<Snapshot>, wanted: &[String]) -> Option<Snapshot> {
         .collect();
     all.sort_by_key(|(r, s)| (s.status != Status::Playing, *r));
     all.into_iter().next().map(|(_, s)| s)
+}
+
+/// Arguments that aim a command at `shown` when the base selection is "any" or a list;
+/// the base itself when it names one player or nothing is known.
+#[cfg(unix)]
+fn target_args(base: &[String], shown: Option<&str>) -> Vec<String> {
+    match (base.get(1), shown) {
+        (Some(p), _) if !p.contains(',') => base.to_vec(),
+        (_, Some(name)) if !name.is_empty() => vec!["-p".to_string(), name.to_string()],
+        _ => base.to_vec(),
+    }
 }
 
 #[cfg(unix)]
@@ -250,6 +265,7 @@ impl Ctl {
             switched: Arc::new(Notify::new()),
             modes: Arc::new(std::sync::RwLock::new((None, None))),
             pushes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            shown: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -258,8 +274,22 @@ impl Ctl {
         if let Ok(mut b) = self.base.write() {
             *b = player_args(&expand(player));
         }
+        if let Ok(mut s) = self.shown.write() {
+            *s = None;
+        }
         self.switched.notify_one();
         self.repoll.notify_one();
+    }
+
+    /// Like `cmd`, but aimed at the player the UI shows (see `target_args`).
+    fn target_cmd(&self) -> Command {
+        let base = self.base.read().map(|b| b.clone()).unwrap_or_default();
+        let shown = self.shown.read().ok().and_then(|s| s.clone());
+        let mut c = Command::new("playerctl");
+        c.args(target_args(&base, shown.as_deref()))
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        c
     }
 
     fn cmd(&self) -> Command {
@@ -272,7 +302,7 @@ impl Ctl {
 
     /// Fire-and-forget a playerctl command, then ask the poller for a fresh snapshot.
     pub fn send(&self, args: &[&str]) {
-        let mut c = self.cmd();
+        let mut c = self.target_cmd();
         c.args(args).stdout(Stdio::null());
         let notify = self.repoll.clone();
         tokio::spawn(async move {
@@ -307,12 +337,16 @@ impl Ctl {
         if !out.status.success() {
             return None;
         }
-        pick_player(String::from_utf8_lossy(&out.stdout).lines().filter_map(parse).collect(), &wanted)
+        let picked = pick_player(String::from_utf8_lossy(&out.stdout).lines().filter_map(parse).collect(), &wanted);
+        if let Ok(mut s) = self.shown.write() {
+            *s = picked.as_ref().map(|p| p.player.clone());
+        }
+        picked
     }
 
     /// One `playerctl <cmd>` read; `None` if it failed (no player, or unsupported).
     async fn read_mode(&self, cmd: &str) -> Option<String> {
-        let out = self.cmd().arg(cmd).output().await.ok()?;
+        let out = self.target_cmd().arg(cmd).output().await.ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -476,6 +510,18 @@ mod pick_tests {
     fn s(player: &str, status: &str, title: &str) -> Snapshot {
         let line = format!("{status}\x1f0\x1f{title}\x1fBand\x1fAlbum\x1f200000000\x1f\x1f1\x1f1\x1f\x1f0.5\x1f\x1fid\x1f{player}\x1f[]");
         parse(&line).unwrap()
+    }
+
+    #[test]
+    fn commands_target_the_shown_player() {
+        let none: Vec<String> = vec![];
+        let list = vec!["-p".to_string(), "vlc,mpv".to_string()];
+        let one = vec!["-p".to_string(), "spotify".to_string()];
+        assert_eq!(target_args(&none, Some("mpv")), ["-p", "mpv"]);
+        assert_eq!(target_args(&list, Some("mpv")), ["-p", "mpv"]);
+        assert_eq!(target_args(&one, Some("mpv")), one);
+        assert_eq!(target_args(&none, None), none);
+        assert_eq!(target_args(&list, None), list);
     }
 
     #[test]

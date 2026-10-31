@@ -65,6 +65,7 @@ pub const KEYS: &[Key] = &[
     k!("lyrics_fallback", Kind::Bool, "lyrics_fallback"),
     k!("annotations", Kind::Bool, "annotations"),
     k!("annotations_mode", Kind::Choice(crate::cli::AnnotationMode::NAMES), "annotations_mode"),
+    k!("panel_sources", Kind::Bool, "panel_sources"),
     k!("annotation_max_chars", Kind::Int(0, 4000), "annotation_max_chars"),
     k!("annotation_scroll", Kind::Choice(crate::cli::AnnotationScroll::NAMES), "annotation_scroll"),
     k!("genius_token", Kind::Text, "genius_token"),
@@ -174,6 +175,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "lyrics_fallback" => args.lyrics_fallback = b(),
         "annotations" => args.annotations = b(),
         "annotations_mode" => args.annotations_mode = crate::cli::AnnotationMode::parse(&st()).unwrap_or_default(),
+        "panel_sources" => args.panel_sources = b(),
         "annotation_max_chars" => args.annotation_max_chars = i() as usize,
         "annotation_scroll" => args.annotation_scroll = crate::cli::AnnotationScroll::parse(&st()).unwrap_or_default(),
         "genius_token" => args.genius_token = st(),
@@ -188,7 +190,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "minimal_view" => args.minimal = b(),
         "mouse" => args.no_mouse = !b(),
         "spotify" => args.spotify = b(),
-        "spotify_client_id" => args.spotify_client_id = Some(st()),
+        "spotify_client_id" => args.spotify_client_id = Some(st()).filter(|s| !s.is_empty()),
         "kill_spotifyd_on_exit" => args.no_kill_spotifyd = !b(),
         "spotify_device" => args.spotify_device = st(),
         "use_spotifyd" => args.use_spotifyd = b(),
@@ -442,6 +444,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("translate_engine", q(args.translate_engine.name()));
     line("annotations", args.annotations.to_string());
     line("annotations_mode", q(args.annotations_mode.name()));
+    line("panel_sources", args.panel_sources.to_string());
     line("annotation_max_chars", args.annotation_max_chars.to_string());
     line("annotation_scroll", q(args.annotation_scroll.name()));
     if args.genius_token.is_empty() {

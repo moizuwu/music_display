@@ -108,6 +108,9 @@ pub fn parse_key(s: &str) -> Result<KeyCode, String> {
         "pagedown" | "pgdn" | "pgdown" => KeyCode::PageDown,
         "home" => KeyCode::Home,
         "end" => KeyCode::End,
+        "delete" | "del" => KeyCode::Delete,
+        "insert" | "ins" => KeyCode::Insert,
+        "backtab" => KeyCode::BackTab,
         f if f.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=12).contains(&n)) => {
             KeyCode::F(f[1..].parse().unwrap_or(1))
         }
@@ -230,8 +233,14 @@ impl Keymap {
     }
 
     /// Back to the built-in keys of `action`.
-    pub fn reset(&mut self, action: Action) {
-        self.set_codes(action, default_codes(action).to_vec());
+    /// Fails, changing nothing, when another action has taken one of those keys meanwhile.
+    pub fn reset(&mut self, action: Action) -> Result<(), String> {
+        let defaults = default_codes(action).to_vec();
+        if let Some(c) = defaults.iter().find(|c| self.entries.iter().any(|e| e.action != action && e.codes.contains(c))) {
+            return Err(format!("{} is used by another action; rebind that one first", key_label(*c)));
+        }
+        self.set_codes(action, defaults);
+        Ok(())
     }
 
     fn set_codes(&mut self, action: Action, codes: Vec<KeyCode>) {

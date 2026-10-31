@@ -104,6 +104,8 @@ pub struct TitleIn<'a> {
     pub backend: &'a str,
     pub ai_model: &'a str,
     pub lang: &'a str,
+    /// Name the source in the heading; off = plain "Lyrics" once translated.
+    pub sources: bool,
 }
 
 /// The lyrics panel's heading: browsing hint, translation backend, "translating…" or why not.
@@ -112,6 +114,9 @@ pub fn title(i: &TitleIn) -> String {
         return "Lyrics · browsing — End to follow".into();
     }
     if i.mode == TranslateMode::Off {
+        return "Lyrics".into();
+    }
+    if i.shown && !i.sources {
         return "Lyrics".into();
     }
     if i.shown {
@@ -216,7 +221,11 @@ impl Model {
             // say so once, then ask again every HOLD_RETRY_SECS
             let mut told = false;
             for attempt in 1..=HOLD_RETRIES {
-                let mut r = translate::lines(&c, &cfg, &lang, &lines).await;
+                let mut degraded = false;
+                let mut r = translate::lines_checked(&c, &cfg, &lang, &lines).await.map(|(l, b, d)| {
+                    degraded = d;
+                    (l, b)
+                });
                 if r.as_ref().is_err_and(|e| translate::is_held(e)) {
                     if attempt < HOLD_RETRIES {
                         if !told {
@@ -229,7 +238,7 @@ impl Model {
                     }
                     r = Err(translate::HELD_FINAL.to_string());
                 }
-                if let (true, Ok((done, backend))) = (keep, &r) {
+                if let (true, false, Ok((done, backend))) = (keep, degraded, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
                 let _ = tx.send(AppEvent::Translated { key, lang, lines: r
@@ -345,10 +354,13 @@ mod tests {
     #[test]
     fn the_title_says_what_the_translation_is_doing() {
         let idle = TrState::Idle;
-        let mut i = TitleIn { browsing: false, mode: TranslateMode::Translated, shown: false, state: &idle, backend: "google", ai_model: "m", lang: "en" };
+        let mut i = TitleIn { browsing: false, mode: TranslateMode::Translated, shown: false, state: &idle, backend: "google", ai_model: "m", lang: "en", sources: true };
         assert_eq!(title(&i), "Lyrics · translating…");
         i.shown = true;
         assert_eq!(title(&i), "Lyrics · translated (en)");
+        i.sources = false;
+        assert_eq!(title(&i), "Lyrics");
+        i.sources = true;
         i.mode = TranslateMode::Both;
         assert_eq!(title(&i), "Lyrics · original + translated (en)");
         i.backend = "AI llama";

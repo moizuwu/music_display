@@ -5,9 +5,9 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     if app.browse_expired() {
         app.browse = 0.0;
     }
-    let title = if app.browse != 0.0 {
+    let mut title = if app.browse != 0.0 {
         "lyrics · browsing — End to follow".to_string()
-    } else if !app.translate_on {
+    } else if !app.translate_on || (shown && !app.args.panel_sources) {
         "lyrics".to_string()
     } else {
         use crate::app::TranslateState as TS;
@@ -31,6 +31,9 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             _ => "lyrics · translating…".to_string(),
         }
     };
+    if app.offset != 0.0 {
+        title.push_str(&format!(" · offset {:+.1}s", app.offset));
+    }
     let block = panel(app, &title);
     let inner = block.inner(area).inner(ratatui::layout::Margin {
         horizontal: 2 + app.args.lyric_pad,

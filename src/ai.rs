@@ -268,6 +268,11 @@ fn reply_text(p: Provider, v: &Value) -> Option<String> {
     t.and_then(Value::as_str).map(str::to_string)
 }
 
+/// The variable name for an error text; a pasted key (not a valid name) is never echoed.
+fn env_name(n: &str) -> &str {
+    if !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { n } else { "(not a valid name)" }
+}
+
 fn redact(s: &str, key: &str) -> String {
     if key.len() >= 4 { s.replace(key, "***") } else { s.to_string() }
 }
@@ -342,7 +347,7 @@ pub async fn translate(c: &reqwest::Client, cfg: &Cfg, song: &Song) -> Result<(V
     }
     let key = std::env::var(&cfg.api_key_env).unwrap_or_default();
     if cfg.key_required() && key.trim().is_empty() {
-        return Err(format!("environment variable {} is not set", cfg.api_key_env));
+        return Err(format!("environment variable {} is not set", env_name(&cfg.api_key_env)));
     }
     let key = key.trim().to_string();
     if breaker_open() {
@@ -368,7 +373,7 @@ pub async fn complete(c: &reqwest::Client, cfg: &Cfg, system: &str, user: &str) 
     }
     let key = std::env::var(&cfg.api_key_env).unwrap_or_default();
     if cfg.key_required() && key.trim().is_empty() {
-        return Err(format!("environment variable {} is not set", cfg.api_key_env));
+        return Err(format!("environment variable {} is not set", env_name(&cfg.api_key_env)));
     }
     if breaker_open() {
         return Err("AI paused after repeated failures".into());
