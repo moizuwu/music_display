@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 /// Every field we need in one playerctl call, separated by ASCII unit separator (0x1f).
 #[cfg_attr(windows, allow(dead_code))]
-const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}\x1f{{xesam:genre}}";
+const FORMAT: &str = "{{status}}\x1f{{position}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:trackNumber}}\x1f{{xesam:discNumber}}\x1f{{xesam:contentCreated}}\x1f{{volume}}\x1f{{xesam:url}}\x1f{{mpris:trackid}}\x1f{{playerName}}\x1f{{xesam:genre}}\x1f{{xesam:albumArtist}}";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -79,6 +79,8 @@ pub struct Snapshot {
     pub position: f64, // seconds
     pub title: String,
     pub artist: String,
+    /// The artist the album belongs to (`xesam:albumArtist`); empty when the player has none.
+    pub album_artist: String,
     pub album: String,
     pub length: f64, // seconds
     pub art_url: String,
@@ -146,6 +148,7 @@ pub fn parse(line: &str) -> Option<Snapshot> {
         position: us(f[1]),
         title,
         artist: f[3].trim().to_string(),
+        album_artist: f.get(15).map_or(String::new(), |a| a.trim().to_string()),
         album: f[4].trim().to_string(),
         length: us(f[5]),
         art_url: f[6].trim().to_string(),
@@ -522,6 +525,15 @@ mod pick_tests {
         assert_eq!(target_args(&one, Some("mpv")), one);
         assert_eq!(target_args(&none, None), none);
         assert_eq!(target_args(&list, None), list);
+    }
+
+    #[test]
+    fn the_album_artist_is_kept_apart_from_the_artist() {
+        let line = "Playing\x1f0\x1fSong\x1fBand, Guest\x1fAlbum\x1f200000000\x1f\x1f1\x1f1\x1f\x1f0.5\x1f\x1fid\x1fvlc\x1f[]\x1fBand";
+        let s = parse(line).unwrap();
+        assert_eq!((s.artist.as_str(), s.album_artist.as_str()), ("Band, Guest", "Band"));
+        // a player that reports no album artist gives an empty one
+        assert_eq!(self::s("vlc", "Playing", "T").album_artist, "");
     }
 
     #[test]

@@ -624,6 +624,14 @@ impl Spot {
         self.cmd(cmd);
     }
 
+    /// Play the whole level on screen (an album, playlist, artist or Liked Songs) from its start.
+    pub fn play_level(&mut self) {
+        let ctx = self.lib.level().uri.clone();
+        if !ctx.is_empty() {
+            self.cmd(Cmd::Play { ctx, track: String::new() });
+        }
+    }
+
     pub fn queue_item(&mut self, i: usize) {
         if let Some(it) = self.track_at(i) {
             self.cmd(Cmd::Queue(it.uri));
@@ -690,6 +698,7 @@ enum Act {
     Reload,
     Search,
     Play(usize),
+    PlayAll,
     Open(usize),
     Queue(usize),
     Like(usize),
@@ -824,6 +833,9 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
                 acts.push(Act::Back);
             }
             let l = s.lib.level();
+            if !picking && !l.uri.is_empty() && ui.button("▶ play").on_hover_text("play all of it from the start").clicked() {
+                acts.push(Act::PlayAll);
+            }
             ui.strong(&l.title);
             if !l.summary.is_empty() {
                 ui.label(RichText::new(&l.summary).weak());
@@ -918,6 +930,7 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
             Act::Reload => m.spot.reload_level(),
             Act::Search => m.spot.run_search(),
             Act::Play(i) => m.spot.play_item(i),
+            Act::PlayAll => m.spot.play_level(),
             Act::Open(i) => {
                 if let Some(it) = m.spot.lib.level().items.get(i).cloned() {
                     m.spot.open_item(it);
@@ -1068,6 +1081,7 @@ mod tests {
         s.on_reply(Reply::Remote(Ok(r)));
         let snap = s.remote_snapshot().unwrap();
         assert_eq!((snap.title.as_str(), snap.player.as_str()), ("Zed", spotify::REMOTE));
+        assert_eq!((snap.artist.as_str(), snap.album_artist.as_str()), ("Q", "WA"), "the song's artist and the album's");
         s.on_reply(Reply::Remote(Err("Spotify Premium is needed for this".into())));
         assert_eq!(s.note.take().as_deref(), Some("Spotify Premium is needed for this"));
     }
@@ -1125,5 +1139,16 @@ mod tests {
         s.play_item(0);
         assert!(matches!(next(&mut rx).await, Reply::Done(Ok(_))));
         assert!(log.lock().unwrap().iter().any(|l| l.starts_with("PUT /me/player/play")));
+        // the play button of a page (album, artist, playlist, Liked Songs) plays the whole page
+        let plays = || log.lock().unwrap().iter().filter(|l| l.starts_with("PUT /me/player/play")).count();
+        let before = plays();
+        s.lib.stack.push(Level { uri: "spotify:artist:x".into(), ..Default::default() });
+        s.play_level();
+        assert!(matches!(next(&mut rx).await, Reply::Done(Ok(_))));
+        assert_eq!(plays(), before + 1);
+        // a list with no context of its own (search results) has nothing to play as a whole
+        s.lib.stack.push(Level::default());
+        s.play_level();
+        assert_eq!(plays(), before + 1);
     }
 }

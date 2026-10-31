@@ -206,6 +206,7 @@ mod winrt {
             position,
             title,
             artist,
+            album_artist: props.AlbumArtist().map(|a| a.to_string()).unwrap_or_default(),
             album: props.AlbumTitle().ok()?.to_string(),
             length,
             art_url: cover(&props, &key),

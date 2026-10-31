@@ -43,6 +43,7 @@ pub fn window(
             look.paint_background(ui, g);
             look.paint_effects(ui, g);
             egui::CentralPanel::default().frame(style::gutter(g)).show(ui, |ui| style::card(ui, g, |ui| add(ui, look)));
+            super::keys::relay_from_window(ui.ctx());
         }
         if ui.input(|i| i.viewport().close_requested()) {
             *open = false;

@@ -46,6 +46,7 @@ items! {
     MetaField {
         Title => "title",
         Artist => "artist",
+        AlbumArtist => "album_artist",
         Album => "album",
         TrackNo => "track_no",
         Release => "release",
@@ -117,6 +118,7 @@ impl MetaField {
         match self {
             Self::Title => "Track",
             Self::Artist => "Artist",
+            Self::AlbumArtist => "Album artist",
             Self::Album => "Album",
             Self::TrackNo => "Track No",
             Self::Release => "Release",
@@ -598,10 +600,10 @@ mod tests {
         // the cover on top, the track information under it
         assert_eq!(l.now_playing(), vec![PanelId::Cover, PanelId::Metadata, PanelId::Controls]);
         assert!(l.cava_under_lyrics, "cava goes below the lyrics unless asked otherwise");
-        assert_eq!(l.fields.visible().count(), 10);
+        assert_eq!(l.fields.visible().count(), 11);
         // Album can be moved above Title
         let mut f = l.fields.clone();
-        assert!(f.shift(MetaField::Album, -2));
+        assert!(f.shift(MetaField::Album, -3));
         assert_eq!(f.items[0].0, MetaField::Album);
         assert!(!f.shift(MetaField::Album, -1), "already first");
     }

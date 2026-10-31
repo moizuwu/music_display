@@ -37,6 +37,8 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
                     _ => s.title.clone(),
                 },
                 MetaField::Artist => s.artist.clone(),
+                // only when the album belongs to somebody else than the song's own artists
+                MetaField::AlbumArtist => Some(s.album_artist.clone()).filter(|a| !a.is_empty() && *a != s.artist)?,
                 MetaField::Album => s.album.clone(),
                 MetaField::TrackNo => format!(
                     "{:02}-{}",
