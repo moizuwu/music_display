@@ -142,7 +142,7 @@ pub fn best_hit(reply: &Value, artist: &str, title: &str) -> Option<String> {
         );
         let t = chords::dice(&want_t, &song);
         let artist_ok =
-            !art.is_empty() && (art.contains(&want_a) || want_a.contains(&art) || chords::dice(&want_a, &art) >= 0.7);
+            !art.is_empty() && !want_a.is_empty() && (art.contains(&want_a) || want_a.contains(&art) || chords::dice(&want_a, &art) >= 0.7);
         let path = match (text("path"), text("url")) {
             ("", "") => continue,
             ("", u) => u.split_once("://").and_then(|(_, h)| h.find('/').map(|i| h[i..].to_string())).unwrap_or_default(),
@@ -237,11 +237,22 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
 }
 
 /// The plain lyrics of the Genius song page for this song (section headers dropped), for when
-/// no other source has them. `None` when the song is not found or the page has too little text.
-pub async fn plain_lyrics(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Option<String> {
+/// no other source has them. `Ok(None)` when the song is not found or the page has too little
+/// text; `Err` when Genius could not answer for now (network, 429, 5xx).
+pub async fn plain_lyrics(c: &reqwest::Client, base: &str, artist: &str, title: &str) -> Result<Option<String>, String> {
+    // an answer that is a refusal (404, 403 …) says nothing will change soon; the rest may
+    let held = |e: String| if e.starts_with("HTTP 4") && !e.starts_with("HTTP 429") { None } else { Some(e) };
     let q = format!("{} {}", artist.split(", ").next().unwrap_or(artist), crate::year::clean(title));
-    let reply: Value = serde_json::from_str(&get(c, &format!("{base}/api/search/multi"), &[("q", &q)]).await.ok()?).ok()?;
-    let page = get(c, &format!("{base}{}", best_hit(&reply, artist, title)?), &[]).await.ok()?;
+    let body = match get(c, &format!("{base}/api/search/multi"), &[("q", &q)]).await {
+        Ok(b) => b,
+        Err(e) => return held(e).map_or(Ok(None), Err),
+    };
+    let Some(reply) = serde_json::from_str::<Value>(&body).ok() else { return Ok(None) };
+    let Some(hit) = best_hit(&reply, artist, title) else { return Ok(None) };
+    let page = match get(c, &format!("{base}{hit}"), &[]).await {
+        Ok(p) => p,
+        Err(e) => return held(e).map_or(Ok(None), Err),
+    };
     let text = containers(&page).into_iter().map(text_of).collect::<Vec<_>>().join("\n");
     let lines: Vec<&str> = text
         .lines()
@@ -249,7 +260,7 @@ pub async fn plain_lyrics(c: &reqwest::Client, base: &str, artist: &str, title: 
         .filter(|l| !(l.starts_with('[') && l.ends_with(']')))
         .collect();
     let text = lines.join("\n").trim().to_string();
-    (text.lines().filter(|l| !l.trim().is_empty()).count() >= 4).then_some(text)
+    Ok((text.lines().filter(|l| !l.trim().is_empty()).count() >= 4).then_some(text))
 }
 
 /// Lookup for the app: any failure just means no member tags.

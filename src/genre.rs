@@ -1,7 +1,6 @@
 use crate::util::{cache_dir, fnv1a, now_secs};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
 
 const MB: &str = "https://musicbrainz.org/ws/2";
 /// Negative results are re-checked after this many seconds.
@@ -198,23 +197,16 @@ pub async fn lookup(client: &reqwest::Client, artist: &str, title: &str) -> Opti
     }
 
     let q = format!("recording:\"{}\" AND artist:\"{}\"", lucene(&title_c), lucene(first_artist));
-    let reply = async {
-        let r = client
-            .get(format!("{MB}/recording/"))
-            .query(&[("query", q.as_str()), ("fmt", "json"), ("limit", "10")])
-            .timeout(Duration::from_secs(12))
-            .send()
-            .await
-            .map_err(|_| ())?;
-        if !r.status().is_success() {
-            return Err(());
+    let reply =
+        crate::year::mb_get(client, &format!("{MB}/recording/"), &[("query", q.as_str()), ("fmt", "json"), ("limit", "10")]).await;
+    let v = match reply {
+        Ok(v) => v,
+        // asked to slow down: not cached, and no strike towards the breaker
+        Err(crate::year::MbErr::Limited) => return None,
+        Err(crate::year::MbErr::Failed) => {
+            record_fail();
+            return None;
         }
-        r.json::<Value>().await.map_err(|_| ())
-    }
-    .await;
-    let Ok(v) = reply else {
-        record_fail();
-        return None;
     };
     FAILS.store(0, Ordering::Relaxed);
     let genres = rank_musicbrainz(&tags_of(&v));

@@ -335,8 +335,10 @@ pub fn help_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::
                 });
             }
             if let Some(a) = reset {
-                m.ux.keys.reset(a);
-                m.ux.key_note = Some(m.save_key(a));
+                m.ux.key_note = Some(match m.ux.keys.reset(a) {
+                    Ok(()) => m.save_key(a),
+                    Err(e) => e,
+                });
             }
             ui.add_space(4.0);
             ui.heading("Mouse");

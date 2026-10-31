@@ -82,9 +82,9 @@ impl Model {
 
     // ── cava ──
 
-    /// Shown, and not hidden by the minimal view.
+    /// Shown, and not hidden by the minimal view (a popped-out window is not part of that view).
     pub fn cava_wanted(&self) -> bool {
-        self.layout.panels.shown(PanelId::Cava) && !self.x.minimal
+        self.layout.panels.shown(PanelId::Cava) && (!self.x.minimal || self.gui.popped.iter().any(|p| p == PanelId::Cava.id()))
     }
 
     /// Start or stop the cava process to match what is shown (called every frame; cheap).
@@ -309,6 +309,9 @@ mod tests {
         // the minimal view hides it, an error leaves the note and stops restarts
         m.set_minimal(true);
         assert!(!m.cava_wanted());
+        m.gui.popped.push(PanelId::Cava.id().to_string());
+        assert!(m.cava_wanted(), "a window of its own is not part of the minimal view");
+        m.gui.popped.clear();
         m.set_minimal(false);
         m.apply(AppEvent::CavaError("cava not found".into()));
         assert!(m.x.cava_bars.is_empty() && m.x.cava_failed);

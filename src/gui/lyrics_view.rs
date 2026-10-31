@@ -221,6 +221,7 @@ pub fn lyrics(ui: &mut Ui, m: &mut Model) {
         backend: &m.translate_backend,
         ai_model: &m.args.ai_model,
         lang: &m.args.translate_lang,
+        sources: m.args.panel_sources,
     });
     ui.horizontal(|ui| {
         ui.heading(title);

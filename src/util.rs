@@ -87,11 +87,42 @@ pub fn cache_dir() -> PathBuf {
     d
 }
 
-/// `/tmp/music_display` for downloaded cover art.
+/// `/tmp/music_display` for downloaded cover art (mode 0700 on unix).
 pub fn tmp_dir() -> PathBuf {
     let d = std::env::temp_dir().join("music_display");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d);
+    }
+    #[cfg(not(unix))]
     let _ = std::fs::create_dir_all(&d);
     d
+}
+
+/// Write `data` to `path` without following a pre-planted symlink: the bytes go to a
+/// fresh, uniquely named sibling (`create_new` refuses existing files and links) which is
+/// then renamed over `path`, replacing whatever was there instead of writing through it.
+pub fn write_safely(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let r = f.write_all(data).and_then(|()| f.flush());
+    drop(f);
+    match r.and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Replace a leading $HOME with `~`.
@@ -118,7 +149,8 @@ pub fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            // slice the bytes: a `&str` slice could cut a multibyte character
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
@@ -152,4 +184,23 @@ pub fn testing() -> bool {
 #[doc(hidden)]
 pub fn enter_test_mode() {
     TESTING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(test, unix))]
+mod safe_write_tests {
+    use super::*;
+
+    #[test]
+    fn write_safely_replaces_a_planted_symlink_instead_of_following_it() {
+        let d = std::env::temp_dir().join(format!("md-safe-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let victim = d.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let target = d.join("cache");
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+        write_safely(&target, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

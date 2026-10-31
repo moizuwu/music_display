@@ -49,15 +49,6 @@ pub(super) fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(" ◆ ", Style::new().fg(th.primary())),
         Span::styled(source, dim),
-        Span::styled("  │  ", Style::new().fg(th.fade(0.7))),
-        Span::styled(
-            format!("offset {:+.1}s", app.offset),
-            if app.offset != 0.0 {
-                Style::new().fg(th.primary())
-            } else {
-                dim
-            },
-        ),
     ];
     if let Some(c) = chords_info {
         spans.push(Span::styled("  │  ", Style::new().fg(th.fade(0.7))));

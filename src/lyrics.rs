@@ -306,7 +306,9 @@ pub(crate) fn names_title(name: Option<&str>, title: &str) -> bool {
     let Some(name) = name.filter(|n| !n.trim().is_empty()) else { return true };
     let norm = |s: &str| crate::util::normalize_track(&crate::year::base_title(s));
     let (a, b) = (norm(name), norm(title));
-    a.is_empty() || b.is_empty() || a.contains(&b) || b.contains(&a)
+    // whole words: "Gold" is not "Go"
+    let within = |long: &str, short: &str| format!(" {long} ").contains(&format!(" {short} "));
+    a.is_empty() || b.is_empty() || within(&a, &b) || within(&b, &a)
 }
 
 async fn search(
@@ -538,7 +540,11 @@ pub async fn fetch_with(
     let mut elsewhere = false;
     if result.is_none() {
         if let Some(x) = policy.extra {
-            result = crate::lyricsrc::find(c, &x, artist, title, length).await;
+            match crate::lyricsrc::find(c, &x, artist, title, length).await {
+                Ok(r) => result = r,
+                // a site that could not answer is no "nothing found": say so, cache nothing
+                Err(w) => note(w, &mut retries),
+            }
             elsewhere = result.is_some();
         }
     }
@@ -594,6 +600,8 @@ mod tests {
         assert!(names_title(Some("Into The Sun (Remastered)"), "Into The Sun"));
         assert!(names_title(None, "My Universe"));
         assert!(!names_title(Some("Into The Sun"), "My Universe"));
+        assert!(!names_title(Some("Gold"), "Go"));
+        assert!(names_title(Some("Go Go Go"), "Go"));
     }
 
     #[test]

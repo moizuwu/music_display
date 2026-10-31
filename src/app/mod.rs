@@ -1125,7 +1125,11 @@ impl App {
             // say so once, then ask again every HOLD_RETRY_SECS
             let mut told = false;
             for attempt in 1..=HOLD_RETRIES {
-                let mut r = translate::lines(&c, &cfg, &lang, &lines).await;
+                let mut degraded = false;
+                let mut r = translate::lines_checked(&c, &cfg, &lang, &lines).await.map(|(l, b, d)| {
+                    degraded = d;
+                    (l, b)
+                });
                 if r.as_ref().is_err_and(|e| translate::is_held(e)) {
                     if attempt < HOLD_RETRIES {
                         if !told {
@@ -1138,7 +1142,7 @@ impl App {
                     }
                     r = Err(translate::HELD_FINAL.to_string());
                 }
-                if let (true, Ok((done, backend))) = (keep, &r) {
+                if let (true, false, Ok((done, backend))) = (keep, degraded, &r) {
                     translate::store(&lang, &skip, &lines, done, backend).await;
                 }
                 let _ = tx.send(AppEvent::Translated { key, lang, lines: r
@@ -1366,6 +1370,7 @@ impl App {
             Setting::LyricsFallback => onoff(self.args.lyrics_fallback),
             Setting::Annotations => onoff(self.annotations_shown()),
             Setting::AnnotationsMode => format!("< {} >", self.args.annotations_mode.name()),
+            Setting::PanelSources => onoff(self.args.panel_sources),
             Setting::AnnotationMaxChars => match self.args.annotation_max_chars {
                 0 => "< whole note >".into(),
                 n => format!("< {n} characters >"),
@@ -1540,6 +1545,7 @@ impl App {
             Setting::GenreLookup => self.args.genre_lookup = !self.args.genre_lookup,
             Setting::LyricsFallback => self.args.lyrics_fallback = !self.args.lyrics_fallback,
             Setting::Annotations => self.toggle_annotations(),
+            Setting::PanelSources => self.args.panel_sources = !self.args.panel_sources,
             Setting::AnnotationsMode => {
                 let mut m = self.args.annotations_mode.next();
                 if dir < 0 {
@@ -1706,6 +1712,7 @@ impl App {
             ("lyrics_fallback", B(self.args.lyrics_fallback)),
             ("annotations", B(self.annotations_shown())),
             ("annotations_mode", S(self.args.annotations_mode.name().to_string())),
+            ("panel_sources", B(self.args.panel_sources)),
             ("annotation_max_chars", I(self.args.annotation_max_chars as i64)),
             ("annotation_scroll", S(self.args.annotation_scroll.name().to_string())),
             ("genius_token", S(self.args.genius_token.clone())),
@@ -1748,7 +1755,8 @@ impl App {
             ("spotify_queue_tab", B(!self.args.no_spotify_queue_tab)),
         ]
         .into_iter()
-        .chain(self.args.spotify_client_id.clone().map(|id| ("spotify_client_id", S(id))))
+        // cleared = an empty string, so the old ID in the file is overwritten
+        .chain([("spotify_client_id", S(self.args.spotify_client_id.clone().unwrap_or_default()))])
         .collect()
     }
 
@@ -2253,8 +2261,10 @@ impl App {
                 ed.note = None;
             }
             KeyCode::Backspace | KeyCode::Delete => {
-                self.keys.reset(action);
-                ed.note = Some(self.save_key(action));
+                ed.note = Some(match self.keys.reset(action) {
+                    Ok(()) => self.save_key(action),
+                    Err(e) => e,
+                });
             }
             KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('?') => {
                 return; // back to the help

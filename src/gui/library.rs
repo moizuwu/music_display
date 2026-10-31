@@ -774,7 +774,9 @@ pub fn key(m: &mut Model, code: crossterm::event::KeyCode) -> bool {
         K::Tab => {
             let tabs = m.spot.lib.visible_tabs();
             let at = tabs.iter().position(|t| *t == m.spot.lib.tab).unwrap_or(0);
-            m.spot.switch_tab(tabs[(at + 1) % tabs.len()]);
+            if let Some(next) = tabs.get((at + 1) % tabs.len().max(1)) {
+                m.spot.switch_tab(*next);
+            }
             return true;
         }
         _ => return false,

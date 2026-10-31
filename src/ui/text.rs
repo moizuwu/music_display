@@ -158,6 +158,10 @@ pub(super) fn chord_rows(line: &str, cs: &[(usize, String)], width: usize, tr: i
     let norm = line.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = norm.chars().collect();
     let ranges = wrap_ranges(&norm, width);
+    if ranges.is_empty() {
+        // no room at all: the line, without chords
+        return vec![(norm, None)];
+    }
     let mut per_row: Vec<Vec<(usize, String)>> = vec![Vec::new(); ranges.len()];
     for (c, name) in cs {
         let r = ranges.iter().rposition(|(s, _)| *s <= *c).unwrap_or(0);

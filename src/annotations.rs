@@ -160,7 +160,7 @@ pub fn pick_song(v: &Value, artist: &str, title: &str) -> Option<u64> {
         .find(|r| {
             let t = norm(&crate::year::base_title(r["title"].as_str().unwrap_or("")));
             let a = norm(r.pointer("/primary_artist/name").and_then(Value::as_str).unwrap_or(""));
-            t == want_title && (a.contains(&want_artist) || want_artist.contains(&a)) && !a.is_empty()
+            t == want_title && !want_artist.is_empty() && (a.contains(&want_artist) || want_artist.contains(&a)) && !a.is_empty()
         })
         .and_then(|r| r["id"].as_u64())
 }
@@ -536,6 +536,7 @@ mod tests {
         assert_eq!(pick_song(&v, "Adele", "Rolling in the Deep"), None);
         assert_eq!(pick_song(&v, "Nobody", "Hello"), None);
         assert_eq!(pick_song(&json!({}), "a", "b"), None);
+        assert_eq!(pick_song(&v, "", "Hello"), None, "no artist wanted matches no artist");
     }
 
     #[test]

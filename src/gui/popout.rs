@@ -46,7 +46,15 @@ impl Gui {
             }
         }
         let t = self.m.gui.write();
-        self.m.save_settings(&[("gui", toml::Value::Table(t))]);
+        let mut keys = vec![("gui", toml::Value::Table(t))];
+        if self.is_popped(id) {
+            // what was switched on to fill the window stays on at the next start
+            self.m.save_layout();
+            if id == PanelId::Cava {
+                keys.push(("cava", true.into()));
+            }
+        }
+        self.m.save_settings(&keys);
     }
 
     /// Draw every popped-out panel in its window; a window closed by its button docks the panel.

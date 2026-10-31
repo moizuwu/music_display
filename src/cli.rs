@@ -466,6 +466,11 @@ pub struct Args {
     #[arg(long, value_enum, default_value = "genius", value_name = "MODE")]
     pub annotations_mode: AnnotationMode,
 
+    /// Name the source in the lyrics and annotations panel titles ("translated by gemini-2.5-flash",
+    /// "Genius + AI"); off = plain "Lyrics" and "Annotations" [config: panel_sources]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_name = "BOOL")]
+    pub panel_sources: bool,
+
     /// Longest annotation shown, in characters (cut at a word with "…"); 0 = the whole note
     /// [config: annotation_max_chars]
     #[arg(long, default_value_t = 0, value_name = "N")]

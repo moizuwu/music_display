@@ -321,7 +321,7 @@ impl Model {
         }
         self.save_layout();
         let shown = self.layout.panels.shown(PanelId::Cava);
-        self.persist("Cava column", &[("thirdpanel", (third && shown).into()), ("cava", shown.into())]);
+        self.persist("Cava column", &[("thirdpanel", third.into()), ("cava", shown.into())]);
     }
 
     pub fn set_minimal_saved(&mut self, on: bool) {
@@ -411,14 +411,25 @@ impl Model {
     // ── lyrics / playback numbers ──
 
     pub fn save_lyric_numbers(&mut self) {
+        let keys = ["lyric_spacing", "lyric_pad", "big_scale", "interlude_threshold_secs", "volume_step"];
+        self.save_lyric_number_keys(&keys);
+    }
+
+    /// Persist just the one number whose slider was released (the others may hold per-run values).
+    pub fn save_lyric_number(&mut self, key: &str) {
+        self.save_lyric_number_keys(&[key]);
+    }
+
+    pub fn save_lyric_number_keys(&mut self, keys: &[&str]) {
         let a = &self.args;
-        let v = [
+        let all: [(&str, toml::Value); 5] = [
             ("lyric_spacing", (a.lyric_spacing as i64).into()),
             ("lyric_pad", (a.lyric_pad as i64).into()),
             ("big_scale", (a.big_scale as i64).into()),
             ("interlude_threshold_secs", a.interlude_secs.into()),
             ("volume_step", (a.volume_step as i64).into()),
         ];
+        let v: Vec<_> = all.into_iter().filter(|(k, _)| keys.contains(k)).collect();
         self.persist("Lyrics", &v);
     }
 }
@@ -587,7 +598,7 @@ fn general(ui: &mut Ui, m: &mut Model) {
         m.args.volume_step = step;
     }
     if done {
-        m.save_lyric_numbers();
+        m.save_lyric_number("volume_step");
     }
     let titles = [("off".to_string(), "off"), ("title".to_string(), "song title"), ("artist-title".to_string(), "artist - title")];
     if let Some(v) = combo(ui, "wintitle", "Song in the window title", &m.args.window_title, &titles) {
@@ -652,21 +663,23 @@ fn lyrics(ui: &mut Ui, m: &mut Model) {
     }
     let (mut sc, mut sp, mut pad, mut gap) = (m.args.big_scale, m.args.lyric_spacing, m.args.lyric_pad, m.args.interlude_secs);
     let mut ch = false;
-    let mut done = false;
-    for (c, d) in [
-        slider(ui, "Big line size", &mut sc, 1..=3, "x"),
-        slider(ui, "Line spacing", &mut sp, 0..=3, ""),
-        slider(ui, "Side padding", &mut pad, 0..=10, ""),
-        slider(ui, "Instrumental marker after a gap of", &mut gap, 1.0..=120.0, " s"),
+    let mut done: Vec<&str> = Vec::new();
+    for (key, (c, d)) in [
+        ("big_scale", slider(ui, "Big line size", &mut sc, 1..=3, "x")),
+        ("lyric_spacing", slider(ui, "Line spacing", &mut sp, 0..=3, "")),
+        ("lyric_pad", slider(ui, "Side padding", &mut pad, 0..=10, "")),
+        ("interlude_threshold_secs", slider(ui, "Instrumental marker after a gap of", &mut gap, 1.0..=120.0, " s")),
     ] {
         ch |= c;
-        done |= d;
+        if d {
+            done.push(key);
+        }
     }
     if ch {
         (m.args.big_scale, m.args.lyric_spacing, m.args.lyric_pad, m.args.interlude_secs) = (sc, sp, pad, gap);
     }
-    if done {
-        m.save_lyric_numbers();
+    if !done.is_empty() {
+        m.save_lyric_number_keys(&done);
     }
     let places = [
         (MemberPosition::Auto, "automatic (under the line)"),
@@ -843,6 +856,10 @@ fn annotations(ui: &mut Ui, m: &mut Model) {
     let modes: Vec<(AnnotationMode, &str)> = [AnnotationMode::Genius, AnnotationMode::Ai, AnnotationMode::GeniusAi].into_iter().map(|a| (a, a.label())).collect();
     if let Some(v) = combo(ui, "annmode", "Notes from", &m.args.annotations_mode, &modes) {
         m.set_annotations_mode(v);
+    }
+    if let Some(v) = check(ui, "Name the source in the Lyrics and Annotations titles", m.args.panel_sources) {
+        m.args.panel_sources = v;
+        m.persist("Panel titles", &[("panel_sources", v.into())]);
     }
     let scrolls = [(AnnotationScroll::Manual, scroll_name(AnnotationScroll::Manual)), (AnnotationScroll::Auto, scroll_name(AnnotationScroll::Auto))];
     if let Some(v) = combo(ui, "annscroll", "Long notes", &m.args.annotation_scroll, &scrolls) {
@@ -1063,6 +1080,27 @@ mod tests {
         assert_eq!(t["cava"].as_bool(), Some(true));
         m.set_cava_shown(false);
         assert_eq!(saved(&p)["cava"].as_bool(), Some(false));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[tokio::test]
+    async fn a_released_slider_saves_only_its_own_number() {
+        let (mut m, p, _rx) = model("numbers");
+        m.args.lyric_pad = 9; // changed for this run only
+        m.args.volume_step = 12;
+        m.save_lyric_number("volume_step");
+        let t = saved(&p);
+        assert_eq!(t["volume_step"].as_integer(), Some(12));
+        assert!(!t.contains_key("lyric_pad"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[tokio::test]
+    async fn the_third_column_saves_the_choice_even_in_the_minimal_view() {
+        let (mut m, p, _rx) = model("third-min");
+        m.set_minimal(true);
+        m.set_third_column(true);
+        assert_eq!(saved(&p)["thirdpanel"].as_bool(), Some(true));
         let _ = std::fs::remove_file(p);
     }
 

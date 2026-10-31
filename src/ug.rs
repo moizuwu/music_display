@@ -133,7 +133,7 @@ pub fn candidates(store: &Value, artist: &str, title: &str) -> Vec<Cand> {
             let art = r.get("artist_name").and_then(Value::as_str).unwrap_or("").to_string();
             let (st, sa) = (chords::norm(&crate::year::clean(&song)), chords::norm(&art));
             let title_ok = chords::dice(&want_t, &st) >= 0.8;
-            let artist_ok = sa.contains(&want_a) || want_a.contains(&sa) || chords::dice(&want_a, &sa) >= 0.7;
+            let artist_ok = !want_a.is_empty() && !sa.is_empty() && (sa.contains(&want_a) || want_a.contains(&sa) || chords::dice(&want_a, &sa) >= 0.7);
             if !title_ok || !artist_ok {
                 return None;
             }
