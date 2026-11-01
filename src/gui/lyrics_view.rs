@@ -322,7 +322,7 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
     let threshold = m.args.interlude_secs;
     let length = m.snap.as_ref().map_or(0.0, |s| s.length);
     let t = m.position() + m.offset;
-    let al = m.aligned.as_ref().filter(|_| m.chords_on && !plain).filter(|a| a.usable_at(m.args.chords_match));
+    let al = m.aligned.as_ref().filter(|_| m.chords_on).filter(|a| a.usable_at(m.args.chords_match));
     let (shift, flats) = if al.is_some() { (m.chord_shift(), m.use_flats()) } else { (0, false) };
     let ctx = m.args.chords_context;
     let chord_font = FontId::proportional((g.lyrics_size as f32 * 0.7).max(11.0));

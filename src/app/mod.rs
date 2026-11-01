@@ -707,6 +707,10 @@ impl App {
                 crate::identity::keep_known(o, &mut s, art);
             }
         }
+        // every artist of the song, when the player names only the first (the API knows them all)
+        if s.player != crate::spotify::REMOTE {
+            crate::identity::fuller_artist(&mut s, self.remote_snapshot().as_ref());
+        }
         let new_art = s.art_url != self.art_url;
 
         // Only re-anchor if the reported position meaningfully disagrees with our
@@ -958,12 +962,13 @@ impl App {
         self.dirty = true;
     }
 
-    /// Match the sheet onto the synced lyrics (cheap; redone when either side changes).
+    /// Match the sheet onto the lyrics, synced or plain (cheap; redone when either side changes).
     fn realign(&mut self) {
         self.aligned = match (&self.sheet, &self.lyrics) {
             (Some(sh), LyricsState::Ready(Lyrics::Synced(l))) => {
                 Some(chords::align_with(sh, l, self.args.chords_match))
             }
+            (Some(sh), LyricsState::Ready(Lyrics::Plain(l))) => Some(chords::align_plain(sh, l, self.args.chords_match)),
             _ => None,
         };
     }
@@ -986,7 +991,16 @@ impl App {
     /// plus the manual `t`/`T` transpose.
     pub fn chord_shift(&self) -> i32 {
         let sheet_capo = self.sheet.as_ref().map_or(0, |s| s.capo);
-        chords::capo_shift(sheet_capo, self.effective_capo(), self.transpose)
+        chords::capo_shift(sheet_capo, self.effective_capo(), self.transpose) + self.tuning_offset()
+    }
+
+    /// With `chords_standard`, the semitones that put the sheet's tuning back to standard
+    /// (D standard: -2); 0 when the setting is off or the sheet names no tuning we know.
+    pub fn tuning_offset(&self) -> i32 {
+        if !self.args.chords_standard {
+            return 0;
+        }
+        self.sheet.as_ref().and_then(|s| s.tuning.as_deref()).and_then(chords::standard_offset).unwrap_or(0)
     }
 
     /// (sounding key, key of the shapes being shown), from the sheet's written key.
@@ -997,7 +1011,7 @@ impl App {
         let k = chords::parse_key(sh.key.as_deref()?)?;
         Some((
             // the song's own key never moves with `t` / `T`; only the chord letters do
-            k.shift(sh.capo as i32),
+            k.shift(sh.capo as i32 + self.tuning_offset()),
             k.shift(self.chord_shift()),
         ))
     }
@@ -1332,6 +1346,7 @@ impl App {
             Setting::Chords => onoff(self.chords_on),
             Setting::ChordsUg => onoff(self.args.chords_ug),
             Setting::AutoZeroCapo => onoff(self.args.auto_zero_capo),
+            Setting::ChordsStandard => onoff(self.args.chords_standard),
             Setting::ChordsMatch => match &self.settings_edit {
                 Some((Setting::ChordsMatch, input)) => input.shown(),
                 _ => format!("{} %", self.args.chords_match),
@@ -1464,6 +1479,7 @@ impl App {
                 self.args.auto_zero_capo = !self.args.auto_zero_capo;
                 self.snap_scroll = true;
             }
+            Setting::ChordsStandard => self.args.chords_standard = !self.args.chords_standard,
             Setting::ChordsMatch => {
                 self.settings_edit = Some((s, TextInput::with(&self.args.chords_match.to_string())));
                 return;
@@ -1704,6 +1720,7 @@ impl App {
             ("chords", B(self.chords_on)),
             ("chords_ug", B(self.args.chords_ug)),
             ("auto_zero_capo", B(self.args.auto_zero_capo)),
+            ("chords_standard", B(self.args.chords_standard)),
             ("member_position", S(self.args.member_position.name().to_string())),
             ("translation_position", S(self.args.translation_position.name().to_string())),
             ("chords_match", I(self.args.chords_match as i64)),

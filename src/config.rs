@@ -51,6 +51,7 @@ pub const KEYS: &[Key] = &[
     k!("chords", Kind::Bool, "chords"),
     k!("chords_ug", Kind::Bool, "chords_ug"),
     k!("auto_zero_capo", Kind::Bool, "auto_zero_capo"),
+    k!("chords_standard", Kind::Bool, "chords_standard"),
     k!("member_parts", Kind::Bool, "member_parts"),
     k!("translation_position", Kind::Choice(crate::cli::TranslationPosition::NAMES), "translation_position"),
     k!("member_position", Kind::Choice(crate::cli::MemberPosition::NAMES), "member_position"),
@@ -161,6 +162,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "chords" => args.chords = b(),
         "chords_ug" => args.chords_ug = b(),
         "auto_zero_capo" => args.auto_zero_capo = b(),
+        "chords_standard" => args.chords_standard = b(),
         "member_parts" => args.member_parts = b(),
         "translation_position" => args.translation_position = crate::cli::TranslationPosition::parse(&st()).unwrap_or_default(),
         "member_position" => args.member_position = crate::cli::MemberPosition::parse(&st()).unwrap_or_default(),
@@ -426,6 +428,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("chords", args.chords.to_string());
     line("chords_ug", args.chords_ug.to_string());
     line("auto_zero_capo", args.auto_zero_capo.to_string());
+    line("chords_standard", args.chords_standard.to_string());
     line("member_parts", args.member_parts.to_string());
     line("translation_position", q(args.translation_position.name()));
     line("member_position", q(args.member_position.name()));

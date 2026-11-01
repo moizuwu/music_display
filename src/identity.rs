@@ -65,6 +65,21 @@ pub fn keep_known(old: &Snapshot, new: &mut Snapshot, keep_art: Option<&str>) {
     new.disc_no = old.disc_no.or(new.disc_no);
 }
 
+/// A player that lists only some of the artists of a song (Spotify's MPRIS gives the first one)
+/// gets the full credit from the Spotify API's answer for the same track, when the API has it.
+/// The API's list has to start with the artist shown, so another song never lends its credits.
+pub fn fuller_artist(s: &mut Snapshot, api: Option<&Snapshot>) {
+    let Some(api) = api else { return };
+    let same = |a: &str, b: &str| !a.is_empty() && crate::spotify::track_uri(a) == crate::spotify::track_uri(b);
+    if !same(&s.track_id, &api.track_id) || api.artist.len() <= s.artist.len() {
+        return;
+    }
+    let (shown, full) = (s.artist.trim().to_lowercase(), api.artist.to_lowercase());
+    if full.starts_with(&shown) && full[shown.len()..].starts_with(", ") {
+        s.artist = api.artist.clone();
+    }
+}
+
 /// Fill what the player left empty from the file's own tags.
 pub fn merge_tags(s: &mut Snapshot, t: &Tags) {
     let fill = |dst: &mut String, src: &str| {
