@@ -7,6 +7,8 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-02
+
 ### Added
 - The Windows exe and `install.ps1` build the window (`--gui`) too; started without a console it opens without a console window. The release workflow builds, lints and tests Windows with `--features gui`.
 
@@ -118,6 +120,7 @@ First tagged release.
 - Wide (CJK) characters misaligning chords and lyrics.
 - Hangul lyrics picked for language and instrumental releases.
 
-[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/moizuwu/music_display/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/moizuwu/music_display/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/moizuwu/music_display/releases/tag/v0.1.0
