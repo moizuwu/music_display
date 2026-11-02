@@ -3596,7 +3596,9 @@ fn file_urls_round_trip_on_both_systems() {
 
 #[test]
 fn changelog_keeps_an_unreleased_section_and_the_release_links() {
-    let log = include_str!("../CHANGELOG.md");
+    // (a Windows checkout may have CRLF line ends)
+    let log = include_str!("../CHANGELOG.md").replace("\r\n", "\n");
+    let log = log.as_str();
     assert!(log.contains("\n## [Unreleased]\n"));
     assert!(log.contains("\n[Unreleased]: https://github.com/"));
     // the newest release heading is never older than the version in Cargo.toml

@@ -92,6 +92,7 @@ It checks for git and Rust (offering to install rustup with `winget`), clones th
 
 What differs from Linux:
 
+- **The window.** The Windows exe and the build from `install.ps1` include the window: `music_display --gui` (or `mdis --gui`) opens it, with the same `config.toml`, layout and settings as on Linux. Started from Explorer or a shortcut it opens without a console window; started from a terminal it leaves that terminal alone. It needs OpenGL 2.0 or newer (every normal graphics driver has it; Windows' own software fallback is slow). The floating-window hook for tiling window managers does nothing here, and `colors = "gtk"` finds no GTK theme (use `colors = "file"` or `off`). This part has not been tried on a real Windows PC yet.
 - **No cava.** `--cava` / `c` shows "the visualizer is not available on Windows" and does nothing else.
 - **The `player` setting** is matched against the app name of the media session (`spotify`, `vlc`, `chrome`, `firefox`, `msedge`); `any` (and `local`) means whatever Windows considers the current one.
 - **No volume control** from the program: Windows does not let other programs set a player's volume through the media session. The volume control is hidden (the player reports no volume), as it is for any player that doesn't report one.
