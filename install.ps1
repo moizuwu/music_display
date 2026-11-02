@@ -170,7 +170,7 @@ function Build {
     if ($Force -or $before -ne $after -or -not (Test-Path $exe)) {
         Say "Building (this takes a few minutes the first time)"
         Push-Location $(if ($DryRun) { "." } else { $SrcDir })
-        try { Run "cargo" @("build", "--release", "--locked") } finally { Pop-Location }
+        try { Run "cargo" @("build", "--release", "--locked", "--features", "gui") } finally { Pop-Location }
     } else {
         Say "Already up to date"
     }

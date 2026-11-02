@@ -10,6 +10,7 @@ which turns the `Unreleased` section into that version.
 ## [0.2.0] - 2026-11-02
 
 ### Added
+- The Windows exe and `install.ps1` build the window (`--gui`) too; started without a console it opens without a console window. The release workflow builds, lints and tests Windows with `--features gui`.
 - `chords_standard` (`--chords-standard`, settings row and window checkbox): a song in a lowered tuning (D standard, half step down, Drop C, or six notes like `Eb Ab Db Gb Bb Eb`) shows the chords of standard tuning that sound the same, so an A in D standard shows as G; the key and the diagrams follow, tunings it does not know are left alone.
 - Chords are placed over the lines of plain (unsynced) lyrics too, in the terminal UI and the window.
 - A play button in the header of an opened album, artist, playlist or Liked Songs in the library window plays the whole thing from its start.

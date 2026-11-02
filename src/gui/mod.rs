@@ -30,7 +30,23 @@ use music_display::AppEvent;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+/// Started from Explorer or a shortcut, the program owns a console of its own that would sit
+/// behind the window: let it go. Started from a terminal, the terminal stays as it is.
+#[cfg(windows)]
+fn detach_console() {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut list = [0u32; 2];
+    // SAFETY: plain console calls with a buffer of the length they are told
+    unsafe {
+        if GetConsoleProcessList(&mut list) == 1 {
+            let _ = FreeConsole();
+        }
+    }
+}
+
 pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
+    #[cfg(windows)]
+    detach_console();
     // every event the background tasks send also wakes the window
     let (tx, rx, wake) = window::channel();
     let mut model = Model::new(args, layout, cfg_path.clone(), tx.clone());

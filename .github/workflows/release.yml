@@ -21,9 +21,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux
+            features: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows
+            # the window (--gui) is part of the Windows exe
+            features: "--features gui"
     steps:
       - uses: actions/checkout@v4
 
@@ -37,15 +40,15 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Clippy
-        run: cargo clippy --locked --target ${{ matrix.target }}
+        run: cargo clippy --locked ${{ matrix.features }} --target ${{ matrix.target }}
 
       # The Windows tests have not run anywhere before; they report but do not block yet.
       - name: Test
         continue-on-error: ${{ matrix.platform == 'windows' }}
-        run: cargo test --locked --target ${{ matrix.target }}
+        run: cargo test --locked ${{ matrix.features }} --target ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked ${{ matrix.features }} --target ${{ matrix.target }}
 
       - name: Name the release files
         id: names
