@@ -7,6 +7,8 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
 ### Added
 - `chords_standard` (`--chords-standard`, settings row and window checkbox): a song in a lowered tuning (D standard, half step down, Drop C, or six notes like `Eb Ab Db Gb Bb Eb`) shows the chords of standard tuning that sound the same, so an A in D standard shows as G; the key and the diagrams follow, tunings it does not know are left alone.
 - Chords are placed over the lines of plain (unsynced) lyrics too, in the terminal UI and the window.
@@ -113,5 +115,6 @@ First tagged release.
 - Wide (CJK) characters misaligning chords and lyrics.
 - Hangul lyrics picked for language and instrumental releases.
 
-[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/moizuwu/music_display/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/moizuwu/music_display/releases/tag/v0.1.0
