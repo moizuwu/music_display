@@ -8,6 +8,11 @@ which turns the `Unreleased` section into that version.
 ## [Unreleased]
 
 ### Added
+- `chords_standard` (`--chords-standard`, settings row and window checkbox): a song in a lowered tuning (D standard, half step down, Drop C, or six notes like `Eb Ab Db Gb Bb Eb`) shows the chords of standard tuning that sound the same, so an A in D standard shows as G; the key and the diagrams follow, tunings it does not know are left alone.
+- Chords are placed over the lines of plain (unsynced) lyrics too, in the terminal UI and the window.
+- A play button in the header of an opened album, artist, playlist or Liked Songs in the library window plays the whole thing from its start.
+- Clicking the translated line or the member tag of a lyric line jumps to it, like clicking the line.
+- `album_artist` metadata field (`xesam:albumArtist`, the Spotify album's artists) next to Artist, which lists every artist of the song; the Spotify API's full artist list is used when the player names only the first.
 - On Hyprland, sway and niri the settings, keys, library, devices and AI-question windows and the pop-out panels open floating (`float_windows` in `[gui]`, on by default, checkbox in the Appearance tab); they have their own Wayland classes `music_display.floating` and `music_display.popout` for rules of your own.
 - `colors` (`off`, `file`, `gtk`, `auto`) and `colors_file` in `[gui]`: the window can take its base colour, text and accent from a colour file (matugen / noctalia, the files the terminal UI reads) or the GTK theme, and follows them when they change; the terminal UI re-reads its colour file when it changes.
 - `effects` and `effects_intensity` in `[gui]`: snow, autumn leaves, dandelion seeds, wind, pollen, embers, fog, bats and eggs as a layer of their own over any background and look (`auto` = the look's own); the backgrounds are now `solid`, `cover-blur`, `gradient`, `image`, `sky`, `meadow` and `lawn`, and files with the old moving backgrounds keep working.
@@ -50,6 +55,9 @@ which turns the `Unreleased` section into that version.
   OpenAI) and `layout`.
 
 ### Fixed
+- Plain lyrics found while a lrclib lookup failed (a 502, say) are no longer cached, so the synced version is asked for again the next time the song plays.
+- `q` and Esc close the window that has focus when settings, library, help or a pop-out panel is a window of its own; the library's arrow keys work there too.
+- The translation and the member tag of the active line grow with it, each from the size chosen for it.
 - Cava placement: the "Third panel" row in the settings menu now writes `[layout] cava_under_lyrics`
   (it only wrote `thirdpanel`, which the layout then overrode, so the choice was lost on restart), the
   layout alone decides where cava goes, and "below the lyrics" is the default again. The customize
