@@ -402,6 +402,13 @@ pub fn remember(artist: &str, title: &str, album: &str, length: f64, kind: &str,
     }
 }
 
+/// Is a find kept for the next time? Not a plain one (or anything else but synced) when a step
+/// of the lookup could not be asked, say lrclib answered 502: the synced version may be there
+/// when it is up again, and a kept plain one would hide it for good.
+pub fn worth_keeping(kind: &str, a_step_failed: bool) -> bool {
+    !a_step_failed || kind == "synced"
+}
+
 pub async fn fetch(
     c: reqwest::Client,
     artist: String,
@@ -558,7 +565,7 @@ pub async fn fetch_with(
     };
     match result {
         Some((kind, text)) => {
-            if use_cache {
+            if use_cache && worth_keeping(kind, failure.is_some()) {
                 let kind = if elsewhere { format!("x-{kind}") } else { kind.to_string() };
                 if let Some(s) = save(&kind, &text) {
                     let _ = tokio::fs::write(&path, s).await;

@@ -149,6 +149,7 @@ big_scale = 1                  # 1..3, size of the big-font line
 chords = false
 chords_ug = false
 auto_zero_capo = false         # a sheet that says "capo 2" is shown with capo 0, so its chords are the sounding ones (your [ ] choice for a track still wins)
+chords_standard = false        # a song in a lowered tuning shows the chords of standard tuning that sound the same (D standard: an A shows as the G that sounds). Flag: --chords-standard
 chords_match = 40              # percent of the lyric lines that must match a sheet for its chords to show (0 = always)
 member_parts = false           # experimental: show who sings each line (Genius, unofficial)
 member_position = "auto"       # auto | below | above | inline: where the member tag goes (auto: terminal in front of the line, window under it)
@@ -511,7 +512,7 @@ hidden = []
 
 The fields below can be hidden and reordered (see above). `Genre` appears once a source knows it.
 
-Track, Artist, Album artist and Album take a full row each. **Artist** lists every artist credited on the song; **Album artist** is the artist the album belongs to; both are shown, and each can be hidden or moved like any other field (the Album artist row is left out when the player reports none: Spotify and MPRIS players that report `xesam:albumArtist`). Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
+Track, Artist, Album artist and Album take a full row each. **Artist** lists every artist credited on the song (Spotify's MPRIS names only the first one, so with `--spotify` the API's full list is used for the same track); **Album artist** is the artist the album belongs to; both are shown, and each can be hidden or moved like any other field (the Album artist row is left out when the player reports none: Spotify and MPRIS players that report `xesam:albumArtist`). Below them `Track No` and `Release` sit on the left, and `Tuning`, `Capo`, `BPM` and `Key` form a right-hand column, one per row, all starting at the same column:
 
 ```
 Track No  01-03                Tuning: Drop D
@@ -593,7 +594,7 @@ Any MPRIS player works (`player = "vlc"`, `"mpv"`, `"local"`…). When it report
 
 ## Chords
 
-See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_display/chords/` (`Artist - Title.cho` / `.txt`), optionally Ultimate Guitar with `--chords-ug`; chords are shown on every lyric line (the active one in bold), intro chords appear before the first lyric, and `D` opens chord diagrams with a small tab. During an instrumental or solo section the chords of that part of the sheet are shown under `[ Instrumental / Solo ]` so you can play along. If a lookup fails, the title is retried without `(…)` groups, `feat.`/`ft.` credits and ` - demo` / ` - remastered` suffixes.
+See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_display/chords/` (`Artist - Title.cho` / `.txt`), optionally Ultimate Guitar with `--chords-ug`; chords are shown on every lyric line (the active one in bold), intro chords appear before the first lyric, and `D` opens chord diagrams with a small tab. During an instrumental or solo section the chords of that part of the sheet are shown under `[ Instrumental / Solo ]` so you can play along. Chords are placed over the lines of plain (unsynced) lyrics in the same way as over synced ones. With `chords_standard` (`--chords-standard`, the settings row *Chords in standard tuning*) a sheet whose tuning is lowered is shown as the chords of a standard-tuned guitar that sound the same, so a song in D standard (an A shape sounds G) shows G. It reads names such as `D Standard`, `Half Step Down`, `Drop C` and the six notes `Eb Ab Db Gb Bb Eb` (Drop D needs no change), leaves tunings it does not know (open tunings) alone, and the key and the chord diagrams follow. The sheet has to name its tuning: Ultimate Guitar does, and in a ChordPro file you write `{tuning: D Standard}`. If a lookup fails, the title is retried without `(…)` groups, `feat.`/`ft.` credits and ` - demo` / ` - remastered` suffixes.
 
 ## Notes
 
@@ -603,7 +604,7 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 - Cover art uses Kitty graphics when available, then Sixel / iTerm2, then unicode half-blocks. The bitmap is scaled to exactly fill its cell box.
 - If cava can't start or dies, the cava panel shows why (cava's own error message); press `c` twice to retry.
 - Two editions of the same track ("Metallica" vs "Metallica (Remastered Deluxe Box Set)", different casing) are the same track: no flicker, no refetch.
-- Lyrics: "lyrics unavailable (network error / rate limited / server error)" only appears after every attempt of every fallback (exact match → artist + cleaned title → search) has failed; a real "no lyrics" answer is reported as such, and cached for a few days.
+- Lyrics: "lyrics unavailable (network error / rate limited / server error)" only appears after every attempt of every fallback (exact match → artist + cleaned title → search) has failed; a real "no lyrics" answer is reported as such, and cached for a few days. When lrclib fails partway (a 502, say) and only plain lyrics were found, they are shown but not cached, so the synced version is asked for again the next time the song plays.
 - Caches: `~/.cache/music_display/` (years, lyrics, chords, per-track capo; errors are never cached), cover downloads in `/tmp/music_display/`.
 
 ## Korean lyrics and member parts

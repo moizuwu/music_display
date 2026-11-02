@@ -133,6 +133,68 @@ pub fn capo_shift(sheet_capo: u8, effective: u8, transpose: i32) -> i32 {
     sheet_capo as i32 - effective as i32 + transpose
 }
 
+/// How many semitones the chord names of a song in `tuning` move to read as the chords of a
+/// guitar in standard tuning that sound the same: in D standard (every string a whole step
+/// down) an A shape sounds G, so it becomes G (`-2`). `None` when the tuning isn't one this
+/// understands (an open tuning like DADGAD, or text that is no tuning); `Some(0)` for
+/// standard and for Drop D, whose top five strings are standard.
+/// Reads names ("D Standard", "Half Step Down", "Drop C") and the six notes ("Eb Ab Db Gb Bb Eb").
+pub fn standard_offset(tuning: &str) -> Option<i32> {
+    let t = tuning.trim().to_lowercase().replace(['-', '_'], " ");
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    // from -6 to 5 semitones: the nearest way to standard
+    let wrap = |n: i32| (n + 6).rem_euclid(12) - 6;
+    let pitch = |s: &str| -> Option<i32> {
+        let b = s.as_bytes();
+        let base = match *b.first()? {
+            b'c' => 0,
+            b'd' => 2,
+            b'e' => 4,
+            b'f' => 5,
+            b'g' => 7,
+            b'a' => 9,
+            b'b' => 11,
+            _ => return None,
+        };
+        let acc: i32 = match &s[1..] {
+            "" => 0,
+            "#" | "sharp" => 1,
+            "b" | "flat" => -1,
+            _ => return None,
+        };
+        Some((base + acc).rem_euclid(12))
+    };
+    match t.as_str() {
+        "" => return None,
+        "standard" | "standard tuning" => return Some(0),
+        "half step down" | "half step" | "half step lower" | "1/2 step down" => return Some(-1),
+        "whole step down" | "full step down" | "one step down" | "1 step down" | "whole step" | "full step" => return Some(-2),
+        "1 1/2 steps down" | "1.5 steps down" | "one and a half steps down" | "step and a half down" => return Some(-3),
+        "2 steps down" | "two steps down" => return Some(-4),
+        _ => {}
+    }
+    let words: Vec<&str> = t.split(' ').collect();
+    // "d standard", "eb standard tuning"
+    if let [note, "standard", ..] = words.as_slice() {
+        return pitch(note).map(|p| wrap(p - 4));
+    }
+    // "drop d", "drop c#": the lowest string moves, the top five sit a step apart from Drop D
+    if let ["drop", note] = words.as_slice() {
+        return pitch(note).map(|p| wrap(p - 2));
+    }
+    // the six strings, low to high: the high string says how far the whole guitar is down
+    if words.len() == 6 {
+        let p: Option<Vec<i32>> = words.iter().map(|w| pitch(w)).collect();
+        let p = p?;
+        let down = wrap(p[5] - 4);
+        let lows = [4, 9, 2, 7, 11, 4];
+        let like_standard = (1..6).all(|i| wrap(p[i] - lows[i]) == down);
+        // the low string may drop a further step (Drop D, Drop C)
+        return (like_standard && (wrap(p[0] - 4) == down || (p[0] + 2 - 4 - down).rem_euclid(12) == 0)).then_some(down);
+    }
+    None
+}
+
 // ── keys, Camelot wheel ────────────────────────────────────────────────
 /// A musical key: pitch class of the tonic (0 = C) and mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -708,6 +770,13 @@ pub const DEFAULT_MATCH: u32 = 40;
 #[doc(hidden)]
 pub fn align(sheet: &Sheet, lyrics: &[(f64, String)]) -> Aligned {
     align_with(sheet, lyrics, DEFAULT_MATCH)
+}
+
+/// [`align_with`] for lyrics with no times: the chords go over the lines the same way, so a
+/// song without synced lyrics gets its chords too.
+pub fn align_plain(sheet: &Sheet, lines: &[String], min_pct: u32) -> Aligned {
+    let rows: Vec<(f64, String)> = lines.iter().map(|l| (0.0, l.clone())).collect();
+    align_with(sheet, &rows, min_pct)
 }
 
 pub fn align_with(sheet: &Sheet, lyrics: &[(f64, String)], min_pct: u32) -> Aligned {

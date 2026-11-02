@@ -4731,3 +4731,70 @@ async fn the_terminal_ui_follows_a_colour_file_that_changes() {
     assert_eq!((app.theme.surface, app.theme.primary), (Some((240, 240, 240)), Some((0, 0, 255))));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_lowered_tuning_maps_to_the_chords_of_standard() {
+    let off = chords::standard_offset;
+    assert_eq!(off("Standard"), Some(0));
+    assert_eq!(off("D Standard"), Some(-2));
+    assert_eq!(off("d standard tuning"), Some(-2));
+    assert_eq!(off("Eb Standard"), Some(-1));
+    assert_eq!(off("Half Step Down"), Some(-1));
+    assert_eq!(off("Whole step down"), Some(-2));
+    assert_eq!(off("1 1/2 steps down"), Some(-3));
+    // Drop D keeps the top five strings, Drop C is a whole step below that
+    assert_eq!(off("Drop D"), Some(0));
+    assert_eq!(off("Drop C"), Some(-2));
+    assert_eq!(off("Drop C#"), Some(-1));
+    // the six notes, low to high
+    assert_eq!(off("Eb Ab Db Gb Bb Eb"), Some(-1));
+    assert_eq!(off("D G C F A D"), Some(-2));
+    assert_eq!(off("D A D G B E"), Some(0));
+    // not understood: left alone
+    assert_eq!(off("DADGAD"), None);
+    assert_eq!(off("Open G"), None);
+    assert_eq!(off(""), None);
+    // an A shape in D standard sounds G
+    assert_eq!(chords::transpose("A", off("D Standard").unwrap(), false), "G");
+    assert_eq!(chords::transpose("Am7", -2, false), "Gm7");
+}
+
+#[test]
+fn chords_are_placed_over_plain_lyrics_too() {
+    let sheet = chords::parse_chordpro("[Am]Hello darkness my [G]old friend\n[F]I've come to talk with [C]you again\n");
+    let lines: Vec<String> = ["Hello darkness my old friend", "I've come to talk with you again"].iter().map(|s| s.to_string()).collect();
+    let a = chords::align_plain(&sheet, &lines, 40);
+    assert_eq!(a.matched, 2);
+    assert!(a.per_line[0].iter().any(|(_, c)| c == "Am") && a.per_line[1].iter().any(|(_, c)| c == "C"), "{:?}", a.per_line);
+}
+
+#[test]
+fn a_find_made_while_a_step_failed_is_only_kept_when_synced() {
+    assert!(lyrics::worth_keeping("synced", true));
+    assert!(lyrics::worth_keeping("plain", false));
+    assert!(!lyrics::worth_keeping("plain", true), "lrclib answered 502: try the synced one again next time");
+}
+
+#[test]
+fn the_api_completes_the_artists_of_the_same_song_only() {
+    let mk = |artist: &str, id: &str| {
+        let mut s = snap(artist, "Bad Decisions", "A");
+        s.track_id = id.into();
+        s
+    };
+    let api = mk("benny blanco, BTS, Snoop Dogg", "spotify:track:1");
+    let mut s = mk("benny blanco", "/com/spotify/track/1");
+    identity::fuller_artist(&mut s, Some(&api));
+    assert_eq!(s.artist, "benny blanco, BTS, Snoop Dogg");
+    // another song, or an artist the list does not start with: unchanged
+    let mut other = mk("benny blanco", "/com/spotify/track/2");
+    identity::fuller_artist(&mut other, Some(&api));
+    assert_eq!(other.artist, "benny blanco");
+    let mut other = mk("Someone else", "/com/spotify/track/1");
+    identity::fuller_artist(&mut other, Some(&api));
+    assert_eq!(other.artist, "Someone else");
+    // already complete
+    let mut full = mk("benny blanco, BTS, Snoop Dogg", "/com/spotify/track/1");
+    identity::fuller_artist(&mut full, Some(&api));
+    assert_eq!(full.artist, "benny blanco, BTS, Snoop Dogg");
+}

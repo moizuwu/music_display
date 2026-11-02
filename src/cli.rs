@@ -356,6 +356,12 @@ pub struct Args {
     #[arg(long)]
     pub auto_zero_capo: bool,
 
+    /// Show the chords of a song in a lowered tuning as the chords of a standard-tuned guitar
+    /// that sound the same: an A in D standard shows as G. Needs the sheet to name its tuning
+    /// (Ultimate Guitar does) [config: chords_standard]
+    #[arg(long)]
+    pub chords_standard: bool,
+
     /// Experimental: show which group member sings each line, scraped from Genius
     /// (unofficial, off by default; results are cached) [config: member_parts]
     #[arg(long)]

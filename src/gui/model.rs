@@ -350,6 +350,10 @@ impl Model {
                 identity::keep_known(o, &mut s, art);
             }
         }
+        // every artist of the song, when the player names only the first (the API knows them all)
+        if s.player != spotify::REMOTE {
+            identity::fuller_artist(&mut s, self.spot.remote_snapshot().as_ref());
+        }
         // our own volume change wins for a moment, so the poll does not snap the slider back
         if !identity::volume_settled(self.vol_hold.elapsed()) {
             if let Some(v) = self.snap.as_ref().and_then(|o| o.volume) {
@@ -609,6 +613,7 @@ impl Model {
     pub fn realign(&mut self) {
         self.aligned = match (&self.sheet, &self.lyrics) {
             (Some(sh), Some(Lyrics::Synced(l))) => Some(chords::align_with(sh, l, self.args.chords_match)),
+            (Some(sh), Some(Lyrics::Plain(l))) => Some(chords::align_plain(sh, l, self.args.chords_match)),
             _ => None,
         };
     }
@@ -623,13 +628,22 @@ impl Model {
     }
 
     pub fn chord_shift(&self) -> i32 {
-        chords::capo_shift(self.sheet.as_ref().map_or(0, |s| s.capo), self.effective_capo(), self.transpose)
+        chords::capo_shift(self.sheet.as_ref().map_or(0, |s| s.capo), self.effective_capo(), self.transpose) + self.tuning_offset()
+    }
+
+    /// With `chords_standard`, the semitones that put the sheet's tuning back to standard
+    /// (D standard: -2); 0 when the setting is off or the sheet names no tuning we know.
+    pub fn tuning_offset(&self) -> i32 {
+        if !self.args.chords_standard {
+            return 0;
+        }
+        self.sheet.as_ref().and_then(|s| s.tuning.as_deref()).and_then(chords::standard_offset).unwrap_or(0)
     }
 
     pub fn keys(&self) -> Option<(chords::KeyInfo, chords::KeyInfo)> {
         let sh = self.sheet.as_ref()?;
         let k = chords::parse_key(sh.key.as_deref()?)?;
-        Some((k.shift(sh.capo as i32), k.shift(self.chord_shift())))
+        Some((k.shift(sh.capo as i32 + self.tuning_offset()), k.shift(self.chord_shift())))
     }
 
     pub fn use_flats(&self) -> bool {

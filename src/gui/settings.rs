@@ -119,6 +119,11 @@ impl Model {
         self.persist("Capo 0 for every sheet", &[("auto_zero_capo", on.into())]);
     }
 
+    pub fn set_chords_standard(&mut self, on: bool) {
+        self.args.chords_standard = on;
+        self.persist("Chords in standard tuning", &[("chords_standard", on.into())]);
+    }
+
     pub fn set_translation_position(&mut self, p: music_display::cli::TranslationPosition) {
         self.args.translation_position = p;
         self.persist("Translation position", &[("translation_position", p.name().into())]);
@@ -725,6 +730,9 @@ fn chords(ui: &mut Ui, m: &mut Model) {
     }
     if let Some(v) = check(ui, "Capo 0 for every sheet (a sheet's \"capo 2\" is shown as the sounding chords)", m.args.auto_zero_capo) {
         m.set_auto_zero_capo(v);
+    }
+    if let Some(v) = check(ui, "Chords in standard tuning (a song in D standard: an A is shown as the G that sounds)", m.args.chords_standard) {
+        m.set_chords_standard(v);
     }
     let mut n = m.args.chords_match;
     let (ch, done) = slider(ui, "Chord match threshold", &mut n, 0..=100, "%");

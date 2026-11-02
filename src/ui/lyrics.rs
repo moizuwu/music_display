@@ -120,7 +120,7 @@ pub(super) fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         0
     };
 
-    let aligned: Option<chords::Aligned> = (app.chords_on && !plain)
+    let aligned: Option<chords::Aligned> = app.chords_on
         .then(|| app.aligned.clone())
         .flatten()
         .filter(|a| a.usable_at(app.args.chords_match))
