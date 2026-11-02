@@ -413,6 +413,11 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
         let lit = (active && karaoke && text.trim() != "♪").then(|| (m.line_fraction(), accent));
         // the translation and the member tag of the active line light up with the line itself
         let part_color = if active { strong } else { weak_c };
+        // ...and grow with it: each part keeps the size chosen for it and is scaled by the same
+        // step the original line makes between the plain and the active size
+        let grow_by = size / g.lyrics_size.max(1) as f32;
+        let text_size = |s: egui::TextStyle| ui.style().text_styles.get(&s).map_or(14.0, |f| f.size);
+        let (body_size, small_size) = (text_size(egui::TextStyle::Body), text_size(egui::TextStyle::Small));
         let has_tr = both && trans.is_some_and(|t| t.trim() != orig.trim());
         let member_tag = cur
             .filter(|c| i.abs_diff(*c) <= 2)
@@ -420,10 +425,22 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             .filter(|x| !x.is_empty())
             .map(|mem| {
                 let tag = RichText::new(format!("[{}]", mem.join(" · "))).color(part_color);
-                if g.member_size > 0 { tag.size(g.member_size as f32) } else { tag.small() }
+                let plain = if g.member_size > 0 { g.member_size as f32 } else { small_size };
+                tag.size(plain * grow_by)
             });
         let (parts, inline) = line_parts(m.args.translation_position, m.args.member_position, has_tr, member_tag.is_some(), center);
         let mut line_resp = None;
+        // a click on the translation or the member tag jumps to the line just like the line does
+        let mut part_clicked = false;
+        let mut hit = |ui: &Ui, r: &egui::Response| {
+            if synced.is_some() {
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    ui.painter().rect_filled(r.rect.expand(3.0), g.corner_radius.min(8), base.gamma_multiply(0.07));
+                }
+                part_clicked |= r.clicked();
+            }
+        };
         // the halo goes behind all parts of the active line: its slot is reserved first, the
         // rectangle is what the parts took
         let halo = (active && g.lyrics_glow > 0).then(|| ui.painter().add(egui::Shape::Noop));
@@ -433,19 +450,20 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             match part {
                 Part::Member => {
                     if let Some(tag) = member_tag.clone() {
-                        let r = if center { ui.vertical_centered(|ui| ui.label(tag)).inner } else { ui.label(tag) };
+                        let label = egui::Label::new(tag).sense(Sense::click());
+                        let r = if center { ui.vertical_centered(|ui| ui.add(label)).inner } else { ui.add(label) };
+                        hit(ui, &r);
                         grow(&r);
                     }
                 }
                 Part::Translation => {
                     if let Some(tr_text) = trans {
                         let txt = RichText::new(tr_text).italics().color(part_color);
-                        let txt = if g.translation_size > 0 { txt.size(g.translation_size as f32) } else { txt };
-                        let r = if center {
-                            ui.vertical_centered(|ui| ui.add(egui::Label::new(txt).wrap())).inner
-                        } else {
-                            ui.add(egui::Label::new(txt).wrap())
-                        };
+                        let plain = if g.translation_size > 0 { g.translation_size as f32 } else { body_size };
+                        let txt = txt.size(plain * grow_by);
+                        let label = egui::Label::new(txt).wrap().sense(Sense::click());
+                        let r = if center { ui.vertical_centered(|ui| ui.add(label)).inner } else { ui.add(label) };
+                        hit(ui, &r);
                         grow(&r);
                     }
                 }
@@ -482,7 +500,7 @@ fn draw_all(ui: &mut Ui, m: &Model, cur: Option<usize>, following: bool, act: &m
             ui.painter().set(slot, egui::Shape::Vec(rings));
         }
         if let Some(l) = synced {
-            if resp.clicked() {
+            if resp.clicked() || part_clicked {
                 act.seek_to = Some((l[i].0 - m.offset).max(0.0));
             }
             if let Some(mk) = marker_after(l, i, length, threshold) {

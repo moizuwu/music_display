@@ -572,6 +572,7 @@ fn snap(artist: &str, title: &str, album: &str) -> player::Snapshot {
         position: 0.0,
         title: title.into(),
         artist: artist.into(),
+        album_artist: String::new(),
         album: album.into(),
         length: 100.0,
         art_url: String::new(),
@@ -3630,7 +3631,7 @@ async fn metadata_fields_follow_the_layout() {
     let (t, a) = (row_of(&s, "Track ").unwrap(), row_of(&s, "Album ").unwrap());
     assert!(t < a, "Track above Album by default");
     // Album above Title
-    app.layout.fields.shift(MetaField::Album, -2);
+    app.layout.fields.shift(MetaField::Album, -3);
     let s = render(&mut app, 100, 30);
     assert!(row_of(&s, "Album ").unwrap() < row_of(&s, "Track ").unwrap());
     // hidden fields vanish, the rest keeps its place
@@ -3736,11 +3737,11 @@ async fn right_click_menu_hides_and_moves_a_field() {
     assert_eq!(app.field_menu.map(|m| m.field), Some(MetaField::Artist));
     let s = render(&mut app, 100, 30);
     assert!(row_of(&s, "Move up").is_some() && row_of(&s, "Hide").is_some());
-    // "Move down" by mouse: Artist swaps with Album
+    // "Move down" by mouse: Artist swaps with the entry after it (Album artist, drawn only when it differs)
     let down = app.hits.menu_items[2];
     click(&mut app, down.x + 1, down.y);
     assert!(app.field_menu.is_none());
-    assert!(app.layout.fields.position(MetaField::Artist) > app.layout.fields.position(MetaField::Album));
+    assert!(app.layout.fields.position(MetaField::Artist) > app.layout.fields.position(MetaField::AlbumArtist));
     // "Hide" by keyboard
     render(&mut app, 100, 30);
     let (_, r) = *app.hits.fields.iter().find(|(f, _)| *f == MetaField::Album).unwrap();

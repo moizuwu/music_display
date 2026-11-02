@@ -235,13 +235,28 @@ fn on_off(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
+/// Keys typed in a window of its own (a floating window or a popped-out panel) only reach that
+/// window, not the main one that reads the key table. The window passes them on here, and the
+/// main window runs them with its own keys (so `q` and Esc close the window that has focus).
+pub fn relay_from_window(ctx: &egui::Context) {
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
+    let codes: Vec<KeyCode> = ctx.input(|i| i.events.iter().filter_map(code_of).collect());
+    if codes.is_empty() {
+        return;
+    }
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<KeyCode>>(egui::Id::NULL).extend(codes));
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
+
 impl super::Gui {
     /// Shortcuts (not while typing in a field). The library window takes its own keys first.
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
-            return;
+        let mut codes: Vec<KeyCode> = ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<KeyCode>>(egui::Id::NULL)));
+        if !ctx.egui_wants_keyboard_input() {
+            codes.extend(ctx.input(|i| i.events.iter().filter_map(code_of).collect::<Vec<_>>()));
         }
-        let codes: Vec<KeyCode> = ctx.input(|i| i.events.iter().filter_map(code_of).collect());
         for code in codes {
             if self.m.ux.key_capture.is_some() {
                 self.m.capture_key(code);

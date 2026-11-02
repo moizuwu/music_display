@@ -37,6 +37,7 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
                     _ => s.title.clone(),
                 },
                 MetaField::Artist => s.artist.clone(),
+                MetaField::AlbumArtist => Some(s.album_artist.clone()).filter(|a| !a.is_empty())?,
                 MetaField::Album => s.album.clone(),
                 MetaField::TrackNo => format!(
                     "{:02}-{}",

@@ -90,6 +90,7 @@ impl Gui {
                     self.look.paint_background(ui, &g);
                     self.look.paint_effects(ui, &g);
                     egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| style::card(ui, &g, |ui| self.panel(ui, id)));
+                    super::keys::relay_from_window(ui.ctx());
                 }
                 if ui.input(|i| i.viewport().close_requested()) {
                     docked.push(id);

@@ -66,6 +66,10 @@ pub(super) fn meta_lines(
                 None => vec![label("Track"), val(dash(&snap.title))],
             },
             MetaField::Artist => vec![label("Artist"), val(dash(&snap.artist))],
+            MetaField::AlbumArtist => {
+                let a = Some(&snap.album_artist).filter(|a| !a.is_empty())?;
+                vec![label("Album artist"), val(a.clone())]
+            }
             MetaField::Album => vec![label("Album"), val(dash(&snap.album))],
             MetaField::TrackNo => vec![label("Track No"), val(track_no.clone())],
             MetaField::Release => vec![label("Release"), val(date.clone())],
@@ -100,7 +104,7 @@ pub(super) fn meta_lines(
             MetaField::Bpm => tag("BPM:", app.bpm()?.to_string()),
         })
     };
-    let wide = |f: MetaField| matches!(f, MetaField::Title | MetaField::Artist | MetaField::Album);
+    let wide = |f: MetaField| matches!(f, MetaField::Title | MetaField::Artist | MetaField::AlbumArtist | MetaField::Album);
     let side = |f: MetaField| matches!(f, MetaField::Tuning | MetaField::Capo | MetaField::Bpm | MetaField::Key);
     let items: Vec<(MetaField, Vec<Span<'static>>)> =
         app.layout.fields.visible().filter_map(|f| value(f).map(|v| (f, v))).collect();

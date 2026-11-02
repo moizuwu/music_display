@@ -507,6 +507,7 @@ pub fn parse_state(p: &Value, is_local: impl Fn(&str) -> bool) -> Option<Remote>
         position: p["progress_ms"].as_f64().unwrap_or(0.0) / 1000.0,
         title: s(&t["name"]),
         artist,
+        album_artist: if t["album"].is_object() { names(&album["artists"]) } else { String::new() },
         album: s(&album["name"]),
         length: t["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0,
         art_url: image(images, 300),
