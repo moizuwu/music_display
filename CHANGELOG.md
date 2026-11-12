@@ -7,6 +7,8 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-12
+
 ### Fixed
 - `--spotify-login` (and the login in the settings) works on Windows: the random numbers for the login came from `/dev/urandom`, which Windows doesn't have, so it ended with "The system cannot find the path specified" before showing the link.
 
@@ -123,7 +125,8 @@ First tagged release.
 - Wide (CJK) characters misaligning chords and lyrics.
 - Hangul lyrics picked for language and instrumental releases.
 
-[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/moizuwu/music_display/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/moizuwu/music_display/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/moizuwu/music_display/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/moizuwu/music_display/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/moizuwu/music_display/releases/tag/v0.1.0
