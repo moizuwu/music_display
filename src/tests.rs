@@ -1121,6 +1121,9 @@ fn spotify_pkce_helpers() {
     assert_eq!(hex(&spotify::sha256(&long)), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
     assert_eq!(spotify::b64url(b"hello"), "aGVsbG8");
     assert_eq!(spotify::b64url(&[0xfb, 0xff]), "-_8");
+    // the login's random bytes come from the system on every platform (no /dev/urandom on Windows)
+    let (r1, r2) = (spotify::random(64).unwrap(), spotify::random(64).unwrap());
+    assert!(r1.len() == 64 && r1 != r2 && r1.iter().any(|b| *b != 0));
     // RFC 7636 appendix B
     let challenge = spotify::b64url(&spotify::sha256(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"));
     assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
