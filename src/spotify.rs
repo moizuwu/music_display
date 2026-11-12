@@ -154,10 +154,9 @@ pub fn b64url(data: &[u8]) -> String {
     out
 }
 
-fn random(n: usize) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read;
+pub fn random(n: usize) -> anyhow::Result<Vec<u8>> {
     let mut buf = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    getrandom::fill(&mut buf).map_err(|e| anyhow::anyhow!("no random numbers from the system: {e}"))?;
     Ok(buf)
 }
 

@@ -7,6 +7,9 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+### Fixed
+- `--spotify-login` (and the login in the settings) works on Windows: the random numbers for the login came from `/dev/urandom`, which Windows doesn't have, so it ended with "The system cannot find the path specified" before showing the link.
+
 ## [0.2.1] - 2026-11-02
 
 ### Added
