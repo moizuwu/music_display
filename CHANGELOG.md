@@ -9,7 +9,7 @@ which turns the `Unreleased` section into that version.
 
 ### Added
 
-- Standalone use without a terminal: `install.sh` and the Linux release build include the window (`--gui`) and add a "music_display" app-menu entry with the new logo (`--no-gui` for the old terminal-only build); the window and its pop-outs carry the logo as their icon.
+- Standalone use without a terminal: `install.sh` and the Linux release build include the window (`--gui`) and add an "mdis" app-menu entry with the new logo (`--no-gui` for the old terminal-only build); the window and its pop-outs carry the logo as their icon.
 
 ## [0.2.2] - 2026-11-12
 

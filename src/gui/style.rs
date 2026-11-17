@@ -50,7 +50,7 @@ pub fn viewport(g: &GuiConf) -> egui::ViewportBuilder {
     let v = egui::ViewportBuilder::default()
         .with_inner_size([1000.0, 640.0])
         .with_min_inner_size([480.0, 320.0])
-        .with_title("music_display")
+        .with_title("mdis")
         .with_app_id("music_display")
         .with_icon(icon())
         .with_transparent(true)

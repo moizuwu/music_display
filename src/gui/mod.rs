@@ -307,7 +307,7 @@ impl eframe::App for Gui {
         // the window title follows the song when `window_title` says so
         let want = window::window_title(&self.m.args.window_title, self.m.snap.as_ref());
         if want != self.title_sent {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want.clone().unwrap_or_else(|| "music_display".into())));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want.clone().unwrap_or_else(|| "mdis".into())));
             self.title_sent = want;
         }
         // the clock moves the lyrics: redraw about 30 times a second while playing
