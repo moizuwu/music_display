@@ -40,6 +40,11 @@ pub struct Look {
     pub confirm_reset: bool,
 }
 
+/// The logo as the window icon (the same one for every window of the program).
+pub fn icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon/music_display-256.png")).unwrap_or_default()
+}
+
 /// The window itself: transparent (so `opacity` can work live), with the chosen decorations.
 pub fn viewport(g: &GuiConf) -> egui::ViewportBuilder {
     let v = egui::ViewportBuilder::default()
@@ -47,6 +52,7 @@ pub fn viewport(g: &GuiConf) -> egui::ViewportBuilder {
         .with_min_inner_size([480.0, 320.0])
         .with_title("music_display")
         .with_app_id("music_display")
+        .with_icon(icon())
         .with_transparent(true)
         .with_decorations(g.decorations);
     if g.always_on_top { v.with_always_on_top() } else { v }

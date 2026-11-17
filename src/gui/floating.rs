@@ -24,6 +24,7 @@ pub fn window(
         .with_title(title.clone())
         // (its own class, so that a rule of the compositor can name these windows)
         .with_app_id("music_display.floating")
+        .with_icon(super::style::icon())
         .with_inner_size(size)
         .with_min_inner_size([240.0, 140.0])
         .with_transparent(true)

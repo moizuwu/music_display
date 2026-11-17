@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=music_display
+Comment=Now-playing display with cover art, synced lyrics and chords
+Exec=music_display --gui
+Icon=music_display
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=music_display

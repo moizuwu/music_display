@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/moizuwu/music_display/main/install.sh | bash
 #   (or download it, read it, run it:  bash install.sh --dry-run)
 #
-# Options: --dry-run  --yes  --no-deps  --ref <branch|tag>  --force  --aur  --help
+# Options: --dry-run  --yes  --no-deps  --no-gui  --ref <branch|tag>  --force  --aur  --help
 set -euo pipefail
 
 REPO_URL="${MDIS_REPO_URL:-https://github.com/moizuwu/music_display}"
@@ -14,7 +14,7 @@ SRC_DIR="$HOME/.local/share/music_display/src"
 BIN_DIR="$HOME/.local/bin"
 OS_RELEASE="${MDIS_OS_RELEASE:-/etc/os-release}"
 
-DRY=0 YES=0 NODEPS=0 FORCE=0 AUR=0 REF=main
+DRY=0 YES=0 NODEPS=0 NOGUI=0 FORCE=0 AUR=0 REF=main
 PM=""
 PRIV=()
 
@@ -35,12 +35,14 @@ Usage: install.sh [options]
   --dry-run     show what would be done, change nothing
   --yes         answer yes to the questions (AUR builds still need --aur)
   --no-deps     don't install packages or Rust, only check that they are there
+  --no-gui      build without the window (--gui) and add no app-menu entry
   --ref REF     branch or tag to install (default: main)
   --force       rebuild even when the checkout is already up to date
   --aur         allow building a missing dependency from the AUR (Arch only)
   --help        this text
 
-Installs into ~/.local/share/music_display/src and ~/.local/bin (music_display, mdis).
+Installs into ~/.local/share/music_display/src and ~/.local/bin (music_display, mdis),
+and an app-menu entry with the logo in ~/.local/share/applications and ~/.local/share/icons.
 EOF
 }
 
@@ -260,12 +262,14 @@ checkout() {
         || die "cannot fast-forward $SRC_DIR to $REF. Nothing was reset or deleted; fix the checkout by hand and rerun."
 }
 
+GUI_FEATURE="--features gui"
+
 build() {
     if [ "$DRY" = 1 ]; then
-        say "would run (in $SRC_DIR): cargo build --release --locked"
+        say "would run (in $SRC_DIR): cargo build --release --locked ${GUI_FEATURE}"
         return 0
     fi
-    (cd "$SRC_DIR" && cargo build --release --locked)
+    (cd "$SRC_DIR" && cargo build --release --locked $GUI_FEATURE)
 }
 
 # ~/.local/bin/<name> -> the built binary; never replaces a regular file or someone else's link.
@@ -288,12 +292,33 @@ link_bin() {
     esac
 }
 
+# The app-menu entry: the window (`music_display --gui`) started without a terminal. Files that
+# are not ours are left alone.
+install_desktop() {
+    [ "$NOGUI" = 0 ] || return 0
+    local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    local icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
+    local desk="$apps/music_display.desktop" icon="$icons/music_display.png"
+    run mkdir -p "$apps" "$icons"
+    if [ -e "$desk" ] && ! grep -q "^Exec=$BIN_DIR/music_display --gui$" "$desk"; then
+        warn "$desk already exists and is not ours: left alone (skipped)"
+    elif [ "$DRY" = 1 ]; then
+        say "would write $desk and $icon"
+    else
+        sed "s|^Exec=.*|Exec=$BIN_DIR/music_display --gui|" "$SRC_DIR/assets/music_display.desktop" > "$desk"
+        cp "$SRC_DIR/assets/icon/music_display.png" "$icon"
+        have update-desktop-database && update-desktop-database "$apps" >/dev/null 2>&1 || true
+        have gtk-update-icon-cache && gtk-update-icon-cache -q -t "${icons%%/hicolor*}/hicolor" >/dev/null 2>&1 || true
+    fi
+}
+
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) DRY=1 ;;
             --yes | -y) YES=1 ;;
             --no-deps) NODEPS=1 ;;
+            --no-gui) NOGUI=1; GUI_FEATURE="" ;;
             --force) FORCE=1 ;;
             --aur) AUR=1 ;;
             --ref) [ $# -ge 2 ] || die "--ref needs a branch or tag"; REF="$2"; shift ;;
@@ -341,6 +366,7 @@ main() {
     fi
     build
     link_bin
+    install_desktop
     if [ "$DRY" = 0 ]; then
         say "Installed: $("$SRC_DIR/target/release/music_display" --version)"
     fi

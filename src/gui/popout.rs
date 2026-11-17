@@ -71,6 +71,7 @@ impl Gui {
             let mut b = ViewportBuilder::default()
                 .with_title(title.clone())
                 .with_app_id("music_display.popout")
+                .with_icon(super::style::icon())
                 .with_inner_size(size_of(id))
                 .with_min_inner_size([200.0, 120.0])
                 .with_transparent(true)

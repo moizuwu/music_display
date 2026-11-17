@@ -21,7 +21,8 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux
-            features: ""
+            # the window (--gui) is part of the Linux build too
+            features: "--features gui"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows
@@ -64,6 +65,7 @@ jobs:
           mkdir -p dist/stage
           cp target/${{ matrix.target }}/release/music_display dist/stage/
           cp README.md CHORDS.md install.sh dist/stage/
+          cp assets/music_display.desktop assets/icon/music_display.png dist/stage/
           tar -C dist/stage -czf "dist/${{ steps.names.outputs.base }}.tar.gz" .
           (cd dist && sha256sum "${{ steps.names.outputs.base }}.tar.gz" > "${{ steps.names.outputs.base }}.tar.gz.sha256")
 
