@@ -52,18 +52,40 @@ pub fn split_trio(items: Vec<Ctl>) -> (Vec<Ctl>, Vec<Ctl>) {
     items.into_iter().partition(|c| matches!(c, Ctl::Prev | Ctl::Play(_) | Ctl::Next))
 }
 
+/// Shuffle and repeat stand left and right of the middle buttons, the way Spotify has them; what
+/// is left (the volume) keeps its order.
+pub fn take_flanks(rest: Vec<Ctl>) -> (Option<Ctl>, Option<Ctl>, Vec<Ctl>) {
+    let (mut shuffle, mut repeat, mut others) = (None, None, Vec::new());
+    for c in rest {
+        match c {
+            Ctl::Shuffle(_) => shuffle = Some(c),
+            Ctl::Repeat(_) => repeat = Some(c),
+            c => others.push(c),
+        }
+    }
+    (shuffle, repeat, others)
+}
+
 pub fn controls(ui: &mut Ui, m: &mut Model) {
     let Some((length, items)) = m.snap.as_ref().map(|s| (s.length, plan(&m.layout.buttons, s))) else { return };
     progress(ui, m, length);
     ui.add_space(2.0);
-    // previous, play / pause and next sit in the middle of the row; shuffle, repeat and the
-    // volume are on a row of their own below them
+    // previous, play / pause and next sit in the middle of the row with shuffle on their left and
+    // repeat on their right; the volume and the Spotify buttons are on a row of their own below
     let (trio, rest) = split_trio(items);
-    if !trio.is_empty() {
+    let (shuffle, repeat, others) = take_flanks(rest);
+    let n = trio.len() + shuffle.iter().len() + repeat.iter().len();
+    if n > 0 {
         ui.horizontal(|ui| {
-            let n = trio.len() as f32;
+            let n = n as f32;
             let width = n * style::ICON_SIDE + (n - 1.0) * ui.spacing().item_spacing.x;
             ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            if let Some(Ctl::Shuffle(on)) = shuffle {
+                let tip = if on { "shuffle: on" } else { "shuffle: off" };
+                if style::toggle_button(ui, Icon::Shuffle, on).on_hover_text(tip).clicked() {
+                    m.toggle_shuffle();
+                }
+            }
             for c in &trio {
                 match *c {
                     Ctl::Prev => {
@@ -85,53 +107,50 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
                     Ctl::Shuffle(_) | Ctl::Repeat(_) | Ctl::Volume(_) => {}
                 }
             }
+            if let Some(Ctl::Repeat(r)) = repeat {
+                let (icon, tip) = match r {
+                    Loop::None => (Icon::Repeat, "repeat: off"),
+                    Loop::Track => (Icon::RepeatOne, "repeat: this song"),
+                    Loop::Playlist => (Icon::Repeat, "repeat: all"),
+                };
+                if style::toggle_button(ui, icon, r != Loop::None).on_hover_text(tip).clicked() {
+                    m.cycle_repeat();
+                }
+            }
         });
     }
+    let spotify = m.spot.on();
+    if others.is_empty() && !spotify {
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
-        for c in rest {
-            match c {
-                Ctl::Shuffle(on) => {
-                    if ui.selectable_label(on, "shuffle").clicked() {
-                        m.toggle_shuffle();
+        for c in others {
+            if let Ctl::Volume(v) = c {
+                // mute button, the slider (the wheel over it steps by `volume_step`), and
+                // the percentage, which mutes when clicked
+                let muted = m.muted();
+                let waves = if muted || v <= 0.0 { 0 } else if v < 0.5 { 1 } else { 2 };
+                if style::toggle_button(ui, Icon::Volume(waves), muted).on_hover_text("mute / unmute (m)").clicked() {
+                    m.toggle_mute();
+                }
+                let mut pct = (v * 100.0) as f32;
+                ui.spacing_mut().slider_width = 90.0;
+                let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(false));
+                if r.changed() {
+                    m.drag_volume(pct as f64 / 100.0);
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    m.flush_volume(true);
+                }
+                if r.hovered() {
+                    let dy = ui.input(|i| i.smooth_scroll_delta.y);
+                    if dy != 0.0 {
+                        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                        m.volume_step(if dy > 0.0 { 1 } else { -1 });
                     }
                 }
-                Ctl::Repeat(r) => {
-                    let label = match r {
-                        Loop::None => "repeat",
-                        Loop::Track => "repeat 1",
-                        Loop::Playlist => "repeat all",
-                    };
-                    if ui.selectable_label(r != Loop::None, label).clicked() {
-                        m.cycle_repeat();
-                    }
-                }
-                Ctl::Prev | Ctl::Play(_) | Ctl::Next => {}
-                Ctl::Volume(v) => {
-                    // mute button, the slider (the wheel over it steps by `volume_step`), and
-                    // the percentage, which mutes when clicked
-                    let muted = m.muted();
-                    if ui.selectable_label(muted, if muted { "muted" } else { "mute" }).on_hover_text("mute / unmute (m)").clicked() {
-                        m.toggle_mute();
-                    }
-                    let mut pct = (v * 100.0) as f32;
-                    ui.spacing_mut().slider_width = 90.0;
-                    let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(false));
-                    if r.changed() {
-                        m.drag_volume(pct as f64 / 100.0);
-                    }
-                    if r.drag_stopped() || r.lost_focus() {
-                        m.flush_volume(true);
-                    }
-                    if r.hovered() {
-                        let dy = ui.input(|i| i.smooth_scroll_delta.y);
-                        if dy != 0.0 {
-                            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                            m.volume_step(if dy > 0.0 { 1 } else { -1 });
-                        }
-                    }
-                    if ui.add(egui::Label::new(format!("{pct:.0}%")).sense(egui::Sense::click())).on_hover_text("click to mute / unmute").clicked() {
-                        m.toggle_mute();
-                    }
+                if ui.add(egui::Label::new(format!("{pct:.0}%")).sense(egui::Sense::click())).on_hover_text("click to mute / unmute").clicked() {
+                    m.toggle_mute();
                 }
             }
         }
@@ -199,6 +218,14 @@ mod tests {
         // a player without prev / next still has its play button alone in the middle
         let (trio, rest) = split_trio(vec![Ctl::Play(false)]);
         assert_eq!((trio.len(), rest.len()), (1, 0));
+    }
+
+    #[test]
+    fn shuffle_and_repeat_flank_the_middle_and_the_volume_stays_below() {
+        let (sh, rp, others) = take_flanks(vec![Ctl::Repeat(Loop::Track), Ctl::Volume(0.5), Ctl::Shuffle(false)]);
+        assert_eq!((sh, rp), (Some(Ctl::Shuffle(false)), Some(Ctl::Repeat(Loop::Track))));
+        assert_eq!(others, [Ctl::Volume(0.5)]);
+        assert_eq!(take_flanks(vec![]), (None, None, vec![]));
     }
 
     #[test]

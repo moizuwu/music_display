@@ -712,22 +712,25 @@ fn mmss(secs: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// The like / devices / play here / library buttons for the end of the transport row.
+/// The like / devices / play here buttons for the end of the transport row: drawn icons like
+/// the other transport buttons (a heart, Spotify's Connect speaker, a screen with a play sign).
 pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
+    use super::style::{Icon, toggle_button};
     if !m.spot.on() {
         return;
     }
     let uri = m.playing_uri();
     if uri.is_some() {
         let on = m.spot.liked == Some(true);
-        if ui.selectable_label(on, if on { "♥" } else { "♡" }).on_hover_text("like / unlike this song (Liked Songs)").clicked() {
+        let tip = if on { "remove from Liked Songs" } else { "add to Liked Songs" };
+        if toggle_button(ui, Icon::Heart(on), on).on_hover_text(tip).clicked() {
             m.spot.toggle_like(uri);
         }
     }
-    if ui.button("devices").on_hover_text("move playback to another Spotify Connect device").clicked() {
+    if toggle_button(ui, Icon::Devices, false).on_hover_text("devices: move playback to another Spotify Connect device").clicked() {
         m.spot.open_devices();
     }
-    if ui.button("play here").on_hover_text("move playback to this computer").clicked() {
+    if toggle_button(ui, Icon::PlayHere, false).on_hover_text("play here: move playback to this computer").clicked() {
         m.spot.cmd(Cmd::Transfer);
     }
     m.take_spot_note();
@@ -873,6 +876,7 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
                     ListRow::Item(i) => {
                         let it = &l.items[i];
                         let bg = ui.painter().add(egui::Shape::Noop);
+                        let acts_before = acts.len();
                         let row = ui.horizontal(|ui| {
                             if picking {
                                 if ui.button("add").clicked() {
@@ -905,6 +909,14 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
                                 ui.label(RichText::new(mmss(it.duration)).weak().monospace());
                             }
                         });
+                        // a double click on the row (not on one of its buttons) plays it
+                        if !picking
+                            && acts.len() == acts_before
+                            && row.response.hovered()
+                            && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+                        {
+                            acts.push(Act::Play(i));
+                        }
                         // the keyboard's row
                         if i == l.sel {
                             let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);

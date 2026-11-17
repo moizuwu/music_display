@@ -9,6 +9,7 @@ which turns the `Unreleased` section into that version.
 
 ### Added
 
+- The window's shuffle, repeat, mute, like, devices and play here buttons are drawn icons now, in the style of Spotify's (shuffle and repeat beside previous / play / next, dim when off, accent colour with a dot when on, "1" for repeat one); a double click on a library row plays it.
 - Standalone use without a terminal: `install.sh` and the Linux release build include the window (`--gui`) and add an "mdis" app-menu entry with the new logo (`--no-gui` for the old terminal-only build); the window and its pop-outs carry the logo as their icon.
 
 ## [0.2.2] - 2026-11-12
