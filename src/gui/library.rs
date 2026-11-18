@@ -28,7 +28,7 @@ pub struct Spot {
     mpris: bool,
     /// A message for the note line, taken by the model.
     pub note: Option<String>,
-    tx: UnboundedSender<AppEvent>,
+    pub(super) tx: UnboundedSender<AppEvent>,
     client: reqwest::Client,
     /// The poller of `/me/player`, stopped when Spotify is switched off or rebuilt.
     task: Option<tokio::task::JoinHandle<()>>,
@@ -43,6 +43,13 @@ pub struct Spot {
     /// Tabs still to load in the background, and when the next one may go.
     preload: std::collections::VecDeque<usize>,
     preload_at: Option<Instant>,
+    /// Set by "Go to artist" / "Go to album" in a row menu (`sp_actions`): the `spotify:artist:…`
+    /// or `spotify:album:…` URI to show. The Spotify pages read it and `take()` it.
+    pub pending_nav: Option<String>,
+    /// Tabs to read again once the next write command (`Cmd::CreatePlaylist`…) has gone through.
+    pub reload_after: Vec<usize>,
+    /// The Spotify layout's pages, their data and pictures.
+    pub pg: super::sp_nav::Pages,
 }
 
 /// The library lists load in the background after the start (as in the terminal front end):
@@ -74,6 +81,9 @@ impl Spot {
             nav_moved: false,
             preload: Default::default(),
             preload_at: None,
+            pending_nav: None,
+            reload_after: Vec::new(),
+            pg: Default::default(),
         };
         s.lib.queue_tab = !args.no_spotify_queue_tab;
         if args.spotify {
@@ -145,7 +155,10 @@ impl Spot {
         self.status = None;
         self.devices = None;
         self.open = false;
+        self.pending_nav = None;
+        self.reload_after.clear();
         self.lib = Library::new();
+        self.pg = Default::default();
     }
 
     /// Build the client again from the flags (`spotify`, Client ID, device name, spotifyd, queue
@@ -332,6 +345,14 @@ impl Spot {
         if self.api.is_none() {
             return;
         }
+        // an edit went through: the lists it changed are read again
+        if let Reply::Done(res) = &r {
+            for tab in std::mem::take(&mut self.reload_after) {
+                if res.is_ok() {
+                    self.load_tab(tab, true);
+                }
+            }
+        }
         match r {
             Reply::Login(_) => {}
             Reply::Remote(Err(e)) => {
@@ -439,6 +460,9 @@ impl Spot {
                     self.say(e);
                 }
             }
+            // the Spotify layout's pages show their own errors
+            Reply::Page { key, result } => self.pg.on_page(&key, result),
+            Reply::Image { url, img } => self.pg.images.on_image(&url, img),
             Reply::Devices(res) => {
                 let Some(d) = &mut self.devices else { return };
                 d.loading = false;
@@ -500,6 +524,10 @@ impl Spot {
         }
         let remote = self.remote.as_ref().map(|(r, _)| r);
         let Some(link) = crate::browser::library_link(f, snap, genre, remote) else { return };
+        // the Spotify layout has its own pages for these
+        if self.pg.active {
+            return self.open_link(link);
+        }
         self.open_library();
         match link {
             LibLink::Open(it) => {
@@ -737,7 +765,12 @@ pub fn heart_button(ui: &mut Ui, m: &mut Model) {
     if uri.is_some() {
         let on = m.spot.liked == Some(true);
         let tip = if on { "Remove from Liked Songs" } else { "Add to Liked Songs" };
-        if toggle_button(ui, Icon::Heart(on), on).on_hover_text(tip).clicked() {
+        let heart = toggle_button(ui, Icon::Heart(on), on).on_hover_text(tip);
+        if heart.clicked() {
+            // liking (not un-liking) bursts confetti when it is switched on
+            if !on && m.gui.confetti {
+                super::fun::burst(ui.ctx(), heart.rect.center());
+            }
             m.spot.toggle_like(uri);
         }
     }
@@ -750,7 +783,10 @@ pub fn connect_buttons(ui: &mut Ui, m: &mut Model) {
     if !m.spot.on() {
         return;
     }
-    if toggle_button(ui, Icon::Devices, false).on_hover_text("Devices: move playback to another Spotify Connect device").clicked() {
+    if m.gui.spotify_layout {
+        // the Spotify layout lists the devices in a popup above the player bar
+        super::sp_actions::device_button(ui, m);
+    } else if toggle_button(ui, Icon::Devices, false).on_hover_text("Devices: move playback to another Spotify Connect device").clicked() {
         m.spot.open_devices();
     }
     if toggle_button(ui, Icon::PlayHere, false).on_hover_text("Play here: move playback to this computer").clicked() {
@@ -825,7 +861,7 @@ pub fn windows(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look
     if m.spot.open {
         library_window(ctx, m, look);
     }
-    if m.spot.devices.is_some() {
+    if m.spot.devices.is_some() && !m.gui.spotify_layout {
         devices_window(ctx, m, look);
     }
     m.take_spot_note();
@@ -834,7 +870,10 @@ pub fn windows(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look
 fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
     let mut open = true;
     let g = m.gui.clone();
-    super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| library_body(ui, m));
+    super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| {
+        super::sp_actions::playlist_tools(ui, m);
+        library_body(ui, m);
+    });
     if !open {
         m.spot.open = false;
     }
@@ -845,6 +884,8 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
 pub fn library_body(ui: &mut Ui, m: &mut Model) {
     use super::style::{Icon, ROW_SIDE, tool};
     let mut acts: Vec<Act> = Vec::new();
+    // the rows' right-click menus are shown after the lists are drawn (they need the whole model)
+    let mut menus: Vec<(egui::Response, spotify::Item)> = Vec::new();
     let moved = std::mem::take(&mut m.spot.nav_moved);
     // the song that is playing is in Liked Songs: its row shows a filled heart
     let liked_row = (m.spot.liked == Some(true)).then(|| m.spot.liked_uri.clone());
@@ -963,6 +1004,9 @@ pub fn library_body(ui: &mut Ui, m: &mut Model) {
                     {
                         acts.push(Act::Play(i));
                     }
+                    if !picking {
+                        menus.push((row.response.clone(), it.clone()));
+                    }
                     // the keyboard's row
                     if i == l.sel {
                         let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);
@@ -978,6 +1022,10 @@ pub fn library_body(ui: &mut Ui, m: &mut Model) {
             ui.label(RichText::new("nothing here").weak());
         }
     });
+    let level_uri = Some(m.spot.lib.level().uri.clone()).filter(|u| !u.is_empty());
+    for (resp, it) in &menus {
+        super::sp_actions::item_menu(resp, m, it, level_uri.as_deref());
+    }
     for a in acts {
         match a {
             Act::Tab(i) => m.spot.switch_tab(i),

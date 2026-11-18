@@ -38,6 +38,7 @@ pub struct Look {
     dirty: bool,
     /// "Reset appearance" was pressed once and asks again.
     pub confirm_reset: bool,
+    pub presets: super::presets::State,
 }
 
 /// The logo as the window icon (the same one for every window of the program).
@@ -85,6 +86,7 @@ fn for_mode(sys: Option<&Colors>, dark: bool) -> Option<&Colors> {
 fn base(g: &GuiConf, sys: Option<&Colors>, dark: bool) -> Rgb {
     for_mode(sys, dark)
         .and_then(|c| c.surface)
+        .or(g.window_color)
         .or_else(|| g.theme_preset.base(dark))
         .unwrap_or(if dark { (27, 27, 31) } else { (243, 243, 246) })
 }
@@ -321,6 +323,11 @@ fn style(g: &GuiConf, cover: Option<Rgb>, sys: Option<&Colors>, dark: bool) -> e
             v.override_text_color = Some(rgb32(text));
         }
     }
+    // own text colours of the settings, when the system gave none
+    if v.override_text_color.is_none() {
+        v.override_text_color = g.text_color.map(rgb32);
+    }
+    v.weak_text_color = g.muted_color.map(rgb32);
     let r = CornerRadius::same(g.corner_radius);
     v.window_corner_radius = CornerRadius::same(g.corner_radius.saturating_add(4));
     v.menu_corner_radius = r;
@@ -433,9 +440,40 @@ pub fn gutter(g: &GuiConf) -> Frame {
 
 /// A rounded card behind a panel's content: `panel_opacity` fill, optional border.
 pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_at(ui, g, Split::NONE, add)
+}
+
+/// Which sides of a card touch a split (the draggable border between two columns, or between
+/// two stacked rows): the corners on those sides are square, the outer ones stay rounded.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Split {
+    /// A split before the card (left of it, or above it when `vertical`).
+    pub before: bool,
+    /// A split after it (right of it, or below it).
+    pub after: bool,
+    /// The columns are stacked top to bottom (`layout.direction` vertical).
+    pub vertical: bool,
+}
+
+impl Split {
+    pub const NONE: Split = Split { before: false, after: false, vertical: false };
+
+    /// The corners of a card with radius `r`, square where a split is.
+    pub fn corners(self, r: u8) -> CornerRadius {
+        let (b, a) = (if self.before { 0 } else { r }, if self.after { 0 } else { r });
+        if self.vertical {
+            CornerRadius { nw: b, ne: b, sw: a, se: a }
+        } else {
+            CornerRadius { nw: b, sw: b, ne: a, se: a }
+        }
+    }
+}
+
+/// [`card`], with square corners on the sides in `split`.
+pub fn card_at<R>(ui: &mut Ui, g: &GuiConf, split: Split, add: impl FnOnce(&mut Ui) -> R) -> R {
     let dark = ui.visuals().dark_mode;
     let sys = system(ui.ctx());
-    let fill = match (for_mode(sys.as_ref(), dark).and_then(|c| c.surface), g.theme_preset.card(dark)) {
+    let fill = match (for_mode(sys.as_ref(), dark).and_then(|c| c.surface), g.card_color.or_else(|| g.theme_preset.card(dark))) {
         // a little lighter (or darker) than the window colour the system gave
         (Some(s), _) => rgb32(color::mix(s, if dark { (255, 255, 255) } else { (0, 0, 0) }, if dark { 0.07 } else { 0.04 })),
         (None, Some(c)) => rgb32(c),
@@ -448,7 +486,7 @@ pub fn card<R>(ui: &mut Ui, g: &GuiConf, add: impl FnOnce(&mut Ui) -> R) -> R {
     let h = ui.available_height();
     Frame::new()
         .fill(with_alpha(fill, alpha))
-        .corner_radius(CornerRadius::same(g.corner_radius))
+        .corner_radius(split.corners(g.corner_radius))
         .stroke(if g.panel_borders { Stroke::new(1.0, line) } else { Stroke::NONE })
         .inner_margin(Margin::same(margin))
         .show(ui, |ui| {
@@ -490,6 +528,9 @@ pub enum Icon {
     Windows,
     Back,
     Open,
+    Home,
+    /// The lyrics: a speech bubble with lines of text.
+    Lyrics,
     Refresh,
     Search,
     Close,
@@ -503,6 +544,15 @@ pub enum Icon {
     Queue,
     /// Add to a playlist.
     AddList,
+    // ── editing and devices (sp_actions.rs) ──
+    /// A pencil: rename.
+    Edit,
+    Trash,
+    Check,
+    /// A device that is a speaker, a computer or a phone.
+    Speaker,
+    Computer,
+    Phone,
 }
 
 /// The size of every transport button (previous, play / pause, next alike).
@@ -568,6 +618,11 @@ fn paint_button(ui: &mut Ui, icon: Icon, mut ink: Color32, dot: bool, side: f32)
         p.circle_filled(Pos2::new(c.x, r.bottom() - 2.5), 1.6, ink);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// An icon drawn on its own (no button around it), centred on `c`, in a box of `side`.
+pub fn icon_at(p: &egui::Painter, c: Pos2, side: f32, icon: Icon, ink: Color32) {
+    draw_icon(p, c, side * 0.2, icon, ink);
 }
 
 fn p_hover(ui: &Ui, r: Rect, side: f32, down: bool) {
@@ -762,6 +817,15 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
                 p.rect_stroke(Rect::from_min_max(at(x, y), at(x + 5.0, y + 5.0)), 1.2 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
             }
         }
+        Icon::Lyrics => {
+            closed(&[at(2.0, 3.0), at(14.0, 3.0), at(14.0, 11.0), at(8.5, 11.0), at(4.5, 14.2), at(4.5, 11.0), at(2.0, 11.0)], &[at(2.0, 3.0), at(14.0, 3.0), at(14.0, 11.0), at(2.0, 11.0), at(4.5, 14.2)]);
+            stroke(&[at(5.5, 5.0), at(10.5, 5.0)]);
+            stroke(&[at(5.5, 7.5), at(9.0, 7.5)]);
+        }
+        Icon::Home => {
+            stroke(&[at(1.5, 7.6), at(8.0, 2.0), at(14.5, 7.6)]);
+            stroke(&[at(3.2, 6.6), at(3.2, 14.0), at(6.6, 14.0), at(6.6, 10.0), at(9.4, 10.0), at(9.4, 14.0), at(12.8, 14.0), at(12.8, 6.6)]);
+        }
         Icon::Back => stroke(&[at(10.0, 2.5), at(4.5, 8.0), at(10.0, 13.5)]),
         Icon::Open => stroke(&[at(6.0, 2.5), at(11.5, 8.0), at(6.0, 13.5)]),
         Icon::Refresh => {
@@ -798,6 +862,33 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
             stroke(&[at(2.0, 12.0), at(6.0, 12.0)]);
             stroke(&[at(12.5, 9.5), at(12.5, 14.5)]);
             stroke(&[at(10.0, 12.0), at(15.0, 12.0)]);
+        }
+        // ── editing and devices ──
+        Icon::Edit => {
+            closed(&[at(10.6, 2.6), at(13.4, 5.4), at(5.6, 13.2), at(2.4, 13.6), at(2.8, 10.4)], &[at(10.6, 2.6), at(13.4, 5.4)]);
+            stroke(&[at(9.0, 4.4), at(11.6, 7.0)]);
+        }
+        Icon::Trash => {
+            stroke(&[at(2.5, 4.2), at(13.5, 4.2)]);
+            stroke(&[at(6.0, 4.2), at(6.0, 2.5), at(10.0, 2.5), at(10.0, 4.2)]);
+            stroke(&[at(4.2, 4.2), at(5.0, 13.5), at(11.0, 13.5), at(11.8, 4.2)]);
+            stroke(&[at(6.6, 6.6), at(6.8, 11.2)]);
+            stroke(&[at(9.4, 6.6), at(9.2, 11.2)]);
+        }
+        Icon::Check => stroke(&[at(2.8, 8.6), at(6.4, 12.2), at(13.2, 4.6)]),
+        Icon::Speaker => {
+            p.rect_stroke(Rect::from_min_max(at(4.0, 1.5), at(12.0, 14.5)), 1.6 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
+            p.circle_stroke(at(8.0, 9.4), 2.3 * k, Stroke::new(w, ink));
+            p.circle_filled(at(8.0, 4.6), 0.9 * k, ink);
+        }
+        Icon::Computer => {
+            p.rect_stroke(Rect::from_min_max(at(2.0, 3.0), at(14.0, 10.8)), 1.4 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
+            stroke(&[at(8.0, 10.8), at(8.0, 13.4)]);
+            stroke(&[at(4.8, 13.5), at(11.2, 13.5)]);
+        }
+        Icon::Phone => {
+            p.rect_stroke(Rect::from_min_max(at(4.5, 1.5), at(11.5, 14.5)), 1.6 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
+            p.circle_filled(at(8.0, 12.3), 0.8 * k, ink);
         }
     }
 }
@@ -836,6 +927,8 @@ fn slider<N: egui::emath::Numeric>(ui: &mut Ui, label: &str, v: &mut N, range: s
 /// and is written to `[gui]` once the pointer is released.
 pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     let mut changed = false;
+    super::presets::section(ui, m, &mut look.presets);
+    ui.separator();
     let g = &mut m.gui;
     ui.label(egui::RichText::new("Changes show at once and are saved to [gui] in config.toml.").small().weak());
     ui.heading("Look");
@@ -930,8 +1023,18 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     changed |= ui.checkbox(&mut g.decorations, "Window title bar and borders").changed();
     changed |= ui.checkbox(&mut g.always_on_top, "Keep the window on top").changed();
     changed |= ui.checkbox(&mut g.spotify_layout, "Spotify layout (experimental): library left, lyrics middle, song right, player bar at the bottom").changed();
+    changed |= super::spotify_view::bar_settings(ui, g);
     changed |= ui.checkbox(&mut g.float_windows, "Open the extra windows floating (Hyprland, sway, niri)").changed();
     changed |= ui.checkbox(&mut g.remember_window, "Remember window size and position (next start)").changed();
+
+    ui.separator();
+    ui.heading("Fun");
+    changed |= ui.checkbox(&mut g.vinyl, "Vinyl: the cover spins like a record while the song plays").changed();
+    changed |= ui.checkbox(&mut g.confetti, "Confetti: liking a song bursts hearts from the heart button").changed();
+    changed |= ui.checkbox(&mut g.beat_pulse, "Beat pulse: the play button glows with the music (starts cava)").changed();
+    if g.vinyl || g.beat_pulse {
+        ui.label(egui::RichText::new("These redraw the window about 30 times a second while they move.").small().weak());
+    }
 
     ui.separator();
     ui.heading("Colour");
@@ -1095,6 +1198,18 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn corners_touching_a_split_are_square() {
+        let r = 12;
+        assert_eq!(Split::NONE.corners(r), CornerRadius::same(r));
+        // a middle column: square on both sides
+        assert_eq!(Split { before: true, after: true, vertical: false }.corners(r), CornerRadius::ZERO);
+        // the first column: rounded left, square right
+        assert_eq!(Split { before: false, after: true, vertical: false }.corners(r), CornerRadius { nw: r, sw: r, ne: 0, se: 0 });
+        // stacked rows: the split is below the first one
+        assert_eq!(Split { before: false, after: true, vertical: true }.corners(r), CornerRadius { nw: r, ne: r, sw: 0, se: 0 });
+    }
+
     fn sys(dark: Option<bool>) -> Colors {
         Colors { surface: Some((20, 22, 30)), primary: Some((10, 200, 10)), text: Some((230, 230, 240)), dark, source: "test".into() }
     }
@@ -1119,6 +1234,14 @@ mod tests {
         // a colour source with a surface and no accent leaves the accent alone
         let only_surface = Colors { primary: None, ..sys(Some(true)) };
         assert_eq!(accent_of(&g, None, Some(&only_surface)), Some((242, 201, 76)));
+    }
+
+    #[test]
+    fn own_colours_replace_the_looks_but_not_the_systems() {
+        let g = GuiConf { window_color: Some((1, 2, 3)), theme_preset: Preset::Halloween, ..GuiConf::default() };
+        assert_eq!(base(&g, None, true), (1, 2, 3));
+        let c = sys(None);
+        assert_eq!(Some(base(&g, Some(&c), true)), c.surface);
     }
 
     #[test]

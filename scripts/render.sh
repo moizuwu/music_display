@@ -5,4 +5,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out="${1:-target/render/main.png}"
 MDIS_RENDER="$out" cargo test --features gui render_main_view -- --nocapture 2>&1 | grep -E "rendered|panicked|error" || true
-[ -f "$out" ] && echo "$out" && echo "${out%.png}-spotify.png"
+[ -f "$out" ] && ls "${out%.png}"*.png

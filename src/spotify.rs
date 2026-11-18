@@ -415,6 +415,20 @@ fn names(v: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// The `range_start` and `insert_before` of Spotify's reorder call that move one song from index
+/// `from` so that it ends up at index `to` (inserting before an index counts the song's old place).
+pub fn move_range(from: usize, to: usize) -> (usize, usize) {
+    (from, if to > from { to + 1 } else { to })
+}
+
+/// The `https://open.spotify.com/…` link of a `spotify:kind:id` URI (`None` for what has none).
+pub fn web_link(uri: &str) -> Option<String> {
+    let mut p = uri.split(':');
+    let (_, kind, id) = (p.next().filter(|s| *s == "spotify")?, p.next()?, p.next()?);
+    (p.next().is_none() && !id.is_empty() && matches!(kind, "track" | "album" | "artist" | "playlist" | "show" | "episode"))
+        .then(|| format!("https://open.spotify.com/{kind}/{id}"))
+}
+
 pub fn uri_id(uri: &str) -> &str {
     uri.rsplit(':').next().unwrap_or(uri)
 }
@@ -451,6 +465,13 @@ pub struct Item {
     pub openable: bool,
     /// Seconds (tracks only).
     pub duration: f64,
+    /// The cover / picture (a URL; empty when the API gave none).
+    pub image: String,
+    /// The album of a song: its name and URI.
+    pub album: String,
+    pub album_uri: String,
+    /// The first artist of a song or album.
+    pub artist_uri: String,
 }
 
 pub fn track_item(t: &Value) -> Option<Item> {
@@ -465,6 +486,10 @@ pub fn track_item(t: &Value) -> Option<Item> {
         sub: names(&t["artists"]),
         openable: false,
         duration: t["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0,
+        image: image(&t["album"]["images"], 64),
+        album: s(&t["album"]["name"]),
+        album_uri: s(&t["album"]["uri"]),
+        artist_uri: s(&t["artists"][0]["uri"]),
     })
 }
 
@@ -564,7 +589,9 @@ pub fn artist_rows(mut albums: Vec<Value>, mut singles: Vec<Value>) -> (String, 
             name: s(&a["name"]),
             sub: if year.is_empty() { label.to_string() } else { format!("{year} · {label}") },
             openable: true,
-            duration: 0.0,
+            image: image(&a["images"], 300),
+            artist_uri: s(&a["artists"][0]["uri"]),
+            ..Default::default()
         }
     };
     let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
@@ -615,7 +642,9 @@ pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
         name: s(&a["name"]),
         sub: names(&a["artists"]),
         openable: true,
-        duration: 0.0,
+        image: image(&a["images"], 300),
+        artist_uri: s(&a["artists"][0]["uri"]),
+        ..Default::default()
     }));
     out.extend(list("artists").iter().filter(|a| a.is_object()).map(|a| Item {
         kind: "artist".into(),
@@ -623,7 +652,8 @@ pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
         name: s(&a["name"]),
         sub: "Artist".into(),
         openable: true,
-        duration: 0.0,
+        image: image(&a["images"], 300),
+        ..Default::default()
     }));
     // playlists may contain nulls (removed or private ones)
     out.extend(list("playlists").iter().filter(|p| p.is_object()).map(|p| {
@@ -635,7 +665,8 @@ pub fn parse_search(v: &Value, uid: &str) -> Vec<Item> {
             name: s(&p["name"]),
             sub: if own { "Playlist".into() } else { format!("by {by}") },
             openable: own,
-            duration: 0.0,
+            image: image(&p["images"], 300),
+            ..Default::default()
         }
     }));
     out.retain(|i| !i.uri.is_empty() && !i.name.is_empty());
@@ -683,12 +714,27 @@ pub enum Cmd {
     /// A context (album / playlist / artist / `liked`), optionally starting at a track;
     /// or a single `spotify:track:` URI.
     Play { ctx: String, track: String },
+    /// A context played with shuffle switched on (the big play button of a page).
+    PlayShuffled(String),
     Transfer,
     /// Move playback to this device (id, name for the note).
     TransferTo { id: String, name: String },
     Queue(String),
     Like(String, bool),
     Add { playlist: String, name: String, track: String },
+    // ── editing (write) ── (handled by `Api::edit`)
+    /// A new private playlist; with a `track` it starts with that song.
+    CreatePlaylist { name: String, description: String, track: String },
+    /// Change a playlist's name and / or description (`None` = leave as is).
+    EditPlaylist { playlist: String, name: Option<String>, description: Option<String> },
+    /// "Delete" a playlist: Spotify only lets you unfollow it.
+    DeletePlaylist(String),
+    RemoveFromPlaylist { playlist: String, track: String },
+    /// Move the song at index `from` so it ends up at index `to`.
+    MoveInPlaylist { playlist: String, from: usize, to: usize },
+    SaveAlbum(String, bool),
+    FollowArtist(String, bool),
+    FollowPlaylist(String, bool),
 }
 
 /// Results for the app, tagged with what asked for them.
@@ -709,6 +755,10 @@ pub enum Reply {
     Search { q: String, result: Result<Vec<Item>, String> },
     /// The device list for the picker.
     Devices(Result<Vec<Device>, String>),
+    /// A page of the window's Spotify layout (`key` says which one).
+    Page { key: String, result: Result<Box<PageData>, String> },
+    /// A picture finished downloading (`None`: it could not be had).
+    Image { url: String, img: Option<Box<image::RgbaImage>> },
 }
 
 #[derive(Clone)]
@@ -923,30 +973,40 @@ impl Api {
                 name,
                 sub: sub.into(),
                 openable,
-                duration: 0.0,
+                ..Default::default()
             };
-            let item = match kind.as_str() {
+            let mut img = String::new();
+            let mut item = match kind.as_str() {
                 "album" => {
                     let name = if s(&t["album"]["uri"]) == uri {
+                        img = image(&t["album"]["images"], 300);
                         s(&t["album"]["name"])
                     } else {
-                        self.get(&format!("/albums/{}", uri_id(&uri)), &[]).await.map(|a| s(&a["name"])).unwrap_or_default()
+                        match self.get(&format!("/albums/{}", uri_id(&uri)), &[]).await {
+                            Ok(a) => {
+                                img = image(&a["images"], 300);
+                                s(&a["name"])
+                            }
+                            Err(_) => String::new(),
+                        }
                     };
                     one(name, "Album", true)
                 }
                 "playlist" => {
                     let Ok(pl) = self
-                        .get(&format!("/playlists/{}", uri_id(&uri)), &[("fields", "name,owner(id)".into())])
+                        .get(&format!("/playlists/{}", uri_id(&uri)), &[("fields", "name,images,owner(id)".into())])
                         .await
                     else {
                         continue;
                     };
                     let own = s(&pl["owner"]["id"]) == self.me_id().await.unwrap_or_default();
+                    img = image(&pl["images"], 300);
                     one(s(&pl["name"]), "Playlist", own)
                 }
                 "artist" => {
-                    let name = self.get(&format!("/artists/{}", uri_id(&uri)), &[]).await.map(|a| s(&a["name"])).unwrap_or_default();
-                    one(name, "Artist", true)
+                    let a = self.get(&format!("/artists/{}", uri_id(&uri)), &[]).await.unwrap_or_default();
+                    img = image(&a["images"], 300);
+                    one(s(&a["name"]), "Artist", true)
                 }
                 "collection" => Item {
                     kind: "liked".into(),
@@ -954,10 +1014,13 @@ impl Api {
                     name: "Liked Songs".into(),
                     sub: "Playlist".into(),
                     openable: true,
-                    duration: 0.0,
+                    ..Default::default()
                 },
                 _ => continue,
             };
+            if item.image.is_empty() {
+                item.image = img;
+            }
             if !item.name.is_empty() {
                 out.push(item);
             }
@@ -984,7 +1047,8 @@ impl Api {
                     name: s(&p["name"]),
                     sub: if own { format!("{count} songs") } else { format!("by {by}") },
                     openable: own,
-                    duration: 0.0,
+                    image: image(&p["images"], 300),
+                    ..Default::default()
                 }
             })
             .collect())
@@ -995,7 +1059,7 @@ impl Api {
         let list = self.paged("/me/following", &q, usize::MAX, Some("artists")).await?;
         Ok(list
             .iter()
-            .map(|a| Item { kind: "artist".into(), uri: s(&a["uri"]), name: s(&a["name"]), sub: "Artist".into(), openable: true, duration: 0.0 })
+            .map(|a| Item { kind: "artist".into(), uri: s(&a["uri"]), name: s(&a["name"]), sub: "Artist".into(), openable: true, image: image(&a["images"], 300), ..Default::default() })
             .collect())
     }
 
@@ -1005,7 +1069,16 @@ impl Api {
             .iter()
             .map(|x| {
                 let a = &x["album"];
-                Item { kind: "album".into(), uri: s(&a["uri"]), name: s(&a["name"]), sub: names(&a["artists"]), openable: true, duration: 0.0 }
+                Item {
+                    kind: "album".into(),
+                    uri: s(&a["uri"]),
+                    name: s(&a["name"]),
+                    sub: names(&a["artists"]),
+                    openable: true,
+                    image: image(&a["images"], 300),
+                    artist_uri: s(&a["artists"][0]["uri"]),
+                    ..Default::default()
+                }
             })
             .collect())
     }
@@ -1153,6 +1226,86 @@ impl Api {
         Ok("Playing the last song".into())
     }
 
+    // ── editing (write) ──
+
+    /// Save / remove / follow / unfollow in your library: one endpoint for every kind of URI.
+    async fn library_set(&self, uri: &str, on: bool) -> Res<()> {
+        let m = if on { Method::PUT } else { Method::DELETE };
+        self.call(m, "/me/library", &[("uris", uri.to_string())], None).await.map(|_| ())
+    }
+
+    /// The write commands. Every failure comes back as a note; nothing here can panic.
+    async fn edit(&self, cmd: Cmd) -> Res<String> {
+        match cmd {
+            Cmd::CreatePlaylist { name, description, track } => {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(ApiError::new("give the playlist a name", 400));
+                }
+                let mut body = json!({"name": name, "public": false});
+                if !description.trim().is_empty() {
+                    body["description"] = description.trim().into();
+                }
+                let made = self.call(Method::POST, "/me/playlists", &[], Some(body)).await?.unwrap_or(Value::Null);
+                let id = s(&made["id"]);
+                if id.is_empty() {
+                    return Err(ApiError::new("Spotify did not say which playlist it made", 502));
+                }
+                if !track.is_empty() {
+                    let path = format!("/playlists/{id}/items");
+                    self.call(Method::POST, &path, &[], Some(json!({"uris": [track]}))).await?;
+                }
+                Ok(format!("Created {name}"))
+            }
+            Cmd::EditPlaylist { playlist, name, description } => {
+                let mut body = serde_json::Map::new();
+                if let Some(n) = name.map(|n| n.trim().to_string()) {
+                    if n.is_empty() {
+                        return Err(ApiError::new("a playlist needs a name", 400));
+                    }
+                    body.insert("name".into(), n.into());
+                }
+                if let Some(d) = description {
+                    body.insert("description".into(), d.trim().into());
+                }
+                if body.is_empty() {
+                    return Ok(String::new());
+                }
+                self.call(Method::PUT, &format!("/playlists/{}", uri_id(&playlist)), &[], Some(Value::Object(body))).await?;
+                Ok("Playlist updated".into())
+            }
+            Cmd::DeletePlaylist(uri) => {
+                self.library_set(&uri, false).await?;
+                Ok("Playlist deleted".into())
+            }
+            Cmd::RemoveFromPlaylist { playlist, track } => {
+                let path = format!("/playlists/{}/items", uri_id(&playlist));
+                self.call(Method::DELETE, &path, &[], Some(json!({"items": [{"uri": track}]}))).await?;
+                Ok("Removed from the playlist".into())
+            }
+            Cmd::MoveInPlaylist { playlist, from, to } => {
+                let (range_start, insert_before) = move_range(from, to);
+                let path = format!("/playlists/{}/items", uri_id(&playlist));
+                let body = json!({"range_start": range_start, "insert_before": insert_before, "range_length": 1});
+                self.call(Method::PUT, &path, &[], Some(body)).await?;
+                Ok(String::new())
+            }
+            Cmd::SaveAlbum(uri, on) => {
+                self.library_set(&uri, on).await?;
+                Ok(if on { "Album saved" } else { "Album removed from your library" }.into())
+            }
+            Cmd::FollowArtist(uri, on) => {
+                self.library_set(&uri, on).await?;
+                Ok(if on { "Following the artist" } else { "Unfollowed the artist" }.into())
+            }
+            Cmd::FollowPlaylist(uri, on) => {
+                self.library_set(&uri, on).await?;
+                Ok(if on { "Following the playlist" } else { "Unfollowed the playlist" }.into())
+            }
+            _ => Ok(String::new()),
+        }
+    }
+
     pub async fn run(&self, cmd: Cmd) -> Res<String> {
         let p = "/me/player";
         match cmd {
@@ -1192,6 +1345,10 @@ impl Api {
                 };
                 self.player(Method::PUT, &format!("{p}/play"), &[], body).await?
             }
+            Cmd::PlayShuffled(ctx) => {
+                self.player(Method::PUT, &format!("{p}/shuffle"), &[("state", "true".into())], None).await?;
+                return Box::pin(self.run(Cmd::Play { ctx, track: String::new() })).await;
+            }
             Cmd::Transfer => {
                 self.transfer_here().await?;
                 return Ok("Playing on this PC".into());
@@ -1214,6 +1371,8 @@ impl Api {
                 self.call(Method::POST, &path, &[], Some(json!({"uris": [track]}))).await?;
                 return Ok(format!("Added to {name}"));
             }
+            // the write commands (see `edit`)
+            c => return self.edit(c).await,
         }
         Ok(String::new())
     }
@@ -1248,6 +1407,354 @@ impl Api {
     }
 }
 
+// ── pages (read) ───────────────────────────────────────────────────────
+// What the window's Spotify layout shows on its pages (home, search, album, playlist, artist,
+// Liked Songs): read-only requests, and the pure parsing of their answers.
+
+/// The big header of a page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Head {
+    /// "Album", "Single", "Playlist", "Artist"…
+    pub kind: String,
+    pub title: String,
+    /// The owner / artist and its URI (empty when there is none or it can't be opened).
+    pub by: String,
+    pub by_uri: String,
+    pub image: String,
+    /// Release year (albums).
+    pub year: String,
+    /// What the API said the page has: songs (albums, playlists) or followers (artists).
+    pub count: u64,
+    /// A playlist's own description, or an artist's genres.
+    pub text: String,
+}
+
+/// A row of cards under a heading (albums of an artist, your top artists…). `error` is why it
+/// is empty when the API said no.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Section {
+    pub title: String,
+    pub items: Vec<Item>,
+    pub error: String,
+}
+
+/// One page's data: a header, a table of songs and sections of cards.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageData {
+    pub head: Head,
+    pub tracks: Vec<Item>,
+    pub sections: Vec<Section>,
+    /// Things that went wrong but did not stop the page (shown as quiet lines).
+    pub notes: Vec<String>,
+}
+
+impl PageData {
+    /// Total length of the songs, in seconds.
+    pub fn seconds(&self) -> f64 {
+        self.tracks.iter().map(|t| t.duration).sum()
+    }
+}
+
+/// The year of a release date (`2021-05-14` → `2021`).
+pub fn year_of(date: &str) -> String {
+    date.chars().take(4).collect()
+}
+
+pub fn artist_item(a: &Value) -> Item {
+    Item {
+        kind: "artist".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: "Artist".into(),
+        openable: true,
+        image: image(&a["images"], 300),
+        ..Default::default()
+    }
+}
+
+pub fn album_item(a: &Value, label: &str) -> Item {
+    let year = year_of(&s(&a["release_date"]));
+    Item {
+        kind: "album".into(),
+        uri: s(&a["uri"]),
+        name: s(&a["name"]),
+        sub: match (year.is_empty(), label.is_empty()) {
+            (true, _) => label.to_string(),
+            (false, true) => year,
+            (false, false) => format!("{year} · {label}"),
+        },
+        openable: true,
+        image: image(&a["images"], 300),
+        artist_uri: s(&a["artists"][0]["uri"]),
+        ..Default::default()
+    }
+}
+
+/// `/albums/{id}` plus the album's songs (which come without their album: it is filled in).
+pub fn parse_album_page(album: &Value, tracks: &[Value]) -> PageData {
+    let head = Head {
+        kind: if s(&album["album_type"]) == "single" { "Single".into() } else { "Album".into() },
+        title: s(&album["name"]),
+        by: names(&album["artists"]),
+        by_uri: s(&album["artists"][0]["uri"]),
+        image: image(&album["images"], 300),
+        year: year_of(&s(&album["release_date"])),
+        count: album["total_tracks"].as_u64().unwrap_or(tracks.len() as u64),
+        text: String::new(),
+    };
+    let tracks = tracks
+        .iter()
+        .filter_map(track_item)
+        .map(|mut t| {
+            t.album = head.title.clone();
+            t.album_uri = s(&album["uri"]);
+            t.image = head.image.clone();
+            t
+        })
+        .collect();
+    PageData { head, tracks, ..Default::default() }
+}
+
+/// `/playlists/{id}` (header only).
+pub fn parse_playlist_head(p: &Value) -> Head {
+    Head {
+        kind: "Playlist".into(),
+        title: s(&p["name"]),
+        by: s(&p["owner"]["display_name"]),
+        by_uri: s(&p["owner"]["uri"]),
+        image: image(&p["images"], 300),
+        year: String::new(),
+        count: p["items"]["total"].as_u64().or(p["tracks"]["total"].as_u64()).unwrap_or(0),
+        text: s(&p["description"]),
+    }
+}
+
+/// `/artists/{id}`.
+pub fn parse_artist_head(a: &Value) -> Head {
+    let genres: Vec<String> = a["genres"].as_array().into_iter().flatten().take(3).map(s).collect();
+    Head {
+        kind: "Artist".into(),
+        title: s(&a["name"]),
+        by: String::new(),
+        by_uri: String::new(),
+        image: image(&a["images"], 300),
+        year: String::new(),
+        count: a["followers"]["total"].as_u64().unwrap_or(0),
+        text: genres.join(", "),
+    }
+}
+
+/// An artist's albums / singles as cards, newest first.
+pub fn album_cards(mut list: Vec<Value>, label: &str) -> Vec<Item> {
+    list.retain(Value::is_object);
+    list.sort_by_key(|a| std::cmp::Reverse(s(&a["release_date"])));
+    list.iter().map(|a| album_item(a, label)).filter(|i| !i.uri.is_empty()).collect()
+}
+
+/// `/me/top/artists` or `/me/top/tracks` → rows.
+pub fn parse_top(v: &Value, tracks: bool) -> Vec<Item> {
+    let list = v["items"].as_array().into_iter().flatten().filter(|x| x.is_object());
+    if tracks { list.filter_map(track_item).collect() } else { list.map(artist_item).filter(|i| !i.uri.is_empty()).collect() }
+}
+
+/// A search answer as a page: songs in the table, the rest as sections of cards.
+pub fn search_page(items: Vec<Item>) -> PageData {
+    let mut page = PageData::default();
+    for (kind, title) in [("album", "Albums"), ("artist", "Artists"), ("playlist", "Playlists")] {
+        let cards: Vec<Item> = items.iter().filter(|i| i.kind == kind).cloned().collect();
+        if !cards.is_empty() {
+            page.sections.push(Section { title: title.into(), items: cards, error: String::new() });
+        }
+    }
+    page.tracks = items.into_iter().filter(|i| i.kind == "track").collect();
+    page
+}
+
+/// A downloaded picture, decoded and shrunk to what the window needs.
+fn decode_image(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = if img.width().max(img.height()) > 320 { img.thumbnail(320, 320) } else { img };
+    Some(img.to_rgba8())
+}
+
+impl Api {
+    /// A cover or picture from Spotify's image server, decoded; `None` when it could not be had.
+    pub async fn fetch_image(&self, url: &str) -> Option<image::RgbaImage> {
+        let r = self.http.get(url).send().await.ok()?.error_for_status().ok()?;
+        let bytes = r.bytes().await.ok()?;
+        tokio::task::spawn_blocking(move || decode_image(&bytes)).await.ok()?
+    }
+
+    pub async fn page_album(&self, uri: &str) -> Res<PageData> {
+        let id = uri_id(uri);
+        let album = self.get(&format!("/albums/{id}"), &[]).await?;
+        let tracks = self.paged(&format!("/albums/{id}/tracks"), &[("limit", "50".into())], usize::MAX, None).await?;
+        Ok(parse_album_page(&album, &tracks))
+    }
+
+    pub async fn page_playlist(&self, uri: &str) -> Res<PageData> {
+        let id = uri_id(uri);
+        let fields = "name,description,images,owner(id,uri,display_name),tracks(total),items(total)";
+        let head = self.get(&format!("/playlists/{id}"), &[("fields", fields.into())]).await?;
+        let mut page = PageData { head: parse_playlist_head(&head), ..Default::default() };
+        // Spotify lets a development-mode app read only your own playlists: the header stays and
+        // the reason shows instead of the songs
+        match self.open(uri).await {
+            Ok((_, rows)) => page.tracks = rows,
+            Err(e) => page.notes.push(e.msg),
+        }
+        Ok(page)
+    }
+
+    pub async fn page_liked(&self) -> Res<PageData> {
+        let tracks = self.liked_tracks().await?;
+        let by = self.me_name().await;
+        let head = Head { kind: "Playlist".into(), title: "Liked Songs".into(), by, count: tracks.len() as u64, ..Default::default() };
+        Ok(PageData { head, tracks, ..Default::default() })
+    }
+
+    async fn me_name(&self) -> String {
+        let me = self.get("/me", &[]).await.unwrap_or_default();
+        Some(s(&me["display_name"])).filter(|n| !n.is_empty()).unwrap_or_else(|| s(&me["id"]))
+    }
+
+    pub async fn page_artist(&self, uri: &str) -> Res<PageData> {
+        let id = uri_id(uri);
+        let artist = self.get(&format!("/artists/{id}"), &[]).await?;
+        let mut page = PageData { head: parse_artist_head(&artist), ..Default::default() };
+        // popular songs: the endpoint is gone for newer apps, then a search for the name does
+        match self.get(&format!("/artists/{id}/top-tracks"), &[("market", "from_token".into())]).await {
+            Ok(v) => page.tracks = v["tracks"].as_array().into_iter().flatten().filter_map(track_item).take(10).collect(),
+            Err(e) => {
+                page.notes.push(format!("Popular songs: {}", e.msg));
+                let q = [("q", format!("artist:\"{}\"", page.head.title)), ("type", "track".into()), ("limit", "10".into())];
+                if let Ok(v) = self.get("/search", &q).await {
+                    page.tracks = parse_search(&v, "").into_iter().filter(|t| t.kind == "track" && t.artist_uri == uri).collect();
+                }
+            }
+        }
+        for (group, title, cap) in [("album", "Albums", ARTIST_ALBUMS), ("single", "Singles and EPs", ARTIST_SINGLES)] {
+            let q = [("include_groups", group.to_string()), ("limit", ARTIST_PAGE.to_string())];
+            match self.paged(&format!("/artists/{id}/albums"), &q, cap, None).await {
+                Ok(list) => page.sections.push(Section { title: title.into(), items: album_cards(list, ""), error: String::new() }),
+                Err(e) => page.sections.push(Section { title: title.into(), items: Vec::new(), error: e.msg }),
+            }
+        }
+        Ok(page)
+    }
+
+    /// Your top artists and songs (the rest of Home comes from the library lists).
+    pub async fn page_home(&self) -> Res<PageData> {
+        let q = [("limit", "12".into()), ("time_range", "medium_term".into())];
+        let artists = self.get("/me/top/artists", &q).await;
+        let songs = self.get("/me/top/tracks", &q).await;
+        if let (Err(e), Err(_)) = (&artists, &songs) {
+            return Err(ApiError::new(e.msg.clone(), e.status));
+        }
+        let mut page = PageData::default();
+        let title = "Your top artists".to_string();
+        match artists {
+            Ok(v) => page.sections.push(Section { title, items: parse_top(&v, false), error: String::new() }),
+            Err(e) => page.sections.push(Section { title, items: Vec::new(), error: e.msg }),
+        }
+        match songs {
+            Ok(v) => page.tracks = parse_top(&v, true),
+            Err(e) => page.notes.push(format!("Your top songs: {}", e.msg)),
+        }
+        Ok(page)
+    }
+
+    pub async fn page_search(&self, q: &str) -> Res<PageData> {
+        Ok(search_page(self.search(q).await?))
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    fn j(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn an_album_page_fills_in_what_its_songs_lack() {
+        let album = j(r#"{"uri":"spotify:album:a1","name":"Night Drive","album_type":"album","release_date":"2021-05-14","total_tracks":2,
+            "artists":[{"name":"The Band","uri":"spotify:artist:b1"}],
+            "images":[{"url":"big","width":640},{"url":"mid","width":300},{"url":"small","width":64}]}"#);
+        let tracks = [
+            j(r#"{"uri":"spotify:track:t1","name":"City Lights","duration_ms":180000,"artists":[{"name":"The Band","uri":"spotify:artist:b1"}]}"#),
+            j(r#"{"uri":"spotify:track:t2","name":"Morning","duration_ms":60000,"artists":[{"name":"The Band","uri":"spotify:artist:b1"}]}"#),
+        ];
+        let p = parse_album_page(&album, &tracks);
+        assert_eq!((p.head.kind.as_str(), p.head.title.as_str(), p.head.year.as_str()), ("Album", "Night Drive", "2021"));
+        assert_eq!((p.head.by.as_str(), p.head.by_uri.as_str(), p.head.image.as_str()), ("The Band", "spotify:artist:b1", "mid"));
+        assert_eq!(p.tracks.len(), 2);
+        assert_eq!((p.tracks[0].album.as_str(), p.tracks[0].album_uri.as_str(), p.tracks[0].image.as_str()), ("Night Drive", "spotify:album:a1", "mid"));
+        assert_eq!(p.seconds(), 240.0);
+        let single = parse_album_page(&j(r#"{"album_type":"single","name":"S"}"#), &[]);
+        assert_eq!(single.head.kind, "Single");
+    }
+
+    #[test]
+    fn playlist_and_artist_headers() {
+        let h = parse_playlist_head(&j(
+            r#"{"name":"Road trip","description":"Windows down","images":[{"url":"p","width":300}],"owner":{"display_name":"Lena","uri":"spotify:user:l"},"tracks":{"total":42}}"#,
+        ));
+        assert_eq!((h.title.as_str(), h.by.as_str(), h.count, h.text.as_str(), h.image.as_str()), ("Road trip", "Lena", 42, "Windows down", "p"));
+        // the newer API names the total `items`
+        assert_eq!(parse_playlist_head(&j(r#"{"items":{"total":7}}"#)).count, 7);
+        let a = parse_artist_head(&j(r#"{"name":"Lena Park","followers":{"total":1234},"genres":["pop","synthpop","indie","x"],"images":[]}"#));
+        assert_eq!((a.title.as_str(), a.count, a.text.as_str(), a.image.as_str()), ("Lena Park", 1234, "pop, synthpop, indie", ""));
+    }
+
+    #[test]
+    fn cards_are_newest_first_and_top_lists_parse() {
+        let list = vec![
+            j(r#"{"uri":"spotify:album:old","name":"Old","release_date":"2015-01-01","images":[]}"#),
+            Value::Null,
+            j(r#"{"uri":"spotify:album:new","name":"New","release_date":"2023-03-03","images":[],"artists":[{"uri":"spotify:artist:z"}]}"#),
+        ];
+        let cards = album_cards(list, "Single");
+        assert_eq!(cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["New", "Old"]);
+        assert_eq!((cards[0].sub.as_str(), cards[0].artist_uri.as_str()), ("2023 · Single", "spotify:artist:z"));
+        assert_eq!(album_item(&j(r#"{"uri":"u","release_date":"1999"}"#), "").sub, "1999");
+        let top = parse_top(&j(r#"{"items":[{"uri":"spotify:artist:1","name":"A","images":[{"url":"i","width":300}]},null,{"name":"no uri"}]}"#), false);
+        assert_eq!(top.len(), 1);
+        assert_eq!((top[0].kind.as_str(), top[0].image.as_str()), ("artist", "i"));
+        let songs = parse_top(&j(r#"{"items":[{"uri":"spotify:track:1","name":"T","duration_ms":1000,"artists":[{"name":"A","uri":"spotify:artist:1"}],"album":{"name":"Al","uri":"spotify:album:9","images":[{"url":"c","width":64}]}}]}"#), true);
+        assert_eq!((songs[0].album.as_str(), songs[0].album_uri.as_str(), songs[0].image.as_str(), songs[0].artist_uri.as_str()), ("Al", "spotify:album:9", "c", "spotify:artist:1"));
+        // nothing at all (an error body) is an empty list, not a panic
+        assert!(parse_top(&Value::Null, true).is_empty());
+    }
+
+    #[test]
+    fn a_search_becomes_songs_and_card_sections() {
+        let v = j(r#"{"tracks":{"items":[{"uri":"spotify:track:1","name":"T","artists":[]}]},
+            "albums":{"items":[{"uri":"spotify:album:1","name":"Al","artists":[{"name":"A"}],"images":[{"url":"x","width":300}]}]},
+            "artists":{"items":[{"uri":"spotify:artist:1","name":"Ar","images":[]}]},
+            "playlists":{"items":[null,{"uri":"spotify:playlist:1","name":"P","owner":{"id":"me","display_name":"Me"}}]}}"#);
+        let p = search_page(parse_search(&v, "me"));
+        assert_eq!(p.tracks.len(), 1);
+        assert_eq!(p.sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Albums", "Artists", "Playlists"]);
+        assert_eq!(p.sections[0].items[0].image, "x");
+        assert!(search_page(Vec::new()).sections.is_empty());
+    }
+
+    #[test]
+    fn pictures_are_decoded_and_shrunk() {
+        let mut img = image::RgbImage::new(640, 640);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([200, 30, 30]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let out = decode_image(&png).unwrap();
+        assert_eq!((out.width(), out.height()), (320, 320));
+        assert!(decode_image(b"not a picture").is_none());
+    }
+}
+
 #[cfg(test)]
 mod login_tests {
     use super::*;
@@ -1265,5 +1772,144 @@ mod login_tests {
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.contains("Logged in"));
         assert_eq!(waiting.await.unwrap().unwrap(), "abc");
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A fake Spotify that answers every request with `status` / `body` and logs the whole
+    /// request (request line, then the body after a `|`).
+    fn site(status: u16, body: &'static str) -> (Api, Arc<std::sync::Mutex<Vec<String>>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        std::thread::spawn(move || {
+            for mut st in l.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = st.read(&mut chunk).unwrap_or(0);
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some((head, rest)) = text.split_once("\r\n\r\n") else {
+                        if n == 0 { break } else { continue }
+                    };
+                    let want = head
+                        .lines()
+                        .find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                        .unwrap_or(0);
+                    if rest.len() >= want || n == 0 {
+                        let line = head.lines().next().unwrap_or("").trim_end_matches(" HTTP/1.1").to_string();
+                        log2.lock().unwrap().push(format!("{line}|{rest}"));
+                        break;
+                    }
+                }
+                let _ = write!(st, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (Api::new(reqwest::Client::new(), "id", "").with_fake_server(&base), log)
+    }
+
+    fn last(log: &Arc<std::sync::Mutex<Vec<String>>>) -> (String, Value) {
+        let l = log.lock().unwrap().last().cloned().unwrap_or_default();
+        let (line, body) = l.split_once('|').unwrap_or((&l, ""));
+        (line.to_string(), serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn a_new_playlist_is_private_and_can_start_with_a_song() {
+        let (api, log) = site(200, r#"{"id":"new1"}"#);
+        let note = api.run(Cmd::CreatePlaylist { name: " Road trip ".into(), description: String::new(), track: "spotify:track:t1".into() }).await.unwrap();
+        assert_eq!(note, "Created Road trip");
+        let all = log.lock().unwrap().clone();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].starts_with("POST /me/playlists|"), "{}", all[0]);
+        let body: Value = serde_json::from_str(all[0].split_once('|').unwrap().1).unwrap();
+        assert_eq!((body["name"].as_str(), body["public"].as_bool()), (Some("Road trip"), Some(false)));
+        assert!(body.get("description").is_none());
+        let (line, body) = last(&log);
+        assert_eq!(line, "POST /playlists/new1/items");
+        assert_eq!(body, json!({"uris": ["spotify:track:t1"]}));
+        // a blank name never leaves the app; an answer without an id is a note, not a panic
+        let e = api.run(Cmd::CreatePlaylist { name: "  ".into(), description: String::new(), track: String::new() }).await.unwrap_err();
+        assert_eq!(e.msg, "give the playlist a name");
+        let (api, _) = site(200, "{}");
+        let e = api.run(Cmd::CreatePlaylist { name: "x".into(), description: String::new(), track: String::new() }).await.unwrap_err();
+        assert!(e.msg.contains("did not say"), "{}", e.msg);
+    }
+
+    #[tokio::test]
+    async fn renaming_sends_only_what_changed() {
+        let (api, log) = site(200, "");
+        api.run(Cmd::EditPlaylist { playlist: "spotify:playlist:p1".into(), name: Some("New name".into()), description: None }).await.unwrap();
+        assert_eq!(last(&log), ("PUT /playlists/p1".to_string(), json!({"name": "New name"})));
+        api.run(Cmd::EditPlaylist { playlist: "spotify:playlist:p1".into(), name: None, description: Some("for the car".into()) }).await.unwrap();
+        assert_eq!(last(&log).1, json!({"description": "for the car"}));
+        let n = log.lock().unwrap().len();
+        let e = api.run(Cmd::EditPlaylist { playlist: "spotify:playlist:p1".into(), name: Some(" ".into()), description: None }).await.unwrap_err();
+        assert_eq!(e.msg, "a playlist needs a name");
+        assert_eq!(log.lock().unwrap().len(), n, "nothing was sent");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_playlist_unfollows_it_through_the_library() {
+        let (api, log) = site(200, "");
+        let note = api.run(Cmd::DeletePlaylist("spotify:playlist:p1".into())).await.unwrap();
+        assert_eq!(note, "Playlist deleted");
+        assert_eq!(last(&log).0, "DELETE /me/library?uris=spotify%3Aplaylist%3Ap1");
+    }
+
+    #[tokio::test]
+    async fn songs_leave_and_move_inside_a_playlist() {
+        let (api, log) = site(200, "");
+        api.run(Cmd::RemoveFromPlaylist { playlist: "spotify:playlist:p1".into(), track: "spotify:track:t9".into() }).await.unwrap();
+        assert_eq!(last(&log), ("DELETE /playlists/p1/items".to_string(), json!({"items": [{"uri": "spotify:track:t9"}]})));
+        api.run(Cmd::MoveInPlaylist { playlist: "spotify:playlist:p1".into(), from: 2, to: 5 }).await.unwrap();
+        assert_eq!(last(&log), ("PUT /playlists/p1/items".to_string(), json!({"range_start": 2, "insert_before": 6, "range_length": 1})));
+        api.run(Cmd::MoveInPlaylist { playlist: "spotify:playlist:p1".into(), from: 4, to: 1 }).await.unwrap();
+        assert_eq!(last(&log).1, json!({"range_start": 4, "insert_before": 1, "range_length": 1}));
+        assert_eq!((move_range(0, 0), move_range(3, 3)), ((0, 0), (3, 3)));
+    }
+
+    #[tokio::test]
+    async fn albums_artists_and_playlists_are_saved_and_followed_in_the_library() {
+        let (api, log) = site(200, "");
+        let cases = [
+            (Cmd::SaveAlbum("spotify:album:a1".into(), true), "PUT /me/library?uris=spotify%3Aalbum%3Aa1", "Album saved"),
+            (Cmd::SaveAlbum("spotify:album:a1".into(), false), "DELETE /me/library?uris=spotify%3Aalbum%3Aa1", "Album removed from your library"),
+            (Cmd::FollowArtist("spotify:artist:r1".into(), true), "PUT /me/library?uris=spotify%3Aartist%3Ar1", "Following the artist"),
+            (Cmd::FollowArtist("spotify:artist:r1".into(), false), "DELETE /me/library?uris=spotify%3Aartist%3Ar1", "Unfollowed the artist"),
+            (Cmd::FollowPlaylist("spotify:playlist:p2".into(), true), "PUT /me/library?uris=spotify%3Aplaylist%3Ap2", "Following the playlist"),
+            (Cmd::FollowPlaylist("spotify:playlist:p2".into(), false), "DELETE /me/library?uris=spotify%3Aplaylist%3Ap2", "Unfollowed the playlist"),
+        ];
+        for (cmd, line, note) in cases {
+            assert_eq!(api.run(cmd).await.unwrap(), note);
+            assert_eq!(last(&log).0, line);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_becomes_a_readable_note() {
+        let (api, _) = site(403, r#"{"error":{"status":403,"message":"Insufficient client scope"}}"#);
+        let e = api.run(Cmd::DeletePlaylist("spotify:playlist:p1".into())).await.unwrap_err();
+        assert_eq!((e.status, e.msg.as_str()), (403, "Spotify refused it (403): Insufficient client scope"));
+    }
+
+    #[test]
+    fn web_links_and_song_fields() {
+        assert_eq!(web_link("spotify:track:abc").as_deref(), Some("https://open.spotify.com/track/abc"));
+        assert_eq!(web_link("spotify:playlist:p1").as_deref(), Some("https://open.spotify.com/playlist/p1"));
+        assert_eq!(web_link("liked"), None);
+        assert_eq!(web_link("spotify:user:me:collection"), None);
+        assert_eq!(web_link("spotify:track:"), None);
+        let t = json!({"uri":"spotify:track:t","name":"N","artists":[{"name":"A","uri":"spotify:artist:r"}],"album":{"uri":"spotify:album:al"}});
+        let it = track_item(&t).unwrap();
+        assert_eq!((it.album_uri.as_str(), it.artist_uri.as_str()), ("spotify:album:al", "spotify:artist:r"));
+        let bare = track_item(&json!({"uri":"spotify:track:t"})).unwrap();
+        assert_eq!((bare.album_uri.as_str(), bare.artist_uri.as_str()), ("", ""));
     }
 }

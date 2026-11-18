@@ -7,8 +7,13 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Window: the cava bars fill their panel however tall it is dragged; they stopped at 240 pixels, so a bigger cava panel looked as if its size had not been kept.
+
 ### Changed
 
+- Window: a panel's corners are square on the side where it meets a split (the draggable border between two columns); the window's outer corners stay rounded.
 - Window: the library button sits on the left of the top row, next to the name; settings, keys, light / dark and windows are on the right in that order; tooltips show at once. Like, devices and play here are centred under the play buttons, the volume centred under them, and the title no longer carries a heart (the like button does that).
 - The window's volume is the same thin bar with a dot as the progress bar, the times beside the progress bar use the normal font, the top row's name lines up with its buttons, and tooltips show after 0.12 s instead of half a second.
 - `scripts/render.sh` renders the window to a PNG without a display (for looking at changes).
@@ -16,6 +21,11 @@ which turns the `Unreleased` section into that version.
 
 ### Added
 
+- Style presets in the window's Appearance tab: save the whole look and the panel layout under a name, apply it again later, update, rename or delete it (with a confirmation). They are kept in `presets.toml` next to `config.toml`. **Default** and **Spotify** (black, white text, green accent, Spotify layout) are built in.
+- `window_color`, `card_color`, `text_color` and `muted_color` in `[gui]`: own colours for the window, the panel cards and the text (empty = as before).
+- Editing from the window: a right-click menu on library rows (play, queue, add to playlist or a new one, like, save album, follow artist or playlist, remove from or move inside your own playlist, go to artist / album, copy link), a **+** that creates playlists with inline rename and delete, and, in the Spotify layout, a devices popup above the player bar. New Spotify requests for these (`Cmd::CreatePlaylist`, `EditPlaylist`, `DeletePlaylist`, `RemoveFromPlaylist`, `MoveInPlaylist`, `SaveAlbum`, `FollowArtist`, `FollowPlaylist`).
+- Silly extras in `[gui]`, all off by default and in the Appearance tab: `vinyl` (the cover spins like a record while playing), `confetti` (liking a song bursts hearts) and `beat_pulse` (the play button glows with the cava level; starts cava).
+- The Spotify layout (`spotify_layout`) works like the Spotify app: a top strip with back / forward, home and search; pages for Home (recent, top artists and songs, playlists), Search, album, playlist, artist, Liked Songs, the queue and the lyrics at full size, with big headers, round play and shuffle buttons, a table of songs and rows of cards with pictures; a library column with filter chips and pictures. New `[gui]` keys `spotify_bar_cover`, `spotify_now_playing` and `spotify_bar_fields` (checkboxes and a field list in the Appearance tab) set what the player bar and the right column show. `scripts/render.sh` also renders the pages (`main-spotify-album.png` and others).
 - `spotify_layout` in `[gui]` (experimental, checkbox in the Appearance tab): the window arranged like the Spotify app, with the library on the left, the lyrics in the middle, the song on the right and a player bar along the bottom.
 - The window's shuffle, repeat, mute, like, devices and play here buttons are drawn icons now, in the style of Spotify's (shuffle and repeat beside previous / play / next, dim when off, accent colour with a dot when on, "1" for repeat one); a double click on a library row plays it.
 - Standalone use without a terminal: `install.sh` and the Linux release build include the window (`--gui`) and add an "mdis" app-menu entry with the new logo (`--no-gui` for the old terminal-only build); the window and its pop-outs carry the logo as their icon.

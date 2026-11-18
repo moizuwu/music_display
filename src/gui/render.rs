@@ -110,6 +110,7 @@ mod tests {
     use music_display::cli::Args;
     use music_display::layout::{Layout, PanelId};
     use music_display::lyrics::Lyrics;
+    use super::super::sp_nav::Page;
 
     /// A cover made up on the spot (no network, no files): a diagonal gradient with a ring.
     fn fake_cover() -> image::DynamicImage {
@@ -125,15 +126,166 @@ mod tests {
 
     /// `MDIS_RENDER=out.png cargo test --features gui render_main_view` (or `scripts/render.sh`):
     /// the main window as the program draws it, with the default look and a fake song; also
-    /// `out-spotify.png` with the experimental Spotify layout.
+    /// `out-spotify.png` with the experimental Spotify layout and `out-spotify-preset.png` with the
+    /// built-in Spotify preset.
     #[tokio::test(flavor = "multi_thread")]
     async fn render_main_view() {
         let Ok(out) = std::env::var("MDIS_RENDER") else { return };
         music_display::util::enter_test_mode();
         let (m, rx) = fake_model(false);
         render(m, rx, &out);
-        let (m, rx) = fake_model(true);
-        render(m, rx, &out.replace(".png", "-spotify.png"));
+        // the Spotify layout: its home page, and a page of each kind
+        for (name, page) in [
+            ("", Page::Home),
+            ("-album", Page::Album("spotify:album:night".into())),
+            ("-artist", Page::Artist("spotify:artist:band".into())),
+            ("-playlist", Page::Playlist("spotify:playlist:road".into())),
+            ("-search", Page::Search("night".into())),
+            ("-queue", Page::Queue),
+            ("-lyrics", Page::Lyrics),
+        ] {
+            let (mut m, rx) = fake_model(true);
+            m.spot.pg.go(page);
+            render(m, rx, &out.replace(".png", &format!("-spotify{name}.png")));
+        }
+        // the built-in Spotify preset, applied the way the Presets section applies it
+        let (mut m, rx) = fake_model(false);
+        let style = music_display::presets::built_in("Spotify").expect("built-in preset");
+        (m.gui, m.layout) = (style.gui, style.layout);
+        render(m, rx, &out.replace(".png", "-spotify-preset.png"));
+    }
+
+    /// A picture made up for a fake URL: a diagonal gradient of its own colour.
+    fn fake_art(seed: u32) -> image::RgbaImage {
+        let hue = (seed as f32 * 0.17).fract();
+        let rgb = |h: f32, k: f32| {
+            let f = |o: f32| ((((h + o).fract() * std::f32::consts::TAU).cos() * 0.5 + 0.5) * 160.0 * k + 40.0) as u8;
+            image::Rgba([f(0.0), f(0.33), f(0.66), 255])
+        };
+        let mut img = image::RgbaImage::new(160, 160);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let k = 0.5 + 0.5 * ((x + y) as f32 / 320.0);
+            *p = rgb(hue, k);
+        }
+        img
+    }
+
+    /// Fake pages and library rows for the Spotify layout (no network: everything is in place
+    /// and fresh, so nothing is asked for).
+    fn fake_spotify(m: &mut super::super::model::Model) {
+        use music_display::spotify::{Head, Item, PageData, Section};
+        let now = std::time::Instant::now();
+        for n in 0..12u32 {
+            m.spot.pg.images.insert(&format!("fake:{n}"), fake_art(n));
+        }
+        let img = |n: u32| format!("fake:{n}");
+        let tr = |n: u32, name: &str, artist: &str, album: &str, secs: f64, art: u32| Item {
+            kind: "track".into(),
+            uri: if n == 0 { "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into() } else { format!("spotify:track:{n}") },
+            name: name.into(),
+            sub: artist.into(),
+            duration: secs,
+            image: img(art),
+            album: album.into(),
+            album_uri: "spotify:album:night".into(),
+            artist_uri: "spotify:artist:band".into(),
+            ..Default::default()
+        };
+        let card = |kind: &str, name: &str, sub: &str, art: u32| Item {
+            kind: kind.into(),
+            uri: format!("spotify:{kind}:{name}"),
+            name: name.into(),
+            sub: sub.into(),
+            openable: true,
+            image: img(art),
+            ..Default::default()
+        };
+        let songs = |album: &str| {
+            vec![
+                tr(0, "City Lights", "The Example Band", album, 241.0, 1),
+                tr(1, "Morning Drive", "The Example Band, Lena Park", album, 198.0, 1),
+                tr(2, "Radio Low", "The Example Band", album, 214.0, 1),
+                tr(3, "Windows Down", "The Example Band", album, 187.0, 1),
+                tr(4, "Hold On to the Night", "The Example Band", album, 262.0, 1),
+                tr(5, "Every Sign Is Pointing Home", "The Example Band", album, 233.0, 1),
+                tr(6, "Nothing Left to Say", "The Example Band", album, 176.0, 1),
+                tr(7, "Streetlights", "The Example Band", album, 305.0, 1),
+            ]
+        };
+        let page = |m: &mut super::super::model::Model, key: &str, d: PageData| m.spot.pg.on_page(key, Ok(Box::new(d)));
+        // the album
+        let mut d = PageData {
+            head: Head { kind: "Album".into(), title: "Night Drive".into(), by: "The Example Band".into(), by_uri: "spotify:artist:band".into(), image: img(1), year: "2021".into(), count: 8, ..Default::default() },
+            tracks: songs("Night Drive"),
+            ..Default::default()
+        };
+        page(m, "spotify:album:night", d.clone());
+        // a playlist
+        d.head = Head { kind: "Playlist".into(), title: "Road trip".into(), by: "Lena Park".into(), image: img(4), count: 8, text: "Windows down, volume up".into(), ..Default::default() };
+        for t in &mut d.tracks {
+            t.album = ["Night Drive", "Neon Roads", "Blue Hour"][t.name.len() % 3].into();
+        }
+        page(m, "spotify:playlist:road", d);
+        // the artist
+        let albums: Vec<Item> = ["Night Drive", "Neon Roads", "Blue Hour", "Static", "First Light"].iter().enumerate().map(|(i, n)| card("album", n, &format!("{}", 2021 - i), 1 + i as u32)).collect();
+        let singles: Vec<Item> = ["City Lights", "Radio Low", "Windows Down"].iter().enumerate().map(|(i, n)| card("album", n, &format!("{}", 2022 - i), 6 + i as u32)).collect();
+        page(
+            m,
+            "spotify:artist:band",
+            PageData {
+                head: Head { kind: "Artist".into(), title: "The Example Band".into(), image: img(1), count: 1_234_567, text: "synthpop, indie pop".into(), ..Default::default() },
+                tracks: songs("Night Drive"),
+                sections: vec![
+                    Section { title: "Albums".into(), items: albums.clone(), error: String::new() },
+                    Section { title: "Singles and EPs".into(), items: singles, error: String::new() },
+                ],
+                ..Default::default()
+            },
+        );
+        // search
+        page(
+            m,
+            "search:night",
+            PageData {
+                tracks: songs("Night Drive"),
+                sections: vec![
+                    Section { title: "Artists".into(), items: vec![card("artist", "The Example Band", "Artist", 1), card("artist", "Night Owls", "Artist", 7), card("artist", "Lena Park", "Artist", 2)], error: String::new() },
+                    Section { title: "Albums".into(), items: albums, error: String::new() },
+                    Section { title: "Playlists".into(), items: vec![card("playlist", "Night Drive", "by Spotify", 3), card("playlist", "Late night", "by Lena", 5)], error: String::new() },
+                ],
+                ..Default::default()
+            },
+        );
+        // home: top artists and songs
+        page(
+            m,
+            "home",
+            PageData {
+                tracks: songs("Night Drive"),
+                sections: vec![Section {
+                    title: "Your top artists".into(),
+                    items: vec![card("artist", "The Example Band", "Artist", 1), card("artist", "Lena Park", "Artist", 2), card("artist", "Night Owls", "Artist", 7), card("artist", "Static", "Artist", 8), card("artist", "Blue Hour", "Artist", 9)],
+                    error: String::new(),
+                }],
+                ..Default::default()
+            },
+        );
+        let fresh = |t: &mut crate::browser::Level, items: Vec<Item>| {
+            t.items = items;
+            t.loaded = true;
+            t.fetched = Some(now);
+        };
+        let tabs = &mut m.spot.lib.tabs;
+        fresh(&mut tabs[0], vec![card("album", "Night Drive", "Album", 1), card("playlist", "Road trip", "Playlist", 4), card("artist", "Lena Park", "Artist", 2), card("album", "Neon Roads", "Album", 2), card("playlist", "Late night", "Playlist", 5), card("artist", "Night Owls", "Artist", 7)]);
+        fresh(&mut tabs[1], vec![card("playlist", "Road trip", "42 songs", 4), card("playlist", "Late night", "by Lena", 5), card("playlist", "Focus", "128 songs", 3), card("playlist", "Sunday morning", "17 songs", 6), card("playlist", "Workout", "63 songs", 8)]);
+        fresh(&mut tabs[3], vec![card("album", "Night Drive", "The Example Band", 1), card("album", "Neon Roads", "Lena Park", 2), card("album", "Blue Hour", "Night Owls", 9)]);
+        fresh(&mut tabs[4], vec![card("artist", "The Example Band", "Artist", 1), card("artist", "Lena Park", "Artist", 2), card("artist", "Night Owls", "Artist", 7)]);
+        // the queue: the song playing and what is next
+        let q = &mut tabs[crate::browser::TAB_QUEUE];
+        let mut items = songs("Night Drive");
+        items.truncate(6);
+        fresh(q, items);
+        q.heads = vec![(0, "Now playing"), (1, "Next up")];
     }
 
     fn fake_model(spotify_layout: bool) -> (super::super::model::Model, tokio::sync::mpsc::UnboundedReceiver<music_display::AppEvent>) {
@@ -156,16 +308,31 @@ mod tests {
         m.cover = Some(fake_cover());
         m.cover_fresh = true;
         // a few rows in the library, as if Recent had loaded
-        let mk = |kind: &str, name: &str, sub: &str| music_display::spotify::Item { kind: kind.into(), uri: format!("spotify:{kind}:{name}"), name: name.into(), sub: sub.into(), openable: kind != "track", duration: if kind == "track" { 214.0 } else { 0.0 } };
+        let mk = |kind: &str, name: &str, sub: &str| music_display::spotify::Item { kind: kind.into(), uri: format!("spotify:{kind}:{name}"), name: name.into(), sub: sub.into(), openable: kind != "track", duration: if kind == "track" { 214.0 } else { 0.0 }, ..Default::default() };
         let tab = &mut m.spot.lib.tabs[0];
         tab.items = vec![mk("track", "City Lights", "The Example Band"), mk("track", "Morning Drive", "Lena Park"), mk("album", "Night Drive", "The Example Band"), mk("playlist", "Road trip", "Playlist"), mk("artist", "Lena Park", "Artist")];
         tab.loaded = true;
         tab.fetched = Some(std::time::Instant::now());
+        if spotify_layout {
+            fake_spotify(&mut m);
+        }
         (m, rx)
     }
 
     /// Run the window for a few frames at 1100 × 680 points, 2 pixels per point, and save it.
     fn render(m: super::super::model::Model, rx: tokio::sync::mpsc::UnboundedReceiver<music_display::AppEvent>, out: &str) {
+        render_with(m, rx, out, 6, &|_, _, _| {});
+    }
+
+    /// [`render`] for `frames` frames; `script(frame, ctx, input)` may add events to a frame (a
+    /// click) or set up state before it (a spinning record).
+    fn render_with(
+        m: super::super::model::Model,
+        rx: tokio::sync::mpsc::UnboundedReceiver<music_display::AppEvent>,
+        out: &str,
+        frames: usize,
+        script: &dyn Fn(usize, &egui::Context, &mut egui::RawInput),
+    ) {
         let ctx = egui::Context::default();
         let ppp = 2.0;
         ctx.set_pixels_per_point(ppp);
@@ -189,12 +356,13 @@ mod tests {
         let (pw, ph) = (1100.0f32, 680.0f32);
         let mut tex = Textures::default();
         let mut last = None;
-        for i in 0..6 {
-            let raw = egui::RawInput {
+        for i in 0..frames {
+            let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(pw, ph))),
                 time: Some(i as f64 * 0.5),
                 ..Default::default()
             };
+            script(i, &ctx, &mut raw);
             let mut out = ctx.run_ui(raw, |ui| {
                 let c = ui.ctx().clone();
                 app.logic(&c, &mut frame);
@@ -214,5 +382,50 @@ mod tests {
         let img = rasterize(&prims, &tex, w, h, ppp, bg);
         save_png(&img, w, h, std::path::Path::new(out)).expect("write the PNG");
         eprintln!("rendered {out}");
+    }
+
+    /// The extras of the Spotify layout, each in its own picture next to the main one: the device
+    /// popup (`-devices.png`), a spinning record with the glow and confetti (`-fun.png`), and the
+    /// right-click menu of a library row (`-menu.png`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_main_view_extras() {
+        let Ok(out) = std::env::var("MDIS_RENDER") else { return };
+        music_display::util::enter_test_mode();
+        let name = |suffix: &str| out.replace(".png", &format!("-{suffix}.png"));
+        // the device popup, open above the player bar
+        let (mut m, rx) = fake_model(true);
+        let dev = |id: &str, name: &str, kind: &str, active: bool, local: bool| music_display::spotify::Device { id: id.into(), name: name.into(), kind: kind.into(), active, restricted: false, local };
+        m.spot.devices = Some(crate::browser::DevicePicker {
+            items: vec![dev("a", "Living room", "Speaker", false, false), dev("b", "Studio PC", "Computer", true, true), dev("c", "Pixel", "Smartphone", false, false)],
+            ..Default::default()
+        });
+        render_with(m, rx, &name("devices"), 6, &|_, _, _| {});
+        // the record, the glow and the confetti
+        let (mut m, rx) = fake_model(true);
+        m.gui.vinyl = true;
+        m.gui.confetti = true;
+        m.gui.beat_pulse = true;
+        m.x.cava_bars = vec![700, 640, 520, 380, 300, 220, 160, 120];
+        render_with(m, rx, &name("fun"), 6, &|i, ctx, _| {
+            super::super::fun::set_angle(ctx, 0.8);
+            super::super::fun::set_pulse(ctx, 0.8);
+            if i == 5 {
+                super::super::fun::burst(ctx, egui::pos2(300.0, 600.0));
+            }
+        });
+        // the right-click menu of the first row of the library
+        let (m, rx) = fake_model(true);
+        render_with(m, rx, &name("menu"), 6, &|i, _, raw| {
+            let at = egui::pos2(165.0, 245.0);
+            if i >= 2 {
+                raw.events.push(egui::Event::PointerMoved(at));
+            }
+            if i == 3 {
+                raw.events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
+            }
+            if i == 4 {
+                raw.events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
+            }
+        });
     }
 }

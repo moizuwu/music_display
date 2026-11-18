@@ -1,0 +1,139 @@
+//! Pictures for the Spotify layout (covers of albums and playlists, artist photos): downloaded in
+//! the background with the Spotify client, decoded off the UI thread, and turned into textures
+//! the first time they are drawn. Nothing blocks the window; what has not arrived is a quiet
+//! placeholder.
+use super::library::Spot;
+use egui::{CornerRadius, Rect, Response, Sense, TextureHandle, Ui, Vec2};
+use music_display::spotify::Reply;
+use music_display::AppEvent;
+use std::collections::{HashMap, VecDeque};
+
+/// How many pictures are kept (the oldest go first).
+const KEEP: usize = 400;
+
+enum Slot {
+    /// Asked for, not here yet.
+    Wanted,
+    /// Could not be had (not asked again).
+    Failed,
+    /// Downloaded and decoded, no texture yet.
+    Raw(Box<image::RgbaImage>),
+    Tex(TextureHandle),
+}
+
+/// Pictures by URL. URLs that start with `fake:` are never downloaded (the render test fills them).
+#[derive(Default)]
+pub struct Images {
+    map: HashMap<String, Slot>,
+    order: VecDeque<String>,
+}
+
+impl Images {
+    pub fn on_image(&mut self, url: &str, img: Option<Box<image::RgbaImage>>) {
+        self.put(url, img.map_or(Slot::Failed, Slot::Raw));
+    }
+
+    /// Hand over a picture that is already here (the render test's made-up covers).
+    #[cfg(test)]
+    pub fn insert(&mut self, url: &str, img: image::RgbaImage) {
+        self.put(url, Slot::Raw(Box::new(img)));
+    }
+
+    fn put(&mut self, url: &str, slot: Slot) {
+        if self.map.insert(url.to_string(), slot).is_none() {
+            self.order.push_back(url.to_string());
+        }
+        while self.order.len() > KEEP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+
+    /// The picture as a texture; `Err(true)` when it must be downloaded first (asked once).
+    fn texture(&mut self, ctx: &egui::Context, url: &str) -> Result<Option<TextureHandle>, bool> {
+        match self.map.get_mut(url) {
+            None => {
+                self.put(url, Slot::Wanted);
+                Err(true)
+            }
+            Some(Slot::Tex(t)) => Ok(Some(t.clone())),
+            Some(Slot::Raw(img)) => {
+                let size = [img.width() as usize, img.height() as usize];
+                let tex = ctx.load_texture(format!("sp:{url}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
+                self.map.insert(url.to_string(), Slot::Tex(tex.clone()));
+                Ok(Some(tex))
+            }
+            Some(_) => Ok(None),
+        }
+    }
+}
+
+impl Spot {
+    /// The texture of a picture, when it is here; the first call starts the download.
+    pub fn picture(&mut self, ctx: &egui::Context, url: &str) -> Option<TextureHandle> {
+        if url.is_empty() {
+            return None;
+        }
+        match self.pg.images.texture(ctx, url) {
+            Ok(t) => t,
+            Err(_) => {
+                if let (Some(api), false) = (self.api.clone(), url.starts_with("fake:")) {
+                    let (tx, url) = (self.tx.clone(), url.to_string());
+                    tokio::spawn(async move {
+                        let img = api.fetch_image(&url).await.map(Box::new);
+                        let _ = tx.send(AppEvent::Spotify(Reply::Image { url, img }));
+                    });
+                }
+                None
+            }
+        }
+    }
+}
+
+/// A picture of `size` (square, rounded; `round` makes it a circle), or a placeholder of the
+/// card's colour with a note while it is not here. Returns the response of its rectangle.
+pub fn art(ui: &mut Ui, spot: &mut Spot, url: &str, size: Vec2, round: bool, sense: Sense) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    paint_art(ui, spot, url, rect, round);
+    resp
+}
+
+/// [`art`] into a rectangle that is already allocated.
+pub fn paint_art(ui: &Ui, spot: &mut Spot, url: &str, rect: Rect, round: bool) {
+    let radius = if round { CornerRadius::same((rect.width().min(rect.height()) / 2.0) as u8) } else { CornerRadius::same(4) };
+    match spot.picture(ui.ctx(), url) {
+        Some(tex) => {
+            egui::Image::new(&tex).fit_to_exact_size(rect.size()).corner_radius(radius).paint_at(ui, rect);
+        }
+        None => {
+            let base = ui.visuals().widgets.noninteractive.bg_stroke.color;
+            ui.painter().rect_filled(rect, radius, base.gamma_multiply(0.6));
+            let ink = ui.visuals().weak_text_color();
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "♪", egui::FontId::proportional((rect.height() * 0.4).clamp(10.0, 40.0)), ink);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pictures_are_asked_for_once_and_the_oldest_are_dropped() {
+        let ctx = egui::Context::default();
+        let mut imgs = Images::default();
+        assert!(matches!(imgs.texture(&ctx, "u1"), Err(true)), "the first look asks for the download");
+        assert!(matches!(imgs.texture(&ctx, "u1"), Ok(None)), "then it is waited for");
+        imgs.on_image("u1", None);
+        assert!(matches!(imgs.texture(&ctx, "u1"), Ok(None)), "a failure is not asked for again");
+        imgs.on_image("u2", Some(Box::new(image::RgbaImage::new(4, 4))));
+        assert!(matches!(imgs.texture(&ctx, "u2"), Ok(Some(_))));
+        assert!(matches!(imgs.texture(&ctx, "u2"), Ok(Some(_))), "and stays a texture");
+        for i in 0..KEEP + 10 {
+            imgs.insert(&format!("x{i}"), image::RgbaImage::new(1, 1));
+        }
+        assert!(imgs.map.len() <= KEEP);
+        assert!(!imgs.map.contains_key("u1"), "the oldest went");
+    }
+}

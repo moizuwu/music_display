@@ -16,6 +16,58 @@ pub fn accent(ui: &Ui) -> Color32 {
 
 // ── metadata, cover, controls ───────────────────────────────────────────────
 
+/// What a metadata field shows for the song (`None`: nothing to show for it now).
+pub fn field_value(m: &Model, s: &music_display::player::Snapshot, f: MetaField) -> Option<String> {
+    let capo = m.effective_capo();
+    let v = match f {
+        // (the like button is in the transport row, not after the title)
+        MetaField::Title => s.title.clone(),
+        MetaField::Artist => s.artist.clone(),
+        MetaField::AlbumArtist => Some(s.album_artist.clone()).filter(|a| !a.is_empty())?,
+        MetaField::Album => s.album.clone(),
+        MetaField::TrackNo => format!(
+            "{:02}-{}",
+            s.disc_no.unwrap_or(1),
+            s.track_no.map(|t| format!("{t:02}")).unwrap_or_else(|| "--".into())
+        ),
+        MetaField::Release => {
+            music_display::year::full_date(&s.content_created)
+                .or_else(|| m.year.clone())
+                .unwrap_or_else(|| if m.year_done { "N/A".into() } else { "...".into() })
+        }
+        MetaField::Genre => m.genre.clone()?,
+        MetaField::Tuning => {
+            if !(m.chords_on || m.show_diagrams) {
+                return None;
+            }
+            m.sheet.as_ref().and_then(|x| x.tuning.clone())?
+        }
+        MetaField::Capo => {
+            if m.chords_on && capo > 0 {
+                let mut v = capo.to_string();
+                if let Some((_, shapes)) = m.keys() {
+                    v.push_str(&format!(" ({})", shapes.short()));
+                }
+                let sheet_capo = m.sheet.as_ref().map_or(0, |x| x.capo);
+                if capo != sheet_capo {
+                    v.push_str(&format!(" [sheet {sheet_capo}]"));
+                }
+                v
+            } else if m.chords_on && m.sheet.as_ref().is_some_and(|x| x.capo > 0) {
+                "none".into()
+            } else {
+                return None;
+            }
+        }
+        MetaField::Bpm => m.sheet.as_ref().and_then(|x| x.bpm)?.to_string(),
+        MetaField::Key => {
+            let (k, _) = m.keys()?;
+            format!("{} / {}", k.long(), k.camelot())
+        }
+    };
+    Some(v)
+}
+
 pub fn metadata(ui: &mut Ui, m: &mut Model) {
     let Some(s) = m.snap.clone() else {
         ui.label(RichText::new(format!("waiting for {}…", m.args.player)).weak());
@@ -26,58 +78,12 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     let spotify_on = m.spot.on();
     let mut hide: Option<MetaField> = None;
     let mut mv: Option<(MetaField, i32)> = None;
-    let capo = m.effective_capo();
     let rows: Vec<(MetaField, String)> = m
         .layout
         .fields
         .visible()
         .filter_map(|f| {
-            let v = match f {
-                // (the like button is in the transport row, not after the title)
-                MetaField::Title => s.title.clone(),
-                MetaField::Artist => s.artist.clone(),
-                MetaField::AlbumArtist => Some(s.album_artist.clone()).filter(|a| !a.is_empty())?,
-                MetaField::Album => s.album.clone(),
-                MetaField::TrackNo => format!(
-                    "{:02}-{}",
-                    s.disc_no.unwrap_or(1),
-                    s.track_no.map(|t| format!("{t:02}")).unwrap_or_else(|| "--".into())
-                ),
-                MetaField::Release => {
-                    music_display::year::full_date(&s.content_created)
-                        .or_else(|| m.year.clone())
-                        .unwrap_or_else(|| if m.year_done { "N/A".into() } else { "...".into() })
-                }
-                MetaField::Genre => m.genre.clone()?,
-                MetaField::Tuning => {
-                    if !(m.chords_on || m.show_diagrams) {
-                        return None;
-                    }
-                    m.sheet.as_ref().and_then(|x| x.tuning.clone())?
-                }
-                MetaField::Capo => {
-                    if m.chords_on && capo > 0 {
-                        let mut v = capo.to_string();
-                        if let Some((_, shapes)) = m.keys() {
-                            v.push_str(&format!(" ({})", shapes.short()));
-                        }
-                        let sheet_capo = m.sheet.as_ref().map_or(0, |x| x.capo);
-                        if capo != sheet_capo {
-                            v.push_str(&format!(" [sheet {sheet_capo}]"));
-                        }
-                        v
-                    } else if m.chords_on && m.sheet.as_ref().is_some_and(|x| x.capo > 0) {
-                        "none".into()
-                    } else {
-                        return None;
-                    }
-                }
-                MetaField::Bpm => m.sheet.as_ref().and_then(|x| x.bpm)?.to_string(),
-                MetaField::Key => {
-                    let (k, _) = m.keys()?;
-                    format!("{} / {}", k.long(), k.camelot())
-                }
-            };
+            let v = field_value(m, &s, f)?;
             Some((f, if v.is_empty() { "—".into() } else { v }))
         })
         .collect();
@@ -161,14 +167,15 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
     }
 }
 
-pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>, radius: u8) {
+/// `vinyl` is the angle of the spinning record (`[gui] vinyl`), `None` for the plain square cover.
+pub fn cover(ui: &mut Ui, tex: Option<&egui::TextureHandle>, radius: u8, vinyl: Option<f32>) {
     // square, as wide as the column allows but at most 40% of the window's height (so the
     // metadata and the controls stay on screen), centred
     let side = super::controls::cover_side(ui.available_width(), ui.ctx().content_rect().height(), 0.4);
     let radius = egui::CornerRadius::same(radius.saturating_add(2));
     ui.vertical_centered(|ui| match tex {
         Some(t) => {
-            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(side)).corner_radius(radius));
+            super::fun::cover_image(ui, t, side, radius, vinyl);
         }
         None => {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(side.min(160.0)), Sense::hover());

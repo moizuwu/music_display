@@ -2,6 +2,7 @@
 //! it, so it can be read, written, printed (`--print-config`) and tested without a window; the
 //! drawing side is `src/gui/style.rs`. Every value is clamped to a sane range on the way in.
 use crate::color::{self, Rgb};
+use crate::layout::{Item, MetaField};
 use std::path::Path;
 
 /// Defines a small string-valued choice with `NAMES`, `parse` and `name`.
@@ -121,6 +122,13 @@ pub struct GuiConf {
     /// places the terminal UI looks at).
     pub colors: ColorsFrom,
     pub colors_file: String,
+    /// Own colours that replace the look's (and the plain dark / light ones): the window, the
+    /// panel cards, the text and the weaker text. `None` = not set. Colours of the system
+    /// (`colors`) still win over them.
+    pub window_color: Option<Rgb>,
+    pub card_color: Option<Rgb>,
+    pub text_color: Option<Rgb>,
+    pub muted_color: Option<Rgb>,
     /// A system font family; empty = the built-in one.
     pub font: String,
     /// Sizes in points.
@@ -142,6 +150,19 @@ pub struct GuiConf {
     /// Experimental: arrange the window like the Spotify app (library on the left, lyrics in the
     /// middle, the song on the right, the player bar along the bottom).
     pub spotify_layout: bool,
+    /// Fun: the cover spins like a record while the song plays.
+    pub vinyl: bool,
+    /// Fun: liking a song bursts confetti from the heart.
+    pub confetti: bool,
+    /// Fun: the accent glow of the play button pulses with the cava level.
+    pub beat_pulse: bool,
+    /// With the Spotify layout: the small cover in the player bar's left corner.
+    pub spotify_bar_cover: bool,
+    /// With the Spotify layout: the "Now playing" column on the right.
+    pub spotify_now_playing: bool,
+    /// With the Spotify layout: the song details in the player bar's left corner, in order
+    /// (the first is the headline, the others are quiet lines under it).
+    pub spotify_bar_fields: Vec<MetaField>,
     /// Size of everything in the window, percent (the zoom keys change it too).
     pub ui_scale: u16,
     pub theme_preset: Preset,
@@ -177,6 +198,10 @@ impl Default for GuiConf {
             effects_intensity: 60,
             colors: ColorsFrom::Off,
             colors_file: String::new(),
+            window_color: None,
+            card_color: None,
+            text_color: None,
+            muted_color: None,
             font: String::new(),
             lyrics_size: 18,
             active_size: 24,
@@ -192,6 +217,12 @@ impl Default for GuiConf {
             always_on_top: false,
             decorations: true,
             spotify_layout: false,
+            vinyl: false,
+            confetti: false,
+            beat_pulse: false,
+            spotify_bar_cover: true,
+            spotify_now_playing: true,
+            spotify_bar_fields: vec![MetaField::Title, MetaField::Artist],
             ui_scale: 100,
             theme_preset: Preset::None,
             background_image: String::new(),
@@ -297,9 +328,9 @@ impl GuiConf {
     }
 }
 
-const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, font, lyrics_size, active_size, meta_size, \
+const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, window_color, card_color, text_color, muted_color, font, lyrics_size, active_size, meta_size, \
 active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, spotify_layout, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
+remember_window, always_on_top, decorations, spotify_layout, spotify_bar_cover, spotify_now_playing, spotify_bar_fields, vinyl, confetti, beat_pulse, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
 
 impl GuiConf {
     /// Set the values the look is made of (everything else is left as the user has it, the
@@ -358,6 +389,26 @@ impl GuiConf {
             }
         }
         self.clamp();
+    }
+
+    /// Show / hide a field in the player bar (a field switched on goes last).
+    pub fn set_bar_field(&mut self, f: MetaField, on: bool) {
+        self.spotify_bar_fields.retain(|x| *x != f);
+        if on {
+            self.spotify_bar_fields.push(f);
+        }
+    }
+
+    /// Move a shown player bar field one place up (`-1`) or down (`1`); false when it is not
+    /// shown or already at the end.
+    pub fn shift_bar_field(&mut self, f: MetaField, dir: i32) -> bool {
+        let Some(at) = self.spotify_bar_fields.iter().position(|x| *x == f) else { return false };
+        let to = at as i32 + dir;
+        if to < 0 || to >= self.spotify_bar_fields.len() as i32 {
+            return false;
+        }
+        self.spotify_bar_fields.swap(at, to as usize);
+        true
     }
 
     /// Pull every value back into its range (the sliders and the file both go through this).
@@ -433,11 +484,24 @@ impl GuiConf {
                     }
                     None => warn(format!("[gui] {k}: expected a table; ignored")),
                 },
+                "spotify_bar_fields" => match v.as_array() {
+                    Some(a) => {
+                        self.spotify_bar_fields.clear();
+                        for x in a {
+                            match x.as_str().and_then(MetaField::parse) {
+                                Some(f) if !self.spotify_bar_fields.contains(&f) => self.spotify_bar_fields.push(f),
+                                Some(_) => {}
+                                None => warn(format!("[gui] spotify_bar_fields: unknown field {x}; ignored (fields are {})", field_names())),
+                            }
+                        }
+                    }
+                    None => warn(format!("[gui] {k}: expected a list of field names; ignored")),
+                },
                 "popped" => match v.as_array() {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
                     None => warn(format!("[gui] {k}: expected a list of panel names; ignored")),
                 },
-                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" | "spotify_layout" => {
+                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" | "spotify_layout" | "spotify_bar_cover" | "spotify_now_playing" | "vinyl" | "confetti" | "beat_pulse" => {
                     let Some(b) = v.as_bool() else {
                         warn(format!("[gui] {k}: expected true or false; using the default"));
                         continue;
@@ -449,11 +513,16 @@ impl GuiConf {
                         "lock_layout" => self.lock_layout = b,
                         "float_windows" => self.float_windows = b,
                         "spotify_layout" => self.spotify_layout = b,
+                        "vinyl" => self.vinyl = b,
+                        "confetti" => self.confetti = b,
+                        "beat_pulse" => self.beat_pulse = b,
+                        "spotify_bar_cover" => self.spotify_bar_cover = b,
+                        "spotify_now_playing" => self.spotify_now_playing = b,
                         _ => self.decorations = b,
                     }
                 }
                 "theme" | "accent" | "background" | "font" | "active_weight" | "lyrics_align" | "lyrics_animation" | "theme_preset"
-                | "background_image" | "effects" | "colors" | "colors_file" => {
+                | "background_image" | "effects" | "colors" | "colors_file" | "window_color" | "card_color" | "text_color" | "muted_color" => {
                     let Some(s) = v.as_str() else {
                         warn(format!("[gui] {k}: expected a string; using the default"));
                         continue;
@@ -479,6 +548,10 @@ impl GuiConf {
                             self.colors_file = s.trim().to_string();
                             true
                         }
+                        "window_color" => opt_color(s).map(|c| self.window_color = c).is_some(),
+                        "card_color" => opt_color(s).map(|c| self.card_color = c).is_some(),
+                        "text_color" => opt_color(s).map(|c| self.text_color = c).is_some(),
+                        "muted_color" => opt_color(s).map(|c| self.muted_color = c).is_some(),
                         "active_weight" => Weight::parse(s).map(|x| self.active_weight = x).is_some(),
                         "lyrics_align" => Align::parse(s).map(|x| self.lyrics_align = x).is_some(),
                         "lyrics_animation" => Animation::parse(s).map(|x| self.lyrics_animation = x).is_some(),
@@ -517,6 +590,9 @@ impl GuiConf {
         put("colors", self.colors.name().into());
         put("colors_file", self.colors_file.clone().into());
         put("effects_intensity", (self.effects_intensity as i64).into());
+        for (k, c) in [("window_color", self.window_color), ("card_color", self.card_color), ("text_color", self.text_color), ("muted_color", self.muted_color)] {
+            put(k, c.map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or_default().into());
+        }
         put("font", self.font.clone().into());
         put("lyrics_size", (self.lyrics_size as i64).into());
         put("active_size", (self.active_size as i64).into());
@@ -532,6 +608,12 @@ impl GuiConf {
         put("always_on_top", self.always_on_top.into());
         put("decorations", self.decorations.into());
         put("spotify_layout", self.spotify_layout.into());
+        put("vinyl", self.vinyl.into());
+        put("confetti", self.confetti.into());
+        put("beat_pulse", self.beat_pulse.into());
+        put("spotify_bar_cover", self.spotify_bar_cover.into());
+        put("spotify_now_playing", self.spotify_now_playing.into());
+        put("spotify_bar_fields", toml::Value::Array(self.spotify_bar_fields.iter().map(|f| f.id().into()).collect()));
         put("ui_scale", (self.ui_scale as i64).into());
         put("theme_preset", self.theme_preset.name().into());
         put("background_image", self.background_image.clone().into());
@@ -564,8 +646,22 @@ fn num(int: &mut impl FnMut(i64, i64, &mut i64), lo: i64, hi: i64, current: i64)
     v
 }
 
+/// A colour setting: a hex colour, or empty / "auto" for "not set".
+fn opt_color(s: &str) -> Option<Option<Rgb>> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        return Some(None);
+    }
+    color::parse_hex(s).map(Some)
+}
+
+fn field_names() -> String {
+    MetaField::ALL.iter().map(|f| f.id()).collect::<Vec<_>>().join(", ")
+}
+
 fn expected(key: &str) -> String {
     let list = match key {
+        "window_color" | "card_color" | "text_color" | "muted_color" => "a hex colour like #121212, or empty".into(),
         "theme" => Theme::NAMES.join(", "),
         "background" => Background::NAMES.join(", "),
         "effects" => Effects::NAMES.join(", "),
@@ -635,6 +731,16 @@ mod tests {
         assert_eq!((g.ui_scale, g.theme_preset, g.lyrics_glow, g.lock_layout), (130, Preset::Halloween, 60, true));
         assert_eq!((g.translation_size, g.member_size), (20, 11));
         assert_eq!((g.background_image.as_str(), g.popped.as_slice()), ("~/a.png", ["lyrics".to_string(), "cava".to_string()].as_slice()));
+    }
+
+    #[test]
+    fn own_colours_read_write_and_warn() {
+        let (g, w) = parse("[gui]\nwindow_color = \"#000000\"\ncard_color = \"#181818\"\ntext_color = \"nope\"\nmuted_color = \"auto\"\n");
+        assert_eq!((g.window_color, g.card_color, g.text_color, g.muted_color), (Some((0, 0, 0)), Some((24, 24, 24)), None, None));
+        assert_eq!(w.len(), 1, "{w:?}");
+        let t = g.write();
+        assert_eq!(t["card_color"].as_str(), Some("#181818"));
+        assert_eq!(t["text_color"].as_str(), Some(""));
     }
 
     #[test]
@@ -792,6 +898,12 @@ mod tests {
             lyrics_animation: Animation::Instant,
             always_on_top: true,
             spotify_layout: true,
+            vinyl: true,
+            confetti: true,
+            beat_pulse: true,
+            spotify_bar_cover: false,
+            spotify_now_playing: false,
+            spotify_bar_fields: vec![MetaField::Album, MetaField::Release, MetaField::Title],
             ui_scale: 150,
             theme_preset: Preset::Halloween,
             background_image: "/x/y.png".into(),
@@ -815,6 +927,45 @@ mod tests {
         let (printed, w) = parse(&g.render());
         assert!(w.is_empty());
         assert_eq!(printed, g);
+    }
+
+    #[test]
+    fn the_fun_extras_are_off_unless_asked_for() {
+        let g = GuiConf::default();
+        assert!(!g.vinyl && !g.confetti && !g.beat_pulse);
+        let (g, w) = parse("[gui]\nvinyl = true\nbeat_pulse = true\nconfetti = \"yes\"\n");
+        assert!(g.vinyl && g.beat_pulse && !g.confetti, "a wrong type keeps the default");
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn the_spotify_bar_keys() {
+        let g = GuiConf::default();
+        assert!(g.spotify_bar_cover && g.spotify_now_playing);
+        assert_eq!(g.spotify_bar_fields, [MetaField::Title, MetaField::Artist]);
+        let (g, w) = parse("[gui]\nspotify_bar_cover = false\nspotify_now_playing = false\nspotify_bar_fields = [\"album\", \"Genre\", \"nope\", \"album\", \"track_no\"]\n");
+        assert!(!g.spotify_bar_cover && !g.spotify_now_playing);
+        assert_eq!(g.spotify_bar_fields, [MetaField::Album, MetaField::Genre, MetaField::TrackNo], "unknown names and repeats are dropped");
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("nope"));
+        // an empty list is allowed (the bar shows no text), a wrong type keeps the default
+        let (g, w) = parse("[gui]\nspotify_bar_fields = []\n");
+        assert!(g.spotify_bar_fields.is_empty() && w.is_empty());
+        let (g, w) = parse("[gui]\nspotify_bar_fields = \"title\"\nspotify_bar_cover = 3\n");
+        assert_eq!(g, GuiConf::default());
+        assert_eq!(w.len(), 2, "{w:?}");
+        // written as names, and the editor's moves
+        let mut g = GuiConf::default();
+        g.set_bar_field(MetaField::Genre, true);
+        assert_eq!(g.write()["spotify_bar_fields"].to_string(), r#"["title", "artist", "genre"]"#);
+        assert!(g.shift_bar_field(MetaField::Genre, -1));
+        assert_eq!(g.spotify_bar_fields, [MetaField::Title, MetaField::Genre, MetaField::Artist]);
+        assert!(!g.shift_bar_field(MetaField::Title, -1) && !g.shift_bar_field(MetaField::Artist, 1));
+        assert!(!g.shift_bar_field(MetaField::Key, 1), "a hidden field does not move");
+        g.set_bar_field(MetaField::Title, false);
+        assert_eq!(g.spotify_bar_fields, [MetaField::Genre, MetaField::Artist]);
+        g.set_bar_field(MetaField::Genre, true);
+        assert_eq!(g.spotify_bar_fields, [MetaField::Artist, MetaField::Genre], "switched on again, it goes last");
     }
 
     #[test]

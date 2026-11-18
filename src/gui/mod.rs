@@ -8,14 +8,21 @@ mod extras;
 mod floathook;
 mod floating;
 mod footer;
+mod fun;
 mod keys;
 mod library;
 mod lyrics_view;
 mod model;
 mod popout;
+mod presets;
 mod privacy;
 mod settings;
 mod sizewatch;
+mod sp_actions;
+mod sp_img;
+mod sp_nav;
+mod sp_pages;
+mod sp_side;
 mod spotify_view;
 mod style;
 mod ux;
@@ -252,7 +259,7 @@ impl Gui {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for p in l.now_playing() {
                         match p {
-                            PanelId::Cover => view::cover(ui, self.cover.as_ref(), self.m.gui.corner_radius),
+                            PanelId::Cover => view::cover(ui, self.cover.as_ref(), self.m.gui.corner_radius, fun::vinyl_angle(ui.ctx(), &self.m)),
                             PanelId::Metadata => view::metadata(ui, &mut self.m),
                             PanelId::Controls => controls::controls(ui, &mut self.m),
                             _ => {}
@@ -382,6 +389,7 @@ impl eframe::App for Gui {
             return;
         }
         // experimental: arranged like the Spotify app
+        self.m.spot.pg.active = g.spotify_layout;
         if g.spotify_layout {
             self.spotify_view(ui, &g);
             self.popups(ui.ctx());
@@ -429,7 +437,10 @@ impl eframe::App for Gui {
             let panel = if vertical { egui::Panel::top(pid) } else { egui::Panel::left(pid) };
             let panel = panel.frame(style::gutter(&g)).resizable(!g.lock_layout).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
             let resp = panel.show(ui, |ui| {
-                style::card(ui, &g, |ui| self.panel(ui, *id));
+                // square corners on the sides that touch a split (every column but the last has
+                // one after it, every column but the first one before it)
+                let split = style::Split { before: i > 0, after: true, vertical };
+                style::card_at(ui, &g, split, |ui| self.panel(ui, *id));
             });
             // dragging the border stores the new share
             let extent = if vertical { resp.response.rect.height() } else { resp.response.rect.width() };
@@ -439,7 +450,8 @@ impl eframe::App for Gui {
             }
         }
         egui::CentralPanel::default().frame(style::gutter(&g)).show(ui, |ui| {
-            style::card(ui, &g, |ui| match last {
+            let split = style::Split { before: !rest.is_empty(), after: false, vertical };
+            style::card_at(ui, &g, split, |ui| match last {
                 Some(id) => self.panel(ui, id),
                 None => {
                     ui.weak("Every panel is in a window of its own. Dock one again from the \"windows\" menu.");

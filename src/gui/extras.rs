@@ -59,11 +59,11 @@ impl Model {
     /// The cava and lyric-version events; called first by `apply`.
     pub fn extras_event(&mut self, ev: &AppEvent) {
         match ev {
-            AppEvent::Cava(bars) if self.cava_wanted() => {
+            AppEvent::Cava(bars) if self.cava_feed() => {
                 self.x.cava_bars = bars.clone();
                 self.x.cava_status = None;
             }
-            AppEvent::CavaNote(n) if self.cava_wanted() && self.x.cava_bars.is_empty() => self.x.cava_status = Some(n.clone()),
+            AppEvent::CavaNote(n) if self.cava_feed() && self.x.cava_bars.is_empty() => self.x.cava_status = Some(n.clone()),
             AppEvent::CavaError(e) => {
                 self.x.cava_status = Some(e.clone());
                 self.x.cava_bars.clear();
@@ -87,9 +87,14 @@ impl Model {
         self.layout.panels.shown(PanelId::Cava) && (!self.x.minimal || self.gui.popped.iter().any(|p| p == PanelId::Cava.id()))
     }
 
+    /// cava runs for the panel, or for the play button's glow (`beat_pulse`).
+    pub fn cava_feed(&self) -> bool {
+        self.cava_wanted() || self.gui.beat_pulse
+    }
+
     /// Start or stop the cava process to match what is shown (called every frame; cheap).
     pub fn sync_cava(&mut self) {
-        if self.cava_wanted() {
+        if self.cava_feed() {
             if self.x.cava_task.is_none() && !self.x.cava_failed {
                 self.x.cava_status = Some("starting cava…".into());
                 let (tx, bars) = (self.tx.clone(), self.args.cava_bars.max(4));
@@ -226,7 +231,9 @@ pub fn cava_panel(ui: &mut Ui, m: &Model) {
         ui.label(egui::RichText::new(note).weak());
         return;
     }
-    let h = ui.available_height().clamp(40.0, 240.0);
+    // the bars fill the panel, however tall it was dragged (a cap here made a bigger panel
+    // look as if its size was not kept)
+    let h = ui.available_height().max(40.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
     let color = ui.visuals().hyperlink_color;
     let n = m.x.cava_bars.len() as f32;

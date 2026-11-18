@@ -3079,11 +3079,11 @@ fn text_at(screen: &[String], r: Rect) -> String {
 }
 
 fn playlist_item(n: &str) -> spotify::Item {
-    spotify::Item { kind: "playlist".into(), uri: format!("spotify:playlist:{n}"), name: format!("List {n}"), sub: "3 songs".into(), openable: true, duration: 0.0 }
+    spotify::Item { kind: "playlist".into(), uri: format!("spotify:playlist:{n}"), name: format!("List {n}"), sub: "3 songs".into(), openable: true, duration: 0.0, ..Default::default() }
 }
 
 fn track_item(n: &str) -> spotify::Item {
-    spotify::Item { kind: "track".into(), uri: format!("spotify:track:{n}"), name: format!("Song {n}"), sub: "Band".into(), openable: false, duration: 61.0 }
+    spotify::Item { kind: "track".into(), uri: format!("spotify:track:{n}"), name: format!("Song {n}"), sub: "Band".into(), openable: false, duration: 61.0, ..Default::default() }
 }
 
 /// An app on a fake Spotify with a few cached lists, the browser closed, nothing selected.

@@ -240,6 +240,8 @@ impl App {
             return;
         }
         match r {
+            // the window's pages and pictures (the terminal UI has none)
+            Reply::Page { .. } | Reply::Image { .. } => {}
             Reply::Login(LoginMsg::Step(LoginStep::Opened(false))) => {
                 self.login_msg = Some("browser didn't open: run music_display --spotify-login".into());
             }

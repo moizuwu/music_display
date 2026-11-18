@@ -99,18 +99,26 @@ pub fn bar_center(ui: &mut Ui, m: &mut Model) {
 
 /// The player bar, right part: devices, play here and the volume, against the right edge.
 pub fn bar_right(ui: &mut Ui, m: &mut Model) {
-    let vol = m.snap.as_ref().and_then(|s| plan(&m.layout.buttons, s).into_iter().find_map(|c| if let Ctl::Volume(v) = c { Some(v) } else { None }));
-    let connect = if m.spot.on() { 2 } else { 0 };
+    let vol = bar_volume(m);
     ui.horizontal(|ui| {
-        let gap = ui.spacing().item_spacing.x;
-        let vol_w = if vol.is_some() { style::ICON_SIDE + VOL_BAR + 44.0 + 2.0 * gap } else { 0.0 };
-        let width = connect as f32 * (style::ICON_SIDE + gap) + vol_w;
-        ui.add_space((ui.available_width() - width).max(0.0));
+        ui.add_space((ui.available_width() - bar_right_width(ui, m)).max(0.0));
         super::library::connect_buttons(ui, m);
         if let Some(v) = vol {
             volume(ui, m, v);
         }
     });
+}
+
+fn bar_volume(m: &Model) -> Option<f64> {
+    m.snap.as_ref().and_then(|s| plan(&m.layout.buttons, s).into_iter().find_map(|c| if let Ctl::Volume(v) = c { Some(v) } else { None }))
+}
+
+/// How wide [`bar_right`] draws.
+pub fn bar_right_width(ui: &Ui, m: &Model) -> f32 {
+    let connect = if m.spot.on() { 2 } else { 0 };
+    let gap = ui.spacing().item_spacing.x;
+    let vol_w = if bar_volume(m).is_some() { style::ICON_SIDE + VOL_BAR + 44.0 + 2.0 * gap } else { 0.0 };
+    connect as f32 * (style::ICON_SIDE + gap) + vol_w
 }
 
 /// Shuffle, previous, play / pause, next and repeat, centred.
@@ -138,7 +146,11 @@ fn transport_row(ui: &mut Ui, m: &mut Model, shuffle: Option<Ctl>, trio: &[Ctl],
                 }
                 Ctl::Play(playing) => {
                     let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
-                    if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
+                    // `beat_pulse`: a glow behind the button that follows the music
+                    let glow = super::fun::slot(ui);
+                    let button = style::icon_button(ui, icon).on_hover_text(tip);
+                    glow.fill(ui, button.rect, super::fun::pulse(ui.ctx(), m));
+                    if button.clicked() {
                         m.play_pause();
                     }
                 }

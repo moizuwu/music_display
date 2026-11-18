@@ -284,6 +284,7 @@ impl super::Gui {
         help_window(ctx, &mut self.m, &mut self.look);
         super::privacy::window(ctx, &mut self.m, &mut self.look);
         self.popouts(ctx);
+        super::fun::paint_confetti(ctx);
     }
 }
 
