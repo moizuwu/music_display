@@ -19,7 +19,7 @@ pub fn window(
     open: &mut bool,
     mut add: impl FnMut(&mut Ui, &mut Look),
 ) {
-    let title = format!("music_display - {title}");
+    let title = format!("mdis - {title}");
     let mut b = ViewportBuilder::default()
         .with_title(title.clone())
         // (its own class, so that a rule of the compositor can name these windows)

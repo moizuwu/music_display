@@ -478,6 +478,28 @@ pub enum Icon {
     Devices,
     /// Move playback to this computer.
     PlayHere,
+    Gear,
+    Library,
+    Help,
+    Sun,
+    Moon,
+    /// The pop-out menu: four little windows.
+    Windows,
+    Back,
+    Open,
+    Refresh,
+    Search,
+    Close,
+    Up,
+    Down,
+    Plus,
+    Minus,
+    /// A small play triangle (a row's play button).
+    PlayRow,
+    /// Add to the queue.
+    Queue,
+    /// Add to a playlist.
+    AddList,
 }
 
 /// The size of every transport button (previous, play / pause, next alike).
@@ -487,23 +509,52 @@ pub const ICON_SIDE: f32 = 30.0;
 /// all of them look the same and light up under the pointer.
 pub fn icon_button(ui: &mut Ui, icon: Icon) -> Response {
     let ink = ui.visuals().strong_text_color();
-    paint_button(ui, icon, ink, false)
+    paint_button(ui, icon, ink, false, ICON_SIDE)
 }
 
 /// A switch with a drawn icon, the way Spotify draws its shuffle and repeat: dim when off,
 /// the accent colour with a dot under it when on, brighter under the pointer.
 pub fn toggle_button(ui: &mut Ui, icon: Icon, on: bool) -> Response {
     let ink = if on { super::view::accent(ui) } else { ui.visuals().weak_text_color() };
-    paint_button(ui, icon, ink, on)
+    paint_button(ui, icon, ink, on, ICON_SIDE)
 }
 
-fn paint_button(ui: &mut Ui, icon: Icon, mut ink: Color32, dot: bool) -> Response {
-    let side = ICON_SIDE;
+/// The one style of a title (a panel's, a window's section, the library's page).
+pub fn heading(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).heading()).truncate());
+}
+
+/// A quiet status line ("Loading…", the library's note).
+pub fn note(ui: &mut Ui, text: &str) {
+    ui.label(egui::RichText::new(text).small().weak());
+}
+
+/// An error in the colour of warnings.
+pub fn error(ui: &mut Ui, text: &str) {
+    ui.colored_label(ui.visuals().warn_fg_color, text);
+}
+
+/// The size of the buttons in a row of a list.
+pub const ROW_SIDE: f32 = 24.0;
+
+/// A tool button (top bar, headers, list rows): a drawn icon with its tooltip, in the normal text
+/// colour, the accent colour with a dot while `on`. True when clicked. `side` is `ICON_SIDE` or `ROW_SIDE`.
+pub fn tool(ui: &mut Ui, side: f32, icon: Icon, on: bool, tip: &str) -> bool {
+    tool_response(ui, side, icon, on, tip).clicked()
+}
+
+/// [`tool`], giving the response (for a menu that opens from the button).
+pub fn tool_response(ui: &mut Ui, side: f32, icon: Icon, on: bool, tip: &str) -> Response {
+    let ink = if on { super::view::accent(ui) } else { ui.visuals().text_color() };
+    paint_button(ui, icon, ink, on, side).on_hover_text(tip)
+}
+
+fn paint_button(ui: &mut Ui, icon: Icon, mut ink: Color32, dot: bool, side: f32) -> Response {
     let (r, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
     if resp.hovered() {
         let strong = ui.visuals().strong_text_color();
         p_hover(ui, r, side, resp.is_pointer_button_down_on());
-        if !dot && ink == ui.visuals().weak_text_color() {
+        if !dot {
             ink = strong;
         }
     }
@@ -541,9 +592,9 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
         }
     };
     let bez = |a: (f32, f32), b: (f32, f32), c2: (f32, f32), d: (f32, f32), t0: f32, t1: f32| -> Vec<Pos2> {
-        (0..=14)
+        (0..=24)
             .map(|i| {
-                let t = t0 + (t1 - t0) * i as f32 / 14.0;
+                let t = t0 + (t1 - t0) * i as f32 / 24.0;
                 let m = 1.0 - t;
                 let f = |a: f32, b: f32, c: f32, d: f32| m * m * m * a + 3.0 * m * m * t * b + 3.0 * m * t * t * c + t * t * t * d;
                 at(f(a.0, b.0, c2.0, d.0), f(a.1, b.1, c2.1, d.1))
@@ -551,9 +602,10 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
             .collect()
     };
     let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32| -> Vec<Pos2> {
-        (0..=10)
+        let n = (((a1 - a0).abs() / 9.0).ceil() as usize).max(8);
+        (0..=n)
             .map(|i| {
-                let a = (a0 + (a1 - a0) * i as f32 / 10.0).to_radians();
+                let a = (a0 + (a1 - a0) * i as f32 / n as f32).to_radians();
                 at(cx + r * a.cos(), cy + r * a.sin())
             })
             .collect()
@@ -668,6 +720,81 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
             stroke(&[at(8.0, 11.0), at(8.0, 13.5)]);
             stroke(&[at(4.8, 13.6), at(11.2, 13.6)]);
             p.add(egui::Shape::convex_polygon(vec![at(6.5, 4.7), at(6.5, 8.9), at(10.2, 6.8)], ink, Stroke::NONE));
+        }
+        Icon::Gear => {
+            p.circle_stroke(at(8.0, 8.0), 4.4 * k, Stroke::new(w, ink));
+            p.circle_stroke(at(8.0, 8.0), 1.7 * k, Stroke::new(w, ink));
+            for i in 0..8 {
+                let a = (i as f32 * 45.0).to_radians();
+                stroke(&[at(8.0 + 5.2 * a.cos(), 8.0 + 5.2 * a.sin()), at(8.0 + 6.9 * a.cos(), 8.0 + 6.9 * a.sin())]);
+            }
+        }
+        Icon::Library => {
+            stroke(&[at(2.5, 2.5), at(2.5, 13.5)]);
+            stroke(&[at(6.0, 2.5), at(6.0, 13.5)]);
+            stroke(&[at(9.3, 3.3), at(12.6, 13.2)]);
+        }
+        Icon::Help => {
+            p.circle_stroke(at(8.0, 8.0), 6.2 * k, Stroke::new(w, ink));
+            let mut q = arc(8.0, 6.4, 1.9, 180.0, 360.0 + 70.0);
+            q.push(at(8.0, 8.6));
+            q.push(at(8.0, 9.6));
+            stroke(&q);
+            p.circle_filled(at(8.0, 11.6), 0.8 * k, ink);
+        }
+        Icon::Sun => {
+            p.circle_stroke(at(8.0, 8.0), 3.0 * k, Stroke::new(w, ink));
+            for i in 0..8 {
+                let a = (i as f32 * 45.0).to_radians();
+                stroke(&[at(8.0 + 5.1 * a.cos(), 8.0 + 5.1 * a.sin()), at(8.0 + 6.7 * a.cos(), 8.0 + 6.7 * a.sin())]);
+            }
+        }
+        Icon::Moon => {
+            let mut m = arc(8.0, 8.0, 6.0, 55.0, 305.0);
+            m.extend(bez((11.44, 3.09), (6.6, 5.4), (6.6, 10.6), (11.44, 12.91), 0.0, 1.0));
+            closed(&m, &[]);
+        }
+        Icon::Windows => {
+            for (x, y) in [(2.0, 2.0), (9.0, 2.0), (2.0, 9.0), (9.0, 9.0)] {
+                p.rect_stroke(Rect::from_min_max(at(x, y), at(x + 5.0, y + 5.0)), 1.2 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
+            }
+        }
+        Icon::Back => stroke(&[at(10.0, 2.5), at(4.5, 8.0), at(10.0, 13.5)]),
+        Icon::Open => stroke(&[at(6.0, 2.5), at(11.5, 8.0), at(6.0, 13.5)]),
+        Icon::Refresh => {
+            stroke(&arc(8.0, 8.0, 5.2, 20.0, 320.0));
+            p.add(egui::Shape::convex_polygon(vec![at(13.3, 3.0), at(13.5, 6.5), at(10.1, 5.7)], ink, Stroke::NONE));
+        }
+        Icon::Search => {
+            p.circle_stroke(at(7.0, 7.0), 4.6 * k, Stroke::new(w, ink));
+            stroke(&[at(10.5, 10.5), at(14.0, 14.0)]);
+        }
+        Icon::Close => {
+            stroke(&[at(3.5, 3.5), at(12.5, 12.5)]);
+            stroke(&[at(12.5, 3.5), at(3.5, 12.5)]);
+        }
+        Icon::Up => stroke(&[at(3.0, 10.0), at(8.0, 5.0), at(13.0, 10.0)]),
+        Icon::Down => stroke(&[at(3.0, 6.0), at(8.0, 11.0), at(13.0, 6.0)]),
+        Icon::Plus => {
+            stroke(&[at(8.0, 3.0), at(8.0, 13.0)]);
+            stroke(&[at(3.0, 8.0), at(13.0, 8.0)]);
+        }
+        Icon::Minus => stroke(&[at(3.0, 8.0), at(13.0, 8.0)]),
+        Icon::PlayRow => {
+            p.add(egui::Shape::convex_polygon(vec![at(4.8, 2.6), at(4.8, 13.4), at(13.4, 8.0)], ink, Stroke::NONE));
+        }
+        Icon::Queue => {
+            stroke(&[at(2.0, 4.0), at(10.0, 4.0)]);
+            stroke(&[at(2.0, 8.0), at(10.0, 8.0)]);
+            stroke(&[at(2.0, 12.0), at(6.0, 12.0)]);
+            p.add(egui::Shape::convex_polygon(vec![at(10.0, 9.8), at(10.0, 14.2), at(14.2, 12.0)], ink, Stroke::NONE));
+        }
+        Icon::AddList => {
+            stroke(&[at(2.0, 4.0), at(11.0, 4.0)]);
+            stroke(&[at(2.0, 8.0), at(11.0, 8.0)]);
+            stroke(&[at(2.0, 12.0), at(6.0, 12.0)]);
+            stroke(&[at(12.5, 9.5), at(12.5, 14.5)]);
+            stroke(&[at(10.0, 12.0), at(15.0, 12.0)]);
         }
     }
 }

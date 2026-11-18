@@ -563,12 +563,12 @@ impl super::Gui {
             ui.separator();
             ui.horizontal(|ui| {
                 match self.m.ux.saved_text() {
-                    Some(s) => ui.label(RichText::new(format!("saved: {s}")).small().color(ui.visuals().hyperlink_color)),
+                    Some(s) => ui.label(RichText::new(format!("Saved: {s}")).small().color(super::view::accent(ui))),
                     None => ui.label(RichText::new("changes apply at once and are saved to config.toml").small().weak()),
                 };
                 // (a tiling window manager draws no title bar with a close button)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("close").on_hover_text("close the settings").clicked() {
+                    if super::style::tool(ui, super::style::ROW_SIDE, super::style::Icon::Close, false, "Close the settings") {
                         close = true;
                     }
                 });
@@ -894,7 +894,7 @@ fn annotations(ui: &mut Ui, m: &mut Model) {
     }
     ui.horizontal(|ui| {
         weak(ui, "Free at genius.com/api-clients. An empty entry keeps the old token.");
-        if !m.args.genius_token.is_empty() && ui.small_button("remove").clicked() {
+        if !m.args.genius_token.is_empty() && super::style::tool(ui, super::style::ROW_SIDE, super::style::Icon::Close, false, "Remove the token") {
             m.clear_genius_token();
         }
     });

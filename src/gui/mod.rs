@@ -341,9 +341,22 @@ impl eframe::App for Gui {
         }
         egui::Panel::top("top").frame(style::gutter(&g)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.strong("music_display");
+                ui.strong("mdis");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("windows", |ui| {
+                    let side = style::ICON_SIDE;
+                    library::library_button(ui, &mut self.m);
+                    if style::tool(ui, side, style::Icon::Gear, self.m.ux.s.open, "Settings (s)") {
+                        self.m.ux.s.open = !self.m.ux.s.open;
+                    }
+                    if style::tool(ui, side, style::Icon::Help, self.m.ux.help, "Keys (?)") {
+                        self.m.ux.help = !self.m.ux.help;
+                    }
+                    let (icon, tip) = if self.m.ux.dark_now { (style::Icon::Sun, "Light theme (v)") } else { (style::Icon::Moon, "Dark theme (v)") };
+                    if style::tool(ui, side, icon, false, tip) {
+                        self.m.toggle_theme();
+                    }
+                    let r = style::tool_response(ui, side, style::Icon::Windows, false, "Show a panel in a window of its own");
+                    egui::Popup::menu(&r).show(|ui| {
                         ui.label(egui::RichText::new("Show in a window of its own").small().weak());
                         for (id, name) in popout::PANELS {
                             let mut on = self.is_popped(id);
@@ -352,16 +365,6 @@ impl eframe::App for Gui {
                             }
                         }
                     });
-                    if ui.button(if self.m.ux.dark_now { "light" } else { "dark" }).on_hover_text("dark / light theme (v)").clicked() {
-                        self.m.toggle_theme();
-                    }
-                    if ui.button("?").on_hover_text("keys (?)").clicked() {
-                        self.m.ux.help = !self.m.ux.help;
-                    }
-                    if ui.button("settings").on_hover_text("settings (s)").clicked() {
-                        self.m.ux.s.open = !self.m.ux.s.open;
-                    }
-                    library::library_button(ui, &mut self.m);
                 });
             });
         });
@@ -451,10 +454,10 @@ impl Gui {
                             $list.set(item, on);
                             changed = true;
                         }
-                        if ui.small_button("↑").clicked() && $list.shift(item, -1) {
+                        if style::tool(ui, style::ROW_SIDE, style::Icon::Up, false, "Move up") && $list.shift(item, -1) {
                             changed = true;
                         }
-                        if ui.small_button("↓").clicked() && $list.shift(item, 1) {
+                        if style::tool(ui, style::ROW_SIDE, style::Icon::Down, false, "Move down") && $list.shift(item, 1) {
                             changed = true;
                         }
                     });

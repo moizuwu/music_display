@@ -1,5 +1,6 @@
 //! The panels, drawn with egui. Each takes the model and reads or changes it; the same panel ids
 //! and layout config as the terminal front end decide what is shown and in which order.
+use super::style;
 use super::model::{Chords, Model, Notes};
 use egui::{Align2, Color32, FontId, RichText, Sense, Stroke, Ui, Vec2};
 use music_display::layout::MetaField;
@@ -185,26 +186,26 @@ pub fn diagrams(ui: &mut Ui, m: &mut Model) {
     ui.horizontal(|ui| {
         ui.heading("Chords");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("✕").on_hover_text("close the chord diagrams (d)").clicked() {
+            if style::tool(ui, style::ROW_SIDE, style::Icon::Close, false, "Close the chord diagrams (d)") {
                 m.show_diagrams = false;
                 m.layout.panels.set(music_display::layout::PanelId::Chords, false);
             }
         });
     });
     ui.horizontal(|ui| {
-        if ui.small_button("t −").clicked() {
+        if style::tool(ui, style::ROW_SIDE, style::Icon::Minus, false, "Transpose down") {
             m.transpose = (m.transpose - 1).rem_euclid(12);
         }
         ui.label(format!("transpose {:+}", super::footer::signed_transpose(m.transpose)));
-        if ui.small_button("t +").clicked() {
+        if style::tool(ui, style::ROW_SIDE, style::Icon::Plus, false, "Transpose up") {
             m.transpose = (m.transpose + 1).rem_euclid(12);
         }
         ui.separator();
-        if ui.small_button("capo −").clicked() {
+        if style::tool(ui, style::ROW_SIDE, style::Icon::Minus, false, "Capo down") {
             m.change_capo(-1);
         }
         ui.label(format!("capo {}", m.effective_capo()));
-        if ui.small_button("capo +").clicked() {
+        if style::tool(ui, style::ROW_SIDE, style::Icon::Plus, false, "Capo up") {
             m.change_capo(1);
         }
     });

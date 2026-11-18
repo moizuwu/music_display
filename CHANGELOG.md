@@ -7,6 +7,10 @@ which turns the `Unreleased` section into that version.
 
 ## [Unreleased]
 
+### Changed
+
+- The window is consistent: every button of the top bar (windows, theme, keys, settings, library), the library (back, play, reload, search, open, queue, add to playlist, like), the chords and lyrics panels, the layout editor and the settings are drawn icons in the style of the transport row, each with a tooltip; errors, notes and titles share one style; the window and its extra windows are called "mdis".
+
 ### Added
 
 - The window's shuffle, repeat, mute, like, devices and play here buttons are drawn icons now, in the style of Spotify's (shuffle and repeat beside previous / play / next, dim when off, accent colour with a dot when on, "1" for repeat one); a double click on a library row plays it.

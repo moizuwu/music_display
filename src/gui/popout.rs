@@ -62,7 +62,7 @@ impl Gui {
         let g = self.m.gui.clone();
         let mut docked: Vec<PanelId> = Vec::new();
         for (id, name) in PANELS {
-            let title = format!("music_display - {name}");
+            let title = format!("mdis - {name}");
             if !self.is_popped(id) {
                 // (docked from the menu: the next time it is popped out it is a new window)
                 super::floathook::forget(ctx, &title);

@@ -226,11 +226,11 @@ pub fn lyrics(ui: &mut Ui, m: &mut Model) {
     ui.horizontal(|ui| {
         ui.heading(title);
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            if ui.small_button("+").on_hover_text("lyrics 0.1 s later").clicked() {
+            if style::tool(ui, style::ROW_SIDE, style::Icon::Plus, false, "Lyrics 0.1 s later") {
                 m.nudge(0.1);
             }
-            ui.label(format!("{:+.1}s", m.offset));
-            if ui.small_button("−").on_hover_text("lyrics 0.1 s earlier").clicked() {
+            ui.label(format!("{:+.1} s", m.offset));
+            if style::tool(ui, style::ROW_SIDE, style::Icon::Minus, false, "Lyrics 0.1 s earlier") {
                 m.nudge(-0.1);
             }
         });

@@ -87,7 +87,7 @@ impl Spot {
         let id = args.spotify_client_id.clone().unwrap_or_default();
         let daemon = if args.use_spotifyd { args.spotify_device.as_str() } else { "" };
         let api = Api::new(client, &id, daemon);
-        self.status = (!spotify::logged_in()).then(|| "not logged in: run music_display --spotify-login".to_string());
+        self.status = (!spotify::logged_in()).then(|| "not logged in: run mdis --spotify-login".to_string());
         // the poller only runs in the real program: tests drive the client by hand
         #[cfg(not(test))]
         {
@@ -739,7 +739,7 @@ pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
 /// The library button, in the top row. `spotify_button = false` hides it (the `o` key still
 /// opens the library).
 pub fn library_button(ui: &mut Ui, m: &mut Model) {
-    if m.spot.on() && !m.args.no_spotify_button && ui.add(egui::Button::new("library").selected(m.spot.open)).on_hover_text("Spotify library (o)").clicked() {
+    if m.spot.on() && !m.args.no_spotify_button && super::style::tool(ui, super::style::ICON_SIDE, super::style::Icon::Library, m.spot.open, "Spotify library (o)") {
         toggle(m);
     }
 }
@@ -809,9 +809,12 @@ pub fn windows(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look
 }
 
 fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
+    use super::style::{Icon, ROW_SIDE, tool};
     let mut open = true;
     let mut acts: Vec<Act> = Vec::new();
     let moved = std::mem::take(&mut m.spot.nav_moved);
+    // the song that is playing is in Liked Songs: its row shows a filled heart
+    let liked_row = (m.spot.liked == Some(true)).then(|| m.spot.liked_uri.clone());
     let g = m.gui.clone();
     let s = &mut m.spot;
     super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| {
@@ -829,21 +832,21 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
         let picking = s.lib.picker.is_some();
         ui.horizontal(|ui| {
             if picking {
-                if ui.button("cancel").clicked() {
+                if tool(ui, ROW_SIDE, Icon::Close, false, "Cancel") {
                     acts.push(Act::CancelPick);
                 }
-            } else if !s.lib.stack.is_empty() && ui.button("‹ back").clicked() {
+            } else if !s.lib.stack.is_empty() && tool(ui, ROW_SIDE, Icon::Back, false, "Back") {
                 acts.push(Act::Back);
             }
             let l = s.lib.level();
-            if !picking && !l.uri.is_empty() && ui.button("▶ play").on_hover_text("play all of it from the start").clicked() {
+            if !picking && !l.uri.is_empty() && tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play all of it from the start") {
                 acts.push(Act::PlayAll);
             }
-            ui.strong(&l.title);
+            super::style::heading(ui, &l.title);
             if !l.summary.is_empty() {
                 ui.label(RichText::new(&l.summary).weak());
             }
-            if ui.small_button("reload").clicked() {
+            if tool(ui, ROW_SIDE, Icon::Refresh, false, "Reload") {
                 acts.push(Act::Reload);
             }
         });
@@ -851,20 +854,20 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
             ui.horizontal(|ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut s.lib.input.text).hint_text("songs, albums, artists, playlists").desired_width(280.0));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("search").clicked() || enter) && !s.lib.input.text.trim().is_empty() {
+                if (tool(ui, ROW_SIDE, Icon::Search, false, "Search") || enter) && !s.lib.input.text.trim().is_empty() {
                     acts.push(Act::Search);
                 }
             });
         }
         let l = s.lib.level();
         if l.loading {
-            ui.label(RichText::new("loading…").weak());
+            super::style::note(ui, "Loading…");
         }
         if let Some(e) = &l.error {
-            ui.colored_label(ui.visuals().warn_fg_color, e);
+            super::style::error(ui, e);
         }
         if let Some(n) = &s.lib.note {
-            ui.label(RichText::new(n).small().weak());
+            super::style::note(ui, n);
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for row in l.rows() {
@@ -879,24 +882,25 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
                         let acts_before = acts.len();
                         let row = ui.horizontal(|ui| {
                             if picking {
-                                if ui.button("add").clicked() {
+                                if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to this playlist") {
                                     acts.push(Act::Pick(i));
                                 }
                             } else {
-                                if ui.small_button("▶").on_hover_text("play").clicked() {
+                                if tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play") {
                                     acts.push(Act::Play(i));
                                 }
-                                if it.openable && ui.small_button("›").on_hover_text("open").clicked() {
+                                if it.openable && tool(ui, ROW_SIDE, Icon::Open, false, "Open") {
                                     acts.push(Act::Open(i));
                                 }
                                 if it.kind == "track" {
-                                    if ui.small_button("+q").on_hover_text("add to the queue").clicked() {
+                                    if tool(ui, ROW_SIDE, Icon::Queue, false, "Add to the queue") {
                                         acts.push(Act::Queue(i));
                                     }
-                                    if ui.small_button("+list").on_hover_text("add to a playlist").clicked() {
+                                    if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to a playlist") {
                                         acts.push(Act::AddTo(i));
                                     }
-                                    if ui.small_button("♡").on_hover_text("like").clicked() {
+                                    let liked = liked_row.as_deref() == Some(it.uri.as_str());
+                                    if tool(ui, ROW_SIDE, Icon::Heart(liked), liked, "Add to Liked Songs") {
                                         acts.push(Act::Like(i));
                                     }
                                 }
@@ -961,16 +965,17 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
 }
 
 fn devices_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
+    use super::style::{Icon, ROW_SIDE, tool};
     let mut open = true;
     let (mut choose, mut refresh) = (None, false);
     let g = m.gui.clone();
     let Some(d) = &m.spot.devices else { return };
     super::floating::window(ctx, look, &g, "devices", "Devices", [340.0, 300.0], &mut open, |ui, _| {
         if d.loading {
-            ui.label(RichText::new("loading…").weak());
+            super::style::note(ui, "Loading…");
         }
         if let Some(e) = &d.error {
-            ui.colored_label(ui.visuals().warn_fg_color, e);
+            super::style::error(ui, e);
         }
         for (i, dev) in d.items.iter().enumerate() {
             let mut label = format!("{} ({})", dev.name, dev.kind);
@@ -987,7 +992,7 @@ fn devices_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
         if d.items.is_empty() && !d.loading && d.error.is_none() {
             ui.label(RichText::new("no devices: start Spotify on one").weak());
         }
-        if ui.small_button("refresh").clicked() {
+        if tool(ui, ROW_SIDE, Icon::Refresh, false, "Refresh") {
             refresh = true;
         }
     });
