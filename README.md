@@ -364,6 +364,7 @@ lyrics_animation = "smooth"  # smooth | instant (scrolling and size change of th
 remember_window = true   # reopen at the last size and place (applies from the next start)
 always_on_top = false
 decorations = true       # false = no title bar or border
+spotify_layout = false   # experimental: arrange the window like the Spotify app (library left, lyrics middle, song right, player bar at the bottom)
 ui_scale = 100           # 50-200 %: the size of everything (Ctrl and + / - / 0 change it too)
 theme_preset = "none"    # none | halloween | christmas | easter | midsummer: a named look, picked in the Appearance tab
 background_image = ""    # the picture of background = "image" (png, jpg…; "~/" is your home folder)
@@ -618,6 +619,10 @@ See [CHORDS.md](CHORDS.md). In short: your own sheets in `~/.local/share/music_d
 **Hangul in big mode.** A terminal can't pick a font, so the big Hangul is drawn from character-cell blocks (`▀ ▄ █`, which every terminal font has). A line with Hangul is tried on the fine 12×12 grid first at the chosen `big_scale`, then on the 8×8 grid at the same scale, then one scale smaller, and so on; the compact font can't draw Hangul, so a very narrow panel shows the line as bold text. The fine grid gives a final consonant four rows instead of three and tells more syllables apart (about 10 460 of the 11 172 blocks have a distinct shape, against about 10 050 on 8×8), but its syllables are wider (13 columns instead of 9), so fewer fit on one row and a long line wraps into more pieces. Quadrant and braille blocks were considered and left out: a quadrant cell doubles only the horizontal resolution (the cramped direction is vertical) and braille depends on the terminal font.
 
 **Member parts (experimental).** With `member_parts = true` / `--member-parts` the song is looked up on Genius (unauthenticated search, then the song page; the title and artist must match closely). Section headers such as `[Verse 1: Jimin]`, `[Chorus: Jungkook, V]` and `[Pre-Chorus: RM & SUGA]` give the members for the lines below them, and those lines are matched in order onto the synced lyrics. The active line and its neighbours get a dim `[Jimin]` tag, each member in a stable colour of the terminal palette. `member_position` chooses where the tag goes: `inline` (in front of the line, on its row), `above` or `below` the line (and its translation) or `auto` (the default: in front of the line in the terminal, under it in the window); in the window `inline` needs left-aligned lyrics and otherwise falls back to `above`, and the **Appearance** tab's `member_size` sets its size (a terminal has one text size). In the normal scrolling layout the default tag sits in front of the line; in the big-font layout it is one dim, centred row directly above the big active line (above the chord row when chords are shown, with a row kept free for it on every line of a song that has member data, so nothing jumps; `below` puts that row under the big line, `inline` counts as `above` there). On a narrow panel the tag shortens, `[Jimin, V, Jungkook]` → `[Jimin +2]` → `[Jim…]`, and is left out when there is no room. Lines that can't be matched (for example romanized vs. Hangul wording) are left untagged. Results are cached per track (misses for 7 days); failures are silent. This scrapes a website that has no public API, so it can stop working at any time.
+
+## Rendering the window
+
+`scripts/render.sh [out.png]` draws the window (`--gui`) the way the program does, with the default look and a made-up song, and writes it as a PNG (default `target/render/main.png`), without opening a window or a display. Handy to look at a change to the window before building and running it.
 
 ## Releasing
 

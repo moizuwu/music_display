@@ -9,10 +9,14 @@ which turns the `Unreleased` section into that version.
 
 ### Changed
 
+- Window: the library button sits on the left of the top row, next to the name; settings, keys, light / dark and windows are on the right in that order; tooltips show at once. Like, devices and play here are centred under the play buttons, the volume centred under them, and the title no longer carries a heart (the like button does that).
+- The window's volume is the same thin bar with a dot as the progress bar, the times beside the progress bar use the normal font, the top row's name lines up with its buttons, and tooltips show after 0.12 s instead of half a second.
+- `scripts/render.sh` renders the window to a PNG without a display (for looking at changes).
 - The window is consistent: every button of the top bar (windows, theme, keys, settings, library), the library (back, play, reload, search, open, queue, add to playlist, like), the chords and lyrics panels, the layout editor and the settings are drawn icons in the style of the transport row, each with a tooltip; errors, notes and titles share one style; the window and its extra windows are called "mdis".
 
 ### Added
 
+- `spotify_layout` in `[gui]` (experimental, checkbox in the Appearance tab): the window arranged like the Spotify app, with the library on the left, the lyrics in the middle, the song on the right and a player bar along the bottom.
 - The window's shuffle, repeat, mute, like, devices and play here buttons are drawn icons now, in the style of Spotify's (shuffle and repeat beside previous / play / next, dim when off, accent colour with a dot when on, "1" for repeat one); a double click on a library row plays it.
 - Standalone use without a terminal: `install.sh` and the Linux release build include the window (`--gui`) and add an "mdis" app-menu entry with the new logo (`--no-gui` for the old terminal-only build); the window and its pop-outs carry the logo as their icon.
 

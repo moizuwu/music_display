@@ -74,88 +74,139 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
     // repeat on their right; the volume and the Spotify buttons are on a row of their own below
     let (trio, rest) = split_trio(items);
     let (shuffle, repeat, others) = take_flanks(rest);
-    let n = trio.len() + shuffle.iter().len() + repeat.iter().len();
+    transport_row(ui, m, shuffle, &trio, repeat);
+    // like, devices and play here: centred under the play buttons, the same size and spacing
+    let n = super::library::transport_count(m);
     if n > 0 {
-        ui.horizontal(|ui| {
-            let n = n as f32;
-            let width = n * style::ICON_SIDE + (n - 1.0) * ui.spacing().item_spacing.x;
-            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            if let Some(Ctl::Shuffle(on)) = shuffle {
-                let tip = if on { "shuffle: on" } else { "shuffle: off" };
-                if style::toggle_button(ui, Icon::Shuffle, on).on_hover_text(tip).clicked() {
-                    m.toggle_shuffle();
-                }
-            }
-            for c in &trio {
-                match *c {
-                    Ctl::Prev => {
-                        if style::icon_button(ui, Icon::Prev).on_hover_text("previous").clicked() {
-                            m.prev();
-                        }
-                    }
-                    Ctl::Play(playing) => {
-                        let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
-                        if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
-                            m.play_pause();
-                        }
-                    }
-                    Ctl::Next => {
-                        if style::icon_button(ui, Icon::Next).on_hover_text("next").clicked() {
-                            m.next();
-                        }
-                    }
-                    Ctl::Shuffle(_) | Ctl::Repeat(_) | Ctl::Volume(_) => {}
-                }
-            }
-            if let Some(Ctl::Repeat(r)) = repeat {
-                let (icon, tip) = match r {
-                    Loop::None => (Icon::Repeat, "repeat: off"),
-                    Loop::Track => (Icon::RepeatOne, "repeat: this song"),
-                    Loop::Playlist => (Icon::Repeat, "repeat: all"),
-                };
-                if style::toggle_button(ui, icon, r != Loop::None).on_hover_text(tip).clicked() {
-                    m.cycle_repeat();
-                }
-            }
-        });
+        centered(ui, n, 0.0, |ui| super::library::transport_buttons(ui, m));
     }
-    let spotify = m.spot.on();
-    if others.is_empty() && !spotify {
+    // the volume, centred as well: the speaker (mute), the bar and the percentage
+    for c in others {
+        if let Ctl::Volume(v) = c {
+            centered(ui, 1, VOL_BAR + 44.0, |ui| volume(ui, m, v));
+        }
+    }
+}
+
+/// The Spotify layout's player bar, middle part: the buttons with the progress bar under them.
+pub fn bar_center(ui: &mut Ui, m: &mut Model) {
+    let Some((length, items)) = m.snap.as_ref().map(|s| (s.length, plan(&m.layout.buttons, s))) else { return };
+    let (trio, rest) = split_trio(items);
+    let (shuffle, repeat, _) = take_flanks(rest);
+    transport_row(ui, m, shuffle, &trio, repeat);
+    progress(ui, m, length);
+}
+
+/// The player bar, right part: devices, play here and the volume, against the right edge.
+pub fn bar_right(ui: &mut Ui, m: &mut Model) {
+    let vol = m.snap.as_ref().and_then(|s| plan(&m.layout.buttons, s).into_iter().find_map(|c| if let Ctl::Volume(v) = c { Some(v) } else { None }));
+    let connect = if m.spot.on() { 2 } else { 0 };
+    ui.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let vol_w = if vol.is_some() { style::ICON_SIDE + VOL_BAR + 44.0 + 2.0 * gap } else { 0.0 };
+        let width = connect as f32 * (style::ICON_SIDE + gap) + vol_w;
+        ui.add_space((ui.available_width() - width).max(0.0));
+        super::library::connect_buttons(ui, m);
+        if let Some(v) = vol {
+            volume(ui, m, v);
+        }
+    });
+}
+
+/// Shuffle, previous, play / pause, next and repeat, centred.
+fn transport_row(ui: &mut Ui, m: &mut Model, shuffle: Option<Ctl>, trio: &[Ctl], repeat: Option<Ctl>) {
+    let n = trio.len() + shuffle.iter().len() + repeat.iter().len();
+    if n == 0 {
         return;
     }
-    ui.horizontal_wrapped(|ui| {
-        for c in others {
-            if let Ctl::Volume(v) = c {
-                // mute button, the slider (the wheel over it steps by `volume_step`), and
-                // the percentage, which mutes when clicked
-                let muted = m.muted();
-                let waves = if muted || v <= 0.0 { 0 } else if v < 0.5 { 1 } else { 2 };
-                if style::toggle_button(ui, Icon::Volume(waves), muted).on_hover_text("mute / unmute (m)").clicked() {
-                    m.toggle_mute();
-                }
-                let mut pct = (v * 100.0) as f32;
-                ui.spacing_mut().slider_width = 90.0;
-                let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(false));
-                if r.changed() {
-                    m.drag_volume(pct as f64 / 100.0);
-                }
-                if r.drag_stopped() || r.lost_focus() {
-                    m.flush_volume(true);
-                }
-                if r.hovered() {
-                    let dy = ui.input(|i| i.smooth_scroll_delta.y);
-                    if dy != 0.0 {
-                        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                        m.volume_step(if dy > 0.0 { 1 } else { -1 });
-                    }
-                }
-                if ui.add(egui::Label::new(format!("{pct:.0}%")).sense(egui::Sense::click())).on_hover_text("click to mute / unmute").clicked() {
-                    m.toggle_mute();
-                }
+    ui.horizontal(|ui| {
+        let n = n as f32;
+        let width = n * style::ICON_SIDE + (n - 1.0) * ui.spacing().item_spacing.x;
+        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+        if let Some(Ctl::Shuffle(on)) = shuffle {
+            let tip = if on { "shuffle: on" } else { "shuffle: off" };
+            if style::toggle_button(ui, Icon::Shuffle, on).on_hover_text(tip).clicked() {
+                m.toggle_shuffle();
             }
         }
-        super::library::transport_buttons(ui, m);
+        for c in trio {
+            match *c {
+                Ctl::Prev => {
+                    if style::icon_button(ui, Icon::Prev).on_hover_text("previous").clicked() {
+                        m.prev();
+                    }
+                }
+                Ctl::Play(playing) => {
+                    let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
+                    if style::icon_button(ui, icon).on_hover_text(tip).clicked() {
+                        m.play_pause();
+                    }
+                }
+                Ctl::Next => {
+                    if style::icon_button(ui, Icon::Next).on_hover_text("next").clicked() {
+                        m.next();
+                    }
+                }
+                Ctl::Shuffle(_) | Ctl::Repeat(_) | Ctl::Volume(_) => {}
+            }
+        }
+        if let Some(Ctl::Repeat(r)) = repeat {
+            let (icon, tip) = match r {
+                Loop::None => (Icon::Repeat, "repeat: off"),
+                Loop::Track => (Icon::RepeatOne, "repeat: this song"),
+                Loop::Playlist => (Icon::Repeat, "repeat: all"),
+            };
+            if style::toggle_button(ui, icon, r != Loop::None).on_hover_text(tip).clicked() {
+                m.cycle_repeat();
+            }
+        }
     });
+}
+
+/// The width of the volume bar.
+const VOL_BAR: f32 = 120.0;
+
+/// A row in the middle of the column: `buttons` icon buttons plus `extra` points of other things.
+fn centered(ui: &mut Ui, buttons: usize, extra: f32, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let width = buttons as f32 * style::ICON_SIDE + extra + (buttons as f32 + if extra > 0.0 { 1.0 } else { 0.0 } - 1.0).max(0.0) * gap;
+        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+        add(ui);
+    });
+}
+
+/// The mute button, the bar (the wheel over it steps by `volume_step`) and the percentage,
+/// which mutes when clicked.
+fn volume(ui: &mut Ui, m: &mut Model, v: f64) {
+    let muted = m.muted();
+    let waves = if muted || v <= 0.0 { 0 } else if v < 0.5 { 1 } else { 2 };
+    if style::toggle_button(ui, Icon::Volume(waves), muted).on_hover_text("Mute / unmute (m)").clicked() {
+        m.toggle_mute();
+    }
+    let mut pct = (v * 100.0) as f32;
+    // the same thin bar with a dot as the progress bar above it
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(VOL_BAR, 18.0), Sense::click_and_drag());
+    if let Some(pt) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+        pct = (((pt.x - r.left()) / r.width()).clamp(0.0, 1.0) * 100.0).round();
+        m.drag_volume(pct as f64 / 100.0);
+    }
+    if resp.drag_stopped() || resp.clicked() {
+        m.flush_volume(true);
+    }
+    let hot = resp.hovered() || resp.dragged();
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let dy = ui.input(|i| i.smooth_scroll_delta.y);
+        if dy != 0.0 {
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            m.volume_step(if dy > 0.0 { 1 } else { -1 });
+        }
+    }
+    thin_bar(ui, r, pct / 100.0, hot);
+    if ui.add(egui::Label::new(egui::RichText::new(format!("{pct:.0}%")).weak()).sense(egui::Sense::click())).on_hover_text("Click to mute / unmute").clicked() {
+        m.toggle_mute();
+    }
 }
 
 /// The bar: the thumb follows the pointer while dragging and the seek is sent on release (one
@@ -163,7 +214,7 @@ pub fn controls(ui: &mut Ui, m: &mut Model) {
 fn progress(ui: &mut Ui, m: &mut Model, length: f64) {
     let pos = m.seek_preview.unwrap_or_else(|| m.position());
     ui.horizontal(|ui| {
-        ui.monospace(fmt_time(pos));
+        time_label(ui, pos);
         let w = (ui.available_width() - 48.0).max(40.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::click_and_drag());
         let hot = resp.hovered() || resp.dragged();
@@ -182,14 +233,26 @@ fn progress(ui: &mut Ui, m: &mut Model, length: f64) {
         }
         let shown = m.seek_preview.unwrap_or(pos);
         let frac = if length > 0.0 { (shown / length).clamp(0.0, 1.0) as f32 } else { 0.0 };
-        let mid = r.center().y;
-        let p = ui.painter();
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(if hot { 5.0 } else { 3.0 }, ui.visuals().widgets.inactive.bg_fill));
-        let x = r.left() + r.width() * frac;
-        p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(if hot { 5.0 } else { 3.0 }, accent(ui)));
-        p.circle_filled(egui::pos2(x, mid), if hot { 7.0 } else { 5.0 }, accent(ui));
-        ui.monospace(fmt_time(length));
+        thin_bar(ui, r, frac, hot);
+        time_label(ui, length);
     });
+}
+
+/// The progress and volume bars: a thin line, filled in the accent colour up to `frac`, with
+/// a dot; thicker under the pointer.
+fn thin_bar(ui: &Ui, r: egui::Rect, frac: f32, hot: bool) {
+    let mid = r.center().y;
+    let p = ui.painter();
+    let w = if hot { 5.0 } else { 3.0 };
+    p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(w, ui.visuals().widgets.inactive.bg_fill));
+    let x = r.left() + r.width() * frac.clamp(0.0, 1.0);
+    p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(w, accent(ui)));
+    p.circle_filled(egui::pos2(x, mid), if hot { 7.0 } else { 5.0 }, accent(ui));
+}
+
+/// A time next to the progress bar, in the text font (weak, like the other secondary text).
+fn time_label(ui: &mut Ui, t: f64) {
+    ui.label(egui::RichText::new(fmt_time(t)).weak());
 }
 
 #[cfg(test)]

@@ -310,6 +310,9 @@ fn style(g: &GuiConf, cover: Option<Rgb>, sys: Option<&Colors>, dark: bool) -> e
         (None, Accent::Fixed(c)) => Some(c),
         (None, Accent::Cover) => cover.map(|c| color::readable(c, Some(base(g, sys, dark)))),
     };
+    // tooltips show at once (egui waits half a second by default)
+    s.interaction.tooltip_delay = 0.0;
+    s.interaction.show_tooltips_only_when_still = false;
     let v = &mut s.visuals;
     v.panel_fill = Color32::TRANSPARENT;
     // the system's text colour, when it is there and stands out from the window colour
@@ -926,6 +929,7 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     }
     changed |= ui.checkbox(&mut g.decorations, "Window title bar and borders").changed();
     changed |= ui.checkbox(&mut g.always_on_top, "Keep the window on top").changed();
+    changed |= ui.checkbox(&mut g.spotify_layout, "Spotify layout (experimental): library left, lyrics middle, song right, player bar at the bottom").changed();
     changed |= ui.checkbox(&mut g.float_windows, "Open the extra windows floating (Hyprland, sway, niri)").changed();
     changed |= ui.checkbox(&mut g.remember_window, "Remember window size and position (next start)").changed();
 

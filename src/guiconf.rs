@@ -139,6 +139,9 @@ pub struct GuiConf {
     pub remember_window: bool,
     pub always_on_top: bool,
     pub decorations: bool,
+    /// Experimental: arrange the window like the Spotify app (library on the left, lyrics in the
+    /// middle, the song on the right, the player bar along the bottom).
+    pub spotify_layout: bool,
     /// Size of everything in the window, percent (the zoom keys change it too).
     pub ui_scale: u16,
     pub theme_preset: Preset,
@@ -188,6 +191,7 @@ impl Default for GuiConf {
             remember_window: true,
             always_on_top: false,
             decorations: true,
+            spotify_layout: false,
             ui_scale: 100,
             theme_preset: Preset::None,
             background_image: String::new(),
@@ -295,7 +299,7 @@ impl GuiConf {
 
 const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, font, lyrics_size, active_size, meta_size, \
 active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
+remember_window, always_on_top, decorations, spotify_layout, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
 
 impl GuiConf {
     /// Set the values the look is made of (everything else is left as the user has it, the
@@ -433,7 +437,7 @@ impl GuiConf {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
                     None => warn(format!("[gui] {k}: expected a list of panel names; ignored")),
                 },
-                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" => {
+                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" | "spotify_layout" => {
                     let Some(b) = v.as_bool() else {
                         warn(format!("[gui] {k}: expected true or false; using the default"));
                         continue;
@@ -444,6 +448,7 @@ impl GuiConf {
                         "always_on_top" => self.always_on_top = b,
                         "lock_layout" => self.lock_layout = b,
                         "float_windows" => self.float_windows = b,
+                        "spotify_layout" => self.spotify_layout = b,
                         _ => self.decorations = b,
                     }
                 }
@@ -526,6 +531,7 @@ impl GuiConf {
         put("remember_window", self.remember_window.into());
         put("always_on_top", self.always_on_top.into());
         put("decorations", self.decorations.into());
+        put("spotify_layout", self.spotify_layout.into());
         put("ui_scale", (self.ui_scale as i64).into());
         put("theme_preset", self.theme_preset.name().into());
         put("background_image", self.background_image.clone().into());
@@ -785,6 +791,7 @@ mod tests {
             lyrics_align: Align::Center,
             lyrics_animation: Animation::Instant,
             always_on_top: true,
+            spotify_layout: true,
             ui_scale: 150,
             theme_preset: Preset::Halloween,
             background_image: "/x/y.png".into(),

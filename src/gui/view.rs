@@ -33,10 +33,8 @@ pub fn metadata(ui: &mut Ui, m: &mut Model) {
         .visible()
         .filter_map(|f| {
             let v = match f {
-                MetaField::Title => match m.spot.liked {
-                    Some(on) if m.spot.on() => format!("{} {}", s.title, if on { "♥" } else { "♡" }),
-                    _ => s.title.clone(),
-                },
+                // (the like button is in the transport row, not after the title)
+                MetaField::Title => s.title.clone(),
                 MetaField::Artist => s.artist.clone(),
                 MetaField::AlbumArtist => Some(s.album_artist.clone()).filter(|a| !a.is_empty())?,
                 MetaField::Album => s.album.clone(),

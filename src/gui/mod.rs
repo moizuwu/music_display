@@ -16,11 +16,14 @@ mod popout;
 mod privacy;
 mod settings;
 mod sizewatch;
+mod spotify_view;
 mod style;
 mod ux;
 mod translation;
 mod view;
 mod window;
+#[cfg(test)]
+mod render;
 
 use anyhow::Result;
 use model::Model;
@@ -340,21 +343,13 @@ impl eframe::App for Gui {
             backdrop::figure(&ui.ctx().layer_painter(layer), ui.ctx().content_rect(), g.opacity as f32 / 100.0);
         }
         egui::Panel::top("top").frame(style::gutter(&g)).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.strong("mdis");
+                // the library on the left, next to the name (Spotify's place for it)
+                library::library_button(ui, &mut self.m);
+                // right to left: settings, keys, theme, windows read left to right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let side = style::ICON_SIDE;
-                    library::library_button(ui, &mut self.m);
-                    if style::tool(ui, side, style::Icon::Gear, self.m.ux.s.open, "Settings (s)") {
-                        self.m.ux.s.open = !self.m.ux.s.open;
-                    }
-                    if style::tool(ui, side, style::Icon::Help, self.m.ux.help, "Keys (?)") {
-                        self.m.ux.help = !self.m.ux.help;
-                    }
-                    let (icon, tip) = if self.m.ux.dark_now { (style::Icon::Sun, "Light theme (v)") } else { (style::Icon::Moon, "Dark theme (v)") };
-                    if style::tool(ui, side, icon, false, tip) {
-                        self.m.toggle_theme();
-                    }
                     let r = style::tool_response(ui, side, style::Icon::Windows, false, "Show a panel in a window of its own");
                     egui::Popup::menu(&r).show(|ui| {
                         ui.label(egui::RichText::new("Show in a window of its own").small().weak());
@@ -365,6 +360,16 @@ impl eframe::App for Gui {
                             }
                         }
                     });
+                    let (icon, tip) = if self.m.ux.dark_now { (style::Icon::Sun, "Light theme (v)") } else { (style::Icon::Moon, "Dark theme (v)") };
+                    if style::tool(ui, side, icon, false, tip) {
+                        self.m.toggle_theme();
+                    }
+                    if style::tool(ui, side, style::Icon::Help, self.m.ux.help, "Keys (?)") {
+                        self.m.ux.help = !self.m.ux.help;
+                    }
+                    if style::tool(ui, side, style::Icon::Gear, self.m.ux.s.open, "Settings (s)") {
+                        self.m.ux.s.open = !self.m.ux.s.open;
+                    }
                 });
             });
         });
@@ -373,6 +378,12 @@ impl eframe::App for Gui {
         self.handle_keys(ui.ctx());
         if self.m.x.minimal {
             egui::CentralPanel::default().show(ui, |ui| extras::teleprompter(ui, &mut self.m));
+            self.popups(ui.ctx());
+            return;
+        }
+        // experimental: arranged like the Spotify app
+        if g.spotify_layout {
+            self.spotify_view(ui, &g);
             self.popups(ui.ctx());
             return;
         }

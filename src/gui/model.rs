@@ -193,7 +193,7 @@ impl Model {
         }
     }
 
-    fn set_position(&mut self, p: f64) {
+    pub(super) fn set_position(&mut self, p: f64) {
         self.anchor = (Instant::now(), p);
     }
 

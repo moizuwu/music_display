@@ -712,9 +712,23 @@ fn mmss(secs: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// The like / devices / play here buttons for the end of the transport row: drawn icons like
-/// the other transport buttons (a heart, Spotify's Connect speaker, a screen with a play sign).
+/// How many of the like / devices / play here buttons show (0 with Spotify off).
+pub fn transport_count(m: &Model) -> usize {
+    if !m.spot.on() {
+        return 0;
+    }
+    2 + usize::from(m.playing_uri().is_some())
+}
+
+/// The like / devices / play here buttons, drawn icons like the other transport buttons (a
+/// heart, Spotify's Connect speaker, a screen with a play sign).
 pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
+    heart_button(ui, m);
+    connect_buttons(ui, m);
+}
+
+/// Like / unlike the song that is playing (only for a Spotify song).
+pub fn heart_button(ui: &mut Ui, m: &mut Model) {
     use super::style::{Icon, toggle_button};
     if !m.spot.on() {
         return;
@@ -722,15 +736,24 @@ pub fn transport_buttons(ui: &mut Ui, m: &mut Model) {
     let uri = m.playing_uri();
     if uri.is_some() {
         let on = m.spot.liked == Some(true);
-        let tip = if on { "remove from Liked Songs" } else { "add to Liked Songs" };
+        let tip = if on { "Remove from Liked Songs" } else { "Add to Liked Songs" };
         if toggle_button(ui, Icon::Heart(on), on).on_hover_text(tip).clicked() {
             m.spot.toggle_like(uri);
         }
     }
-    if toggle_button(ui, Icon::Devices, false).on_hover_text("devices: move playback to another Spotify Connect device").clicked() {
+    m.take_spot_note();
+}
+
+/// Spotify Connect: the device list and "play here".
+pub fn connect_buttons(ui: &mut Ui, m: &mut Model) {
+    use super::style::{Icon, toggle_button};
+    if !m.spot.on() {
+        return;
+    }
+    if toggle_button(ui, Icon::Devices, false).on_hover_text("Devices: move playback to another Spotify Connect device").clicked() {
         m.spot.open_devices();
     }
-    if toggle_button(ui, Icon::PlayHere, false).on_hover_text("play here: move playback to this computer").clicked() {
+    if toggle_button(ui, Icon::PlayHere, false).on_hover_text("Play here: move playback to this computer").clicked() {
         m.spot.cmd(Cmd::Transfer);
     }
     m.take_spot_note();
@@ -809,133 +832,151 @@ pub fn windows(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look
 }
 
 fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::Look) {
-    use super::style::{Icon, ROW_SIDE, tool};
     let mut open = true;
+    let g = m.gui.clone();
+    super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| library_body(ui, m));
+    if !open {
+        m.spot.open = false;
+    }
+}
+
+/// What the library shows (tabs, the page, its rows), in the library window or, with the
+/// Spotify layout, in the left column.
+pub fn library_body(ui: &mut Ui, m: &mut Model) {
+    use super::style::{Icon, ROW_SIDE, tool};
     let mut acts: Vec<Act> = Vec::new();
     let moved = std::mem::take(&mut m.spot.nav_moved);
     // the song that is playing is in Liked Songs: its row shows a filled heart
     let liked_row = (m.spot.liked == Some(true)).then(|| m.spot.liked_uri.clone());
-    let g = m.gui.clone();
     let s = &mut m.spot;
-    super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| {
-        if let Some(e) = s.limited().or_else(|| s.status.clone()) {
-            ui.label(RichText::new(e).weak());
+
+    if let Some(e) = s.limited().or_else(|| s.status.clone()) {
+        ui.label(RichText::new(e).weak());
+    }
+    ui.horizontal_wrapped(|ui| {
+        for i in s.lib.visible_tabs() {
+            if ui.selectable_label(s.lib.tab == i && s.lib.picker.is_none(), TABS[i]).clicked() {
+                acts.push(Act::Tab(i));
+            }
         }
-        ui.horizontal_wrapped(|ui| {
-            for i in s.lib.visible_tabs() {
-                if ui.selectable_label(s.lib.tab == i && s.lib.picker.is_none(), TABS[i]).clicked() {
-                    acts.push(Act::Tab(i));
-                }
+    });
+    ui.separator();
+    let picking = s.lib.picker.is_some();
+    ui.horizontal(|ui| {
+        if picking {
+            if tool(ui, ROW_SIDE, Icon::Close, false, "Cancel") {
+                acts.push(Act::CancelPick);
             }
-        });
-        ui.separator();
-        let picking = s.lib.picker.is_some();
-        ui.horizontal(|ui| {
-            if picking {
-                if tool(ui, ROW_SIDE, Icon::Close, false, "Cancel") {
-                    acts.push(Act::CancelPick);
-                }
-            } else if !s.lib.stack.is_empty() && tool(ui, ROW_SIDE, Icon::Back, false, "Back") {
-                acts.push(Act::Back);
-            }
-            let l = s.lib.level();
-            if !picking && !l.uri.is_empty() && tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play all of it from the start") {
-                acts.push(Act::PlayAll);
-            }
-            super::style::heading(ui, &l.title);
-            if !l.summary.is_empty() {
-                ui.label(RichText::new(&l.summary).weak());
-            }
-            if tool(ui, ROW_SIDE, Icon::Refresh, false, "Reload") {
-                acts.push(Act::Reload);
-            }
-        });
-        if s.lib.tab == TAB_SEARCH && s.lib.stack.is_empty() && !picking {
-            ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut s.lib.input.text).hint_text("songs, albums, artists, playlists").desired_width(280.0));
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (tool(ui, ROW_SIDE, Icon::Search, false, "Search") || enter) && !s.lib.input.text.trim().is_empty() {
-                    acts.push(Act::Search);
-                }
-            });
+        } else if !s.lib.stack.is_empty() && tool(ui, ROW_SIDE, Icon::Back, false, "Back") {
+            acts.push(Act::Back);
         }
         let l = s.lib.level();
-        if l.loading {
-            super::style::note(ui, "Loading…");
+        if !picking && !l.uri.is_empty() && tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play all of it from the start") {
+            acts.push(Act::PlayAll);
         }
-        if let Some(e) = &l.error {
-            super::style::error(ui, e);
+        super::style::heading(ui, &l.title);
+        if !l.summary.is_empty() {
+            ui.label(RichText::new(&l.summary).weak());
         }
-        if let Some(n) = &s.lib.note {
-            super::style::note(ui, n);
+        if tool(ui, ROW_SIDE, Icon::Refresh, false, "Reload") {
+            acts.push(Act::Reload);
         }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for row in l.rows() {
-                match row {
-                    ListRow::Head(h) => {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(h).strong());
-                    }
-                    ListRow::Item(i) => {
-                        let it = &l.items[i];
-                        let bg = ui.painter().add(egui::Shape::Noop);
-                        let acts_before = acts.len();
-                        let row = ui.horizontal(|ui| {
-                            if picking {
-                                if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to this playlist") {
-                                    acts.push(Act::Pick(i));
+    });
+    if s.lib.tab == TAB_SEARCH && s.lib.stack.is_empty() && !picking {
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut s.lib.input.text).hint_text("songs, albums, artists, playlists").desired_width(280.0));
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (tool(ui, ROW_SIDE, Icon::Search, false, "Search") || enter) && !s.lib.input.text.trim().is_empty() {
+                acts.push(Act::Search);
+            }
+        });
+    }
+    let l = s.lib.level();
+    if l.loading {
+        super::style::note(ui, "Loading…");
+    }
+    if let Some(e) = &l.error {
+        super::style::error(ui, e);
+    }
+    if let Some(n) = &s.lib.note {
+        super::style::note(ui, n);
+    }
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for row in l.rows() {
+            match row {
+                ListRow::Head(h) => {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(h).strong());
+                }
+                ListRow::Item(i) => {
+                    let it = &l.items[i];
+                    let bg = ui.painter().add(egui::Shape::Noop);
+                    let acts_before = acts.len();
+                    let row = ui.horizontal(|ui| {
+                        if picking {
+                            if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to this playlist") {
+                                acts.push(Act::Pick(i));
+                            }
+                        } else {
+                            if tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play") {
+                                acts.push(Act::Play(i));
+                            }
+                            if it.openable && tool(ui, ROW_SIDE, Icon::Open, false, "Open") {
+                                acts.push(Act::Open(i));
+                            }
+                            if it.kind == "track" {
+                                if tool(ui, ROW_SIDE, Icon::Queue, false, "Add to the queue") {
+                                    acts.push(Act::Queue(i));
                                 }
-                            } else {
-                                if tool(ui, ROW_SIDE, Icon::PlayRow, false, "Play") {
-                                    acts.push(Act::Play(i));
+                                if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to a playlist") {
+                                    acts.push(Act::AddTo(i));
                                 }
-                                if it.openable && tool(ui, ROW_SIDE, Icon::Open, false, "Open") {
-                                    acts.push(Act::Open(i));
-                                }
-                                if it.kind == "track" {
-                                    if tool(ui, ROW_SIDE, Icon::Queue, false, "Add to the queue") {
-                                        acts.push(Act::Queue(i));
-                                    }
-                                    if tool(ui, ROW_SIDE, Icon::AddList, false, "Add to a playlist") {
-                                        acts.push(Act::AddTo(i));
-                                    }
-                                    let liked = liked_row.as_deref() == Some(it.uri.as_str());
-                                    if tool(ui, ROW_SIDE, Icon::Heart(liked), liked, "Add to Liked Songs") {
-                                        acts.push(Act::Like(i));
-                                    }
+                                let liked = liked_row.as_deref() == Some(it.uri.as_str());
+                                if tool(ui, ROW_SIDE, Icon::Heart(liked), liked, "Add to Liked Songs") {
+                                    acts.push(Act::Like(i));
                                 }
                             }
-                            ui.label(&it.name);
-                            if !it.sub.is_empty() {
-                                ui.label(RichText::new(&it.sub).weak());
-                            }
-                            if it.duration > 0.0 {
-                                ui.label(RichText::new(mmss(it.duration)).weak().monospace());
-                            }
-                        });
-                        // a double click on the row (not on one of its buttons) plays it
-                        if !picking
-                            && acts.len() == acts_before
-                            && row.response.hovered()
-                            && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-                        {
-                            acts.push(Act::Play(i));
                         }
-                        // the keyboard's row
-                        if i == l.sel {
-                            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);
-                            ui.painter().set(bg, egui::Shape::rect_filled(row.response.rect.expand(1.0), 3.0, fill));
-                            if moved {
-                                row.response.scroll_to_me(None);
-                            }
+                        // long names are cut with "…" instead of widening the list: the name gets
+                        // 60 % of what is left, the artist the rest, the length its own room
+                        let room = (ui.available_width() - if it.duration > 0.0 { 44.0 } else { 0.0 }).max(40.0);
+                        let name_w = if it.sub.is_empty() { room } else { room * 0.6 };
+                        ui.scope(|ui| {
+                            ui.set_max_width(name_w);
+                            ui.add(egui::Label::new(it.name.as_str()).truncate());
+                        });
+                        if !it.sub.is_empty() {
+                            ui.scope(|ui| {
+                                ui.set_max_width(room - name_w);
+                                ui.add(egui::Label::new(RichText::new(&it.sub).weak()).truncate());
+                            });
+                        }
+                        if it.duration > 0.0 {
+                            ui.label(RichText::new(mmss(it.duration)).weak());
+                        }
+                    });
+                    // a double click on the row (not on one of its buttons) plays it
+                    if !picking
+                        && acts.len() == acts_before
+                        && row.response.hovered()
+                        && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+                    {
+                        acts.push(Act::Play(i));
+                    }
+                    // the keyboard's row
+                    if i == l.sel {
+                        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);
+                        ui.painter().set(bg, egui::Shape::rect_filled(row.response.rect.expand(1.0), 3.0, fill));
+                        if moved {
+                            row.response.scroll_to_me(None);
                         }
                     }
                 }
             }
-            if l.loaded && l.items.is_empty() && l.error.is_none() {
-                ui.label(RichText::new("nothing here").weak());
-            }
-        });
+        }
+        if l.loaded && l.items.is_empty() && l.error.is_none() {
+            ui.label(RichText::new("nothing here").weak());
+        }
     });
     for a in acts {
         match a {
@@ -958,9 +999,6 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
             Act::Pick(i) => m.spot.add_to(i),
             Act::CancelPick => m.spot.lib.picker = None,
         }
-    }
-    if !open {
-        m.spot.open = false;
     }
 }
 
