@@ -520,21 +520,50 @@ fn p_hover(ui: &Ui, r: Rect, side: f32, down: bool) {
     ui.painter().circle_filled(r.center(), side / 2.0, with_alpha(ui.visuals().widgets.hovered.fg_stroke.color, if down { 0.22 } else { 0.12 }));
 }
 
-/// The icons are drawn in a box of 4 units (`u`) either side of the centre `c`.
+/// The icons are drawn on a 16 × 16 grid like Spotify's own (thin 1.5 strokes, small arrow heads,
+/// round joins), centred on `c`; `u` is a fifth of the button, so the grid unit is `u / 6`.
 fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
-    let at = |x: f32, y: f32| Pos2::new(c.x + x * u, c.y + y * u);
-    let line = Stroke::new((u * 0.3).max(1.4), ink);
+    let k = u / 6.0 * 1.1;
+    let at = |x: f32, y: f32| Pos2::new(c.x + (x - 8.0) * k, c.y + (y - 8.0) * k);
+    let w = 1.5 * k;
+    // a smooth line with round ends
+    let stroke = |pts: &[Pos2]| {
+        p.add(egui::Shape::line(pts.to_vec(), Stroke::new(w, ink)));
+        for q in [pts.first(), pts.last()].into_iter().flatten() {
+            p.circle_filled(*q, w / 2.0, ink);
+        }
+    };
+    // a closed outline; `sharp` are the points where it turns sharply (rounded off by a dot)
+    let closed = |pts: &[Pos2], sharp: &[Pos2]| {
+        p.add(egui::Shape::closed_line(pts.to_vec(), Stroke::new(w, ink)));
+        for q in sharp {
+            p.circle_filled(*q, w / 2.0, ink);
+        }
+    };
+    let bez = |a: (f32, f32), b: (f32, f32), c2: (f32, f32), d: (f32, f32), t0: f32, t1: f32| -> Vec<Pos2> {
+        (0..=14)
+            .map(|i| {
+                let t = t0 + (t1 - t0) * i as f32 / 14.0;
+                let m = 1.0 - t;
+                let f = |a: f32, b: f32, c: f32, d: f32| m * m * m * a + 3.0 * m * m * t * b + 3.0 * m * t * t * c + t * t * t * d;
+                at(f(a.0, b.0, c2.0, d.0), f(a.1, b.1, c2.1, d.1))
+            })
+            .collect()
+    };
+    let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32| -> Vec<Pos2> {
+        (0..=10)
+            .map(|i| {
+                let a = (a0 + (a1 - a0) * i as f32 / 10.0).to_radians();
+                at(cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect()
+    };
+    // a small solid arrow head, tip at (x, y), pointing right (dir = 1) or left (dir = -1)
+    let head = |x: f32, y: f32, dir: f32| {
+        p.add(egui::Shape::convex_polygon(vec![at(x - dir * 3.2, y - 2.1), at(x - dir * 3.2, y + 2.1), at(x, y)], ink, Stroke::NONE));
+    };
     let tri = |x: f32, dir: f32| vec![Pos2::new(x - dir * u * 0.8, c.y - u), Pos2::new(x - dir * u * 0.8, c.y + u), Pos2::new(x + dir * u * 0.9, c.y)];
     let bar = |x: f32| Rect::from_center_size(Pos2::new(x, c.y), Vec2::new(u * 0.32, u * 2.0));
-    // a small arrow head with its tip at (x, y), pointing right (dir = 1) or left (dir = -1)
-    let head = |x: f32, y: f32, dir: f32| {
-        p.add(egui::Shape::convex_polygon(vec![at(x, y - 0.8), at(x, y + 0.8), at(x + dir * 1.1, y)], ink, Stroke::NONE));
-    };
-    // a line through points, with round joints
-    let path = |pts: &[(f32, f32)]| {
-        let v: Vec<Pos2> = pts.iter().map(|(x, y)| at(*x, *y)).collect();
-        p.add(egui::Shape::line(v, line));
-    };
     match icon {
         Icon::Play => {
             p.add(egui::Shape::convex_polygon(tri(c.x + u * 0.15, 1.0), ink, Stroke::NONE));
@@ -553,76 +582,92 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
             p.add(egui::Shape::convex_polygon(tri(c.x - u * 0.1, 1.0), ink, Stroke::NONE));
         }
         Icon::Shuffle => {
-            // two arrows that cross
-            for (y0, y1) in [(-1.1, 1.1), (1.1, -1.1)] {
-                let pts: Vec<Pos2> = (0..=16)
-                    .map(|i| {
-                        let t = i as f32 / 16.0;
-                        let k = t * t * (3.0 - 2.0 * t); // smoothstep: flat ends, a slope in the middle
-                        at(-2.3 + t * 3.6, y0 + (y1 - y0) * k)
-                    })
-                    .collect();
-                p.add(egui::Shape::line(pts, line));
-                head(1.3, y1, 1.0);
-            }
+            // two arrows that cross; the one coming from below has a gap where it passes under
+            stroke(&bez((1.0, 4.25), (6.5, 4.25), (6.5, 11.75), (12.0, 11.75), 0.0, 1.0));
+            head(15.0, 11.75, 1.0);
+            stroke(&bez((1.0, 11.75), (6.5, 11.75), (6.5, 4.25), (12.0, 4.25), 0.0, 0.40));
+            stroke(&bez((1.0, 11.75), (6.5, 11.75), (6.5, 4.25), (12.0, 4.25), 0.60, 1.0));
+            head(15.0, 4.25, 1.0);
         }
         Icon::Repeat | Icon::RepeatOne => {
-            // a loop of two arrows: right along the top, left along the bottom
-            path(&[(-2.2, 0.5), (-2.2, -0.5), (-1.7, -1.1), (1.2, -1.1)]);
-            head(1.2, -1.1, 1.0);
-            path(&[(2.2, -0.5), (2.2, 0.5), (1.7, 1.1), (-1.2, 1.1)]);
-            head(-1.2, 1.1, -1.0);
+            // a loop: along the top to the right, along the bottom to the left
+            let mut top = vec![at(1.75, 8.5), at(1.75, 5.5)];
+            top.extend(arc(3.75, 5.5, 2.0, 180.0, 270.0));
+            top.push(at(11.5, 3.5));
+            stroke(&top);
+            head(15.0, 3.5, 1.0);
+            let mut bottom = vec![at(14.25, 7.5), at(14.25, 10.5)];
+            bottom.extend(arc(12.25, 10.5, 2.0, 0.0, 90.0));
+            bottom.push(at(4.5, 12.5));
+            stroke(&bottom);
+            head(1.0, 12.5, -1.0);
             if icon == Icon::RepeatOne {
-                p.text(at(0.0, 0.05), egui::Align2::CENTER_CENTER, "1", FontId::proportional(u * 2.1), ink);
+                p.add(egui::Shape::line(vec![at(6.9, 7.2), at(8.2, 6.2), at(8.2, 9.8)], Stroke::new(w * 0.85, ink)));
             }
         }
         Icon::Volume(waves) => {
-            // the speaker: a box and a cone
-            p.rect_filled(Rect::from_min_max(at(-2.3, -0.7), at(-1.2, 0.7)), 1.0, ink);
-            p.add(egui::Shape::convex_polygon(vec![at(-1.3, -0.7), at(0.0, -1.7), at(0.0, 1.7), at(-1.3, 0.7)], ink, Stroke::NONE));
+            // the speaker, then its waves (or a cross when muted)
+            p.add(egui::Shape::convex_polygon(vec![at(1.5, 5.75), at(4.4, 5.75), at(8.4, 2.4), at(8.4, 13.6), at(4.4, 10.25), at(1.5, 10.25)], ink, Stroke::NONE));
             if waves == 0 {
-                path(&[(0.9, -0.9), (2.3, 0.9)]);
-                path(&[(0.9, 0.9), (2.3, -0.9)]);
+                stroke(&[at(10.6, 5.6), at(14.6, 10.4)]);
+                stroke(&[at(14.6, 5.6), at(10.6, 10.4)]);
             } else {
-                for (n, r) in [(1u8, 1.1f32), (2, 2.0)] {
-                    if waves >= n {
-                        let arc: Vec<Pos2> = (0..=8)
-                            .map(|i| {
-                                let a = (-0.75 + 1.5 * i as f32 / 8.0) * std::f32::consts::FRAC_PI_2;
-                                at(0.5 + r * a.cos(), r * a.sin())
-                            })
-                            .collect();
-                        p.add(egui::Shape::line(arc, line));
-                    }
+                stroke(&arc(8.4, 8.0, 3.4, -48.0, 48.0));
+                if waves >= 2 {
+                    stroke(&arc(8.4, 8.0, 6.0, -48.0, 48.0));
                 }
             }
         }
         Icon::Heart(full) => {
-            let pts: Vec<Pos2> = (0..40)
-                .map(|i| {
-                    let t = i as f32 / 40.0 * std::f32::consts::TAU;
-                    let x = 16.0 * t.sin().powi(3);
-                    let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
-                    at(x * 0.15, -y * 0.15 + 0.2)
-                })
-                .collect();
+            let mut pts = bez((8.0, 13.9), (8.0, 13.9), (1.4, 10.2), (1.4, 5.1), 0.0, 1.0);
+            pts.extend(bez((1.4, 5.1), (1.4, 3.0), (3.1, 1.6), (4.9, 1.6), 0.0, 1.0));
+            pts.extend(bez((4.9, 1.6), (6.3, 1.6), (7.4, 2.4), (8.0, 3.7), 0.0, 1.0));
+            pts.extend(bez((8.0, 3.7), (8.6, 2.4), (9.7, 1.6), (11.1, 1.6), 0.0, 1.0));
+            pts.extend(bez((11.1, 1.6), (12.9, 1.6), (14.6, 3.0), (14.6, 5.1), 0.0, 1.0));
+            pts.extend(bez((14.6, 5.1), (14.6, 10.2), (8.0, 13.9), (8.0, 13.9), 0.0, 1.0));
             if full {
-                p.add(egui::Shape::convex_polygon(pts, ink, Stroke::NONE));
-            } else {
-                p.add(egui::Shape::closed_line(pts, line));
+                // star-shaped around the middle: a fan of triangles
+                let mut mesh = egui::Mesh::default();
+                let mid = mesh.vertices.len() as u32;
+                mesh.colored_vertex(at(8.0, 7.0), ink);
+                for q in &pts {
+                    mesh.colored_vertex(*q, ink);
+                }
+                for i in 0..pts.len() as u32 {
+                    mesh.add_triangle(mid, mid + 1 + i, mid + 1 + (i + 1) % pts.len() as u32);
+                }
+                p.add(egui::Shape::mesh(mesh));
             }
+            closed(&pts, &[at(8.0, 3.7)]);
         }
         Icon::Devices => {
-            // the Connect speaker: a box with a big and a small speaker
-            p.rect_stroke(Rect::from_min_max(at(-1.6, -2.4), at(1.6, 2.4)), 2.0, line, egui::StrokeKind::Middle);
-            p.circle_stroke(at(0.0, 0.9), u * 0.85, line);
-            p.circle_filled(at(0.0, -1.2), u * 0.35, ink);
+            // Spotify Connect: a screen, open at the corner where a small speaker sits
+            let mut screen = vec![at(8.0, 11.0), at(3.0, 11.0)];
+            screen.extend(arc(3.0, 9.5, 1.5, 90.0, 180.0));
+            screen.push(at(1.5, 4.0));
+            screen.extend(arc(3.0, 4.0, 1.5, 180.0, 270.0));
+            screen.push(at(13.0, 2.5));
+            screen.extend(arc(13.0, 4.0, 1.5, 270.0, 360.0));
+            screen.push(at(14.5, 6.0));
+            stroke(&screen);
+            let mut spk = Vec::new();
+            for (cx, cy, a0) in [(10.9, 9.7, 180.0), (12.9, 9.7, 270.0), (12.9, 12.7, 0.0), (10.9, 12.7, 90.0)] {
+                spk.extend(arc(cx, cy, 1.0, a0, a0 + 90.0));
+            }
+            closed(&spk, &[]);
+            p.circle_stroke(at(11.9, 11.9), 1.2 * k, Stroke::new(w * 0.8, ink));
+            p.circle_filled(at(11.9, 9.5), 0.5 * k, ink);
         }
         Icon::PlayHere => {
-            // a screen with a play triangle on it, and its stand
-            p.rect_stroke(Rect::from_min_max(at(-2.5, -1.9), at(2.5, 1.0)), 2.0, line, egui::StrokeKind::Middle);
-            path(&[(-1.2, 2.1), (1.2, 2.1)]);
-            p.add(egui::Shape::convex_polygon(vec![at(-0.7, -0.9), at(-0.7, 0.1), at(0.9, -0.4)], ink, Stroke::NONE));
+            // a computer with a play sign on its screen
+            let mut screen = arc(3.0, 4.0, 1.5, 180.0, 270.0);
+            screen.extend(arc(13.0, 4.0, 1.5, 270.0, 360.0));
+            screen.extend(arc(13.0, 9.5, 1.5, 0.0, 90.0));
+            screen.extend(arc(3.0, 9.5, 1.5, 90.0, 180.0));
+            closed(&screen, &[]);
+            stroke(&[at(8.0, 11.0), at(8.0, 13.5)]);
+            stroke(&[at(4.8, 13.6), at(11.2, 13.6)]);
+            p.add(egui::Shape::convex_polygon(vec![at(6.5, 4.7), at(6.5, 8.9), at(10.2, 6.8)], ink, Stroke::NONE));
         }
     }
 }
