@@ -15,6 +15,7 @@ pub mod player;
 #[cfg(any(windows, test))]
 pub mod smtc;
 pub mod spotify;
+pub mod soloist;
 pub mod spotifyd;
 pub mod lyrics;
 pub mod lyricsrc;

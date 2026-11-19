@@ -453,7 +453,7 @@ fn ultimate_guitar_provider_with_fake_site() {
     let page = |content: &str| ug_page(&serde_json::json!({"store":{"page":{"data":{"tab_view":{"wiki_tab":{"content":content},"meta":{"capo":3}}}}}}));
 
     let store = ug::extract_store(&ug_page(&search)).unwrap();
-    let c = ug::candidates(&store, "Simon & Garfunkel", "The Sound of Silence - Remastered");
+    let c = ug::candidates(&store, "Simon & Garfunkel", "The Sound of Silence - Remastered", true);
     assert_eq!(c.len(), 2, "tabs and other artists are filtered: {c:?}");
     assert!(c[0].url.ends_with("chords-4"), "best rated × votes first");
 
@@ -470,7 +470,6 @@ fn ultimate_guitar_provider_with_fake_site() {
     let _ = title;
     let title = "The Sound of Silence";
     let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{artist}\0{title}")))));
-    ug::reset_breaker();
     let out = rt.block_on(ug::lookup(&client, &base, artist, title));
     let ug::Outcome::Found(sheet) = out else { panic!("expected a sheet") };
     assert_eq!(sheet.chord_count(), 8);
@@ -484,32 +483,27 @@ fn ultimate_guitar_provider_with_fake_site() {
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
     let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{artist}\0{title}")))));
 
-    // blocked (403) three times in a row → provider switches itself off, no more requests
+    // blocked (403): an error for that song, and the provider is never switched off: every
+    // song asks again
     let (base2, hits2) = fake_site(vec![("search.php", 403, "no".into())]);
-    ug::reset_breaker();
-    for i in 0..3 {
+    for i in 0..4 {
         let t = format!("Blocked Song {i}");
         let o = rt.block_on(ug::lookup(&client, &base2, "Nobody", &t));
         assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("403")));
     }
-    let o = rt.block_on(ug::lookup(&client, &base2, "Nobody", "Blocked Song 9"));
-    assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("switched off")));
-    assert_eq!(hits2.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(hits2.load(std::sync::atomic::Ordering::SeqCst), 4, "one request per song, no switch-off");
 
     // page without js-store (captcha / redesign) is an error, never a cached "not found"
     let (base3, _) = fake_site(vec![("search.php", 200, "<html>captcha</html>".into())]);
-    ug::reset_breaker();
     let o = rt.block_on(ug::lookup(&client, &base3, "Nobody", "Format Change"));
     assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("not recognised")));
 
     // no matching chord page → NotFound (and cached as such)
     let empty = ug_page(&serde_json::json!({"store":{"page":{"data":{"results":[]}}}}));
     let (base4, _) = fake_site(vec![("search.php", 200, empty.clone())]);
-    ug::reset_breaker();
     let o = rt.block_on(ug::lookup(&client, &base4, "Nobody", "Truly Unknown Song"));
     assert!(matches!(o, ug::Outcome::NotFound));
     let _ = std::fs::remove_file(util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a("Nobody\0Truly Unknown Song"))));
-    ug::reset_breaker();
 
     // not found under "artist title": the title alone is searched too
     let cache = |a: &str, t: &str| util::cache_dir().join(format!("chords-ug-{:016x}.json", util::fnv1a(&format!("{a}\0{t}"))));
@@ -531,27 +525,28 @@ fn ultimate_guitar_provider_with_fake_site() {
         ("chords-3", 200, page(tab)),
         ("search.php", 200, ug_page(&search)),
     ]);
-    ug::reset_breaker();
     let o = rt.block_on(ug::lookup(&client, &b6, artist, title));
     assert!(matches!(o, ug::Outcome::Found(_)), "second page used after the first failed");
     let _ = std::fs::remove_file(cache(artist, title));
 
     // every page failing is an error and is not remembered as "not found"
     let (b7, _) = fake_site(vec![("chords-", 500, String::new()), ("search.php", 200, ug_page(&search))]);
-    ug::reset_breaker();
     let o = rt.block_on(ug::lookup(&client, &b7, artist, title));
     assert!(matches!(o, ug::Outcome::Error(ref e) if e.contains("500")));
     assert!(!cache(artist, title).exists(), "nothing cached after errors");
 
-    // the provider rests after three blocks in a row, then tries again
-    ug::reset_breaker();
-    for i in 0..3 {
-        let _ = rt.block_on(ug::lookup(&client, &base2, "Nobody", &format!("Blocked Again {i}")));
-    }
-    assert!(ug::disabled());
-    ug::set_last_fail(util::now_secs() - 601);
-    assert!(!ug::disabled(), "ten minutes later it is on again");
-    ug::reset_breaker();
+    // a soundtrack: the player names the cast, UG files the song under someone else. Nothing
+    // by the artist, so the title search takes the close title match
+    let (artist, title) = ("Erika Henningsen, Stephanie Beatriz", "The Sound of Silence");
+    let (b8, _) = fake_site(vec![
+        ("value=Erika", 200, empty.clone()),
+        ("chords-4", 200, page(tab)),
+        ("search.php", 200, ug_page(&search)),
+    ]);
+    let _ = std::fs::remove_file(cache(artist, title));
+    let o = rt.block_on(ug::lookup(&client, &b8, artist, title));
+    assert!(matches!(o, ug::Outcome::Found(_)), "found by title alone under another artist");
+    let _ = std::fs::remove_file(cache(artist, title));
 }
 
 #[test]
@@ -4678,8 +4673,11 @@ fn an_empty_wanted_artist_matches_no_artist() {
         {"song_name":"Dynamite","artist_name":"BTS","type":"Chords","tab_url":"/tab/x/chords-1","rating":5.0,"votes":10}
     ]}}}});
     let store = ug::extract_store(&ug_page(&ugs)).unwrap();
-    assert!(ug::candidates(&store, "", "Dynamite").is_empty());
-    assert_eq!(ug::candidates(&store, "BTS", "Dynamite").len(), 1);
+    assert!(ug::candidates(&store, "", "Dynamite", true).is_empty());
+    assert_eq!(ug::candidates(&store, "BTS", "Dynamite", true).len(), 1);
+    // without the artist (the title search's fallback) a close title match from anyone counts
+    assert_eq!(ug::candidates(&store, "", "Dynamite", false).len(), 1);
+    assert!(ug::candidates(&store, "", "Dynamo", false).is_empty(), "the title must match closely");
 }
 
 #[tokio::test]

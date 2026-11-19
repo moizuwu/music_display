@@ -31,7 +31,8 @@ pub fn built_in(name: &str) -> Option<Style> {
 }
 
 /// Spotify's own look: black window, dark grey panels, white and grey text, its green as the
-/// accent, no effects, arranged like the Spotify app. The font is left to the built-in sans one so it works everywhere.
+/// accent, no effects, arranged like the Spotify app, with its sizes and Figtree (carried by the
+/// program, a free stand-in for Spotify's own font).
 fn spotify() -> Style {
     let gui = GuiConf {
         theme: Theme::Dark,
@@ -46,6 +47,8 @@ fn spotify() -> Style {
         corner_radius: 8,
         panel_borders: false,
         spotify_layout: true,
+        spotify_look: true,
+        font: crate::guiconf::FIGTREE.into(),
         active_weight: Weight::Bold,
         inactive_fade: 50,
         ..GuiConf::default()

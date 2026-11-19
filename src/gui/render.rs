@@ -145,6 +145,10 @@ mod tests {
             ("-lyrics", Page::Lyrics),
         ] {
             let (mut m, rx) = fake_model(true);
+            // with the built-in Spotify preset's look (what these pages are compared with)
+            let layout = m.layout.clone();
+            m.gui = music_display::presets::built_in("Spotify").expect("built-in preset").gui;
+            m.layout = layout;
             m.spot.pg.go(page);
             render(m, rx, &out.replace(".png", &format!("-spotify{name}.png")));
         }
@@ -334,7 +338,13 @@ mod tests {
         script: &dyn Fn(usize, &egui::Context, &mut egui::RawInput),
     ) {
         let ctx = egui::Context::default();
-        let ppp = 2.0;
+        // MDIS_RENDER_SIZE=WxH (points, rendered at 1 pixel per point): the size of a screenshot
+        // to compare with; by default 1100 × 680 at 2 pixels per point
+        let size = std::env::var("MDIS_RENDER_SIZE").ok().and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+        });
+        let ppp = if size.is_some() { 1.0 } else { 2.0 };
         ctx.set_pixels_per_point(ppp);
         let mut app = super::super::Gui {
             m,
@@ -353,7 +363,7 @@ mod tests {
             col_total: 0.0,
         };
         let mut frame = eframe::Frame::_new_kittest();
-        let (pw, ph) = (1100.0f32, 680.0f32);
+        let (pw, ph) = size.unwrap_or((1100.0, 680.0));
         let mut tex = Textures::default();
         let mut last = None;
         for i in 0..frames {

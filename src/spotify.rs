@@ -766,7 +766,8 @@ pub struct Api {
     http: reqwest::Client,
     client_id: String,
     /// spotifyd's Spotify Connect name.
-    daemon: String,
+    /// The Connect names of the daemons on this PC (spotifyd, Spotify Soloist).
+    daemon: Vec<String>,
     host: String,
     /// The API root (a fake server in tests).
     base: String,
@@ -793,7 +794,7 @@ impl Api {
         Api {
             http,
             client_id: client_id.to_string(),
-            daemon: daemon.to_string(),
+            daemon: Some(daemon.to_string()).filter(|d| !d.is_empty()).into_iter().collect(),
             host: hostname(),
             base: API.to_string(),
             token: Arc::new(Mutex::new(None)),
@@ -851,7 +852,15 @@ impl Api {
     /// The device is spotifyd, by the name it was given in the settings. Without one set, no
     /// device counts as spotifyd (an empty name must never match anything).
     fn is_daemon(&self, name: &str) -> bool {
-        !self.daemon.is_empty() && name == self.daemon
+        self.daemon.iter().any(|d| d == name)
+    }
+
+    /// One more daemon on this PC (Spotify Soloist next to spotifyd); Soloist is asked first.
+    pub fn with_daemon(mut self, name: &str) -> Self {
+        if !name.is_empty() && !self.daemon.iter().any(|d| d == name) {
+            self.daemon.insert(0, name.to_string());
+        }
+        self
     }
 
     /// The Spotify app on this computer (Spotify names it after the host) or spotifyd.

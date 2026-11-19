@@ -105,6 +105,9 @@ impl Accent {
     }
 }
 
+/// The font the program carries for the Spotify look (Figtree, SIL Open Font License).
+pub const FIGTREE: &str = "Figtree";
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct GuiConf {
     /// Window background, percent. Below 100 the window is see-through (needs a compositor).
@@ -150,6 +153,9 @@ pub struct GuiConf {
     /// Experimental: arrange the window like the Spotify app (library on the left, lyrics in the
     /// middle, the song on the right, the player bar along the bottom).
     pub spotify_layout: bool,
+    /// With the Spotify layout: Spotify's own look as well (its sizes, Figtree as the font, the
+    /// cover-coloured page headers). The built-in Spotify preset turns it on.
+    pub spotify_look: bool,
     /// Fun: the cover spins like a record while the song plays.
     pub vinyl: bool,
     /// Fun: liking a song bursts confetti from the heart.
@@ -217,6 +223,7 @@ impl Default for GuiConf {
             always_on_top: false,
             decorations: true,
             spotify_layout: false,
+            spotify_look: false,
             vinyl: false,
             confetti: false,
             beat_pulse: false,
@@ -330,7 +337,7 @@ impl GuiConf {
 
 const KEYS: &str = "opacity, panel_opacity, theme, accent, background, effects, effects_intensity, colors, colors_file, window_color, card_color, text_color, muted_color, font, lyrics_size, active_size, meta_size, \
 active_weight, corner_radius, panel_spacing, panel_borders, lyrics_align, inactive_fade, lyrics_animation, \
-remember_window, always_on_top, decorations, spotify_layout, spotify_bar_cover, spotify_now_playing, spotify_bar_fields, vinyl, confetti, beat_pulse, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
+remember_window, always_on_top, decorations, spotify_layout, spotify_look, spotify_bar_cover, spotify_now_playing, spotify_bar_fields, vinyl, confetti, beat_pulse, ui_scale, theme_preset, background_image, lyrics_glow, lock_layout, float_windows, translation_size, member_size, inner_sizes, popped";
 
 impl GuiConf {
     /// Set the values the look is made of (everything else is left as the user has it, the
@@ -501,7 +508,7 @@ impl GuiConf {
                     Some(a) => self.popped = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect(),
                     None => warn(format!("[gui] {k}: expected a list of panel names; ignored")),
                 },
-                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" | "spotify_layout" | "spotify_bar_cover" | "spotify_now_playing" | "vinyl" | "confetti" | "beat_pulse" => {
+                "panel_borders" | "remember_window" | "always_on_top" | "decorations" | "lock_layout" | "float_windows" | "spotify_layout" | "spotify_look" | "spotify_bar_cover" | "spotify_now_playing" | "vinyl" | "confetti" | "beat_pulse" => {
                     let Some(b) = v.as_bool() else {
                         warn(format!("[gui] {k}: expected true or false; using the default"));
                         continue;
@@ -513,6 +520,7 @@ impl GuiConf {
                         "lock_layout" => self.lock_layout = b,
                         "float_windows" => self.float_windows = b,
                         "spotify_layout" => self.spotify_layout = b,
+                        "spotify_look" => self.spotify_look = b,
                         "vinyl" => self.vinyl = b,
                         "confetti" => self.confetti = b,
                         "beat_pulse" => self.beat_pulse = b,
@@ -608,6 +616,7 @@ impl GuiConf {
         put("always_on_top", self.always_on_top.into());
         put("decorations", self.decorations.into());
         put("spotify_layout", self.spotify_layout.into());
+        put("spotify_look", self.spotify_look.into());
         put("vinyl", self.vinyl.into());
         put("confetti", self.confetti.into());
         put("beat_pulse", self.beat_pulse.into());
@@ -898,6 +907,7 @@ mod tests {
             lyrics_animation: Animation::Instant,
             always_on_top: true,
             spotify_layout: true,
+            spotify_look: true,
             vinyl: true,
             confetti: true,
             beat_pulse: true,

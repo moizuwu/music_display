@@ -30,7 +30,11 @@ impl super::Gui {
     pub(super) fn sp_middle(&mut self, ui: &mut Ui) {
         let page = self.m.spot.pg.nav.current().clone();
         if page == Page::Lyrics {
-            self.panel(ui, PanelId::Lyrics);
+            if super::sp_look::active(ui.ctx()) {
+                lyrics_page(ui, &mut self.m);
+            } else {
+                self.panel(ui, PanelId::Lyrics);
+            }
             return;
         }
         let m = &mut self.m;
@@ -160,9 +164,104 @@ pub fn card_grid(avail: f32, want: f32, gap: f32) -> (usize, f32) {
 // ── small pieces ────────────────────────────────────────────────────────
 
 fn section_title(ui: &mut Ui, text: &str) {
-    ui.add_space(18.0);
-    ui.label(RichText::new(text).strong().size(20.0));
+    shelf_title(ui, text, false);
+}
+
+/// A shelf's title; with `more`, Spotify's grey "Show all" on the right (true when clicked).
+fn shelf_title(ui: &mut Ui, text: &str, more: bool) -> bool {
+    let look = super::sp_look::active(ui.ctx());
+    ui.add_space(if look { 26.0 } else { 18.0 });
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        if look {
+            let lk = super::sp_look::SpLook::spotify(0.0);
+            ui.label(RichText::new(text).font(lk.bold(lk.heading)).color(lk.text));
+            if more {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = ui.add(egui::Label::new(RichText::new("Show all").font(lk.bold(lk.small)).color(lk.sub)).sense(Sense::click()));
+                    clicked = r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                });
+            }
+        } else {
+            ui.label(RichText::new(text).strong().size(20.0));
+        }
+    });
     ui.add_space(6.0);
+    clicked
+}
+
+/// A shelf of cards, one row, or all of them after its "Show all" (remembered per title).
+fn shelf(ui: &mut Ui, m: &mut Model, title: &str, items: &[Item], acts: &mut Vec<A>) {
+    let id = egui::Id::unique(("sp-shelf-all", title));
+    let all = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    if shelf_title(ui, title, true) {
+        ui.data_mut(|d| d.insert_temp(id, !all));
+    }
+    cards(ui, m, items, !all, acts);
+}
+
+/// Spotify's shortcut tiles at the top of Home: four across, two down; the cover flush left,
+/// the name bold, a green play button on the right under the pointer.
+fn shortcuts(ui: &mut Ui, m: &mut Model, items: &[Item], acts: &mut Vec<A>) {
+    let lk = super::sp_look::SpLook::spotify(0.0);
+    let (gap, h) = (8.0, 48.0);
+    let cols = if ui.available_width() > 720.0 { 4 } else { 2 };
+    let w = (ui.available_width() - gap * (cols - 1) as f32) / cols as f32;
+    for row in items.iter().take(cols * 2).collect::<Vec<_>>().chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for it in row {
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                super::sp_actions::item_menu(&resp, m, it, None);
+                let hov = resp.hovered();
+                ui.painter().rect_filled(rect, 4.0, Color32::from_white_alpha(if hov { 38 } else { 22 }));
+                let art = Rect::from_min_size(rect.min, Vec2::splat(h));
+                sp_img::paint_art(ui, &mut m.spot, &it.image, art, it.kind == "artist");
+                let text = Rect::from_min_max(pos2(art.right() + 10.0, rect.top()), pos2(rect.right() - if hov { 46.0 } else { 8.0 }, rect.bottom()));
+                let mut c = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                c.add(egui::Label::new(RichText::new(&it.name).font(lk.bold(lk.body)).color(lk.text)).truncate());
+                let btn = Rect::from_center_size(pos2(rect.right() - 24.0, rect.center().y), Vec2::splat(32.0));
+                let play = ui.interact(btn, resp.id.with("play"), Sense::click());
+                if hov || play.hovered() {
+                    ui.painter().circle_filled(btn.center(), 16.0, lk.green);
+                    style::icon_at(ui.painter(), btn.center(), 32.0, Icon::PlayRow, Color32::BLACK);
+                }
+                if play.clicked() {
+                    acts.push(A::Card((*it).clone()));
+                } else if resp.clicked() {
+                    acts.push(match Page::of(it) {
+                        Some(p) => A::Open(p),
+                        None => A::Card((*it).clone()),
+                    });
+                }
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            }
+        });
+        ui.add_space(gap);
+    }
+}
+
+/// The colour fading out from the top of a page: the picture's own colour with the Spotify look,
+/// the accent otherwise.
+fn tint(ui: &Ui, m: &Model, image: &str) -> Color32 {
+    if super::sp_look::active(ui.ctx()) {
+        if let Some(c) = m.spot.pg.images.color(image) {
+            return c;
+        }
+    }
+    accent(ui)
+}
+
+/// A colour fading from the top of `rect` to nothing, painted under what is there (`slot`).
+fn paint_fade(ui: &Ui, slot: egui::layers::ShapeIdx, rect: Rect, c: Color32, alpha: u8) {
+    let mut mesh = egui::Mesh::default();
+    let (c0, c1) = (Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha), Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 0));
+    for (p, col) in [(rect.left_top(), c0), (rect.right_top(), c0), (rect.right_bottom(), c1), (rect.left_bottom(), c1)] {
+        mesh.colored_vertex(p, col);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().set(slot, egui::Shape::mesh(mesh));
 }
 
 fn on_accent(c: Color32) -> Color32 {
@@ -195,7 +294,12 @@ fn head(ui: &mut Ui, m: &mut Model, d: &PageData, round: bool, acts: &mut Vec<A>
         ui.vertical(|ui| {
             ui.add_space((side - 140.0).max(0.0));
             ui.label(RichText::new(&h.kind).small().strong());
-            ui.add(egui::Label::new(RichText::new(&h.title).size(title_size(&h.title)).strong()).wrap());
+            let title = if super::sp_look::active(ui.ctx()) {
+                RichText::new(&h.title).font(super::sp_look::SpLook::spotify(0.0).bold(title_size(&h.title)))
+            } else {
+                RichText::new(&h.title).size(title_size(&h.title)).strong()
+            };
+            ui.add(egui::Label::new(title).wrap());
             if !h.text.is_empty() && h.kind != "Artist" {
                 ui.add(egui::Label::new(RichText::new(&h.text).weak()).truncate());
             }
@@ -217,17 +321,10 @@ fn head(ui: &mut Ui, m: &mut Model, d: &PageData, round: bool, acts: &mut Vec<A>
             });
         });
     });
-    // the accent colour fades out behind the header, the way the app tints it from the cover
-    let c = accent(ui);
-    let rect = Rect::from_min_max(pos2(left, top), pos2(ui.max_rect().right(), ui.cursor().top() + 96.0));
-    let mut mesh = egui::Mesh::default();
-    let (c0, c1) = (Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 80), Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 0));
-    for (p, col) in [(rect.left_top(), c0), (rect.right_top(), c0), (rect.right_bottom(), c1), (rect.left_bottom(), c1)] {
-        mesh.colored_vertex(p, col);
-    }
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    ui.painter().set(bg, egui::Shape::mesh(mesh));
+    // the cover's colour (the accent without the Spotify look) fades out behind the header
+    let look = super::sp_look::active(ui.ctx());
+    let rect = Rect::from_min_max(pos2(left, top), pos2(ui.max_rect().right(), ui.cursor().top() + if look { 220.0 } else { 96.0 }));
+    paint_fade(ui, bg, rect, tint(ui, m, &h.image), if look { 200 } else { 80 });
 }
 
 /// The round play button, shuffle and reload under a header.
@@ -378,8 +475,9 @@ fn track_row(ui: &mut Ui, m: &mut Model, it: &Item, i: usize, ctx: &str, cols: C
 
 /// Cards in rows as wide as the window allows; `one_row` shows only what fits the first row.
 fn cards(ui: &mut Ui, m: &mut Model, items: &[Item], one_row: bool, acts: &mut Vec<A>) {
-    let gap = 14.0;
-    let (n, w) = card_grid(ui.available_width(), 140.0, gap);
+    let look = super::sp_look::active(ui.ctx());
+    let gap = if look { 4.0 } else { 14.0 };
+    let (n, w) = card_grid(ui.available_width(), if look { 150.0 } else { 140.0 }, gap);
     let shown = if one_row { &items[..items.len().min(n)] } else { items };
     for row in shown.chunks(n) {
         ui.horizontal_top(|ui| {
@@ -393,25 +491,35 @@ fn cards(ui: &mut Ui, m: &mut Model, items: &[Item], one_row: bool, acts: &mut V
 }
 
 fn card(ui: &mut Ui, m: &mut Model, it: &Item, w: f32, acts: &mut Vec<A>) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, w + 50.0), Sense::click());
+    let look = super::sp_look::active(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, w + if look { 44.0 } else { 50.0 }), Sense::click());
     super::sp_actions::item_menu(&resp, m, it, None);
     let hov = ui.rect_contains_pointer(rect);
     let base = ui.visuals().widgets.hovered.fg_stroke.color;
-    ui.painter().rect_filled(rect, 8.0, base.gamma_multiply(if hov { 0.12 } else { 0.05 }));
-    let art = Rect::from_min_size(rect.min + vec2(10.0, 10.0), Vec2::splat(w - 20.0));
+    // Spotify's cards have no background, only a soft one under the pointer
+    let fill = if look { if hov { Color32::from_white_alpha(14) } else { Color32::TRANSPARENT } } else { base.gamma_multiply(if hov { 0.12 } else { 0.05 }) };
+    ui.painter().rect_filled(rect, if look { 6.0 } else { 8.0 }, fill);
+    let pad = if look { 8.0 } else { 10.0 };
+    let art = Rect::from_min_size(rect.min + vec2(pad, pad), Vec2::splat(w - 2.0 * pad));
     sp_img::paint_art(ui, &mut m.spot, &it.image, art, it.kind == "artist");
     let btn = Rect::from_center_size(art.right_bottom() - vec2(26.0, 26.0), Vec2::splat(44.0));
     let play = ui.interact(btn, resp.id.with("play"), Sense::click());
     if hov {
-        let c = accent(ui);
+        let c = if look { super::sp_look::SpLook::spotify(0.0).green } else { accent(ui) };
         ui.painter().circle_filled(btn.center(), if play.hovered() { 22.0 } else { 20.0 }, c);
         style::icon_at(ui.painter(), btn.center(), 44.0, Icon::PlayRow, on_accent(c));
         play.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
     }
-    let text = Rect::from_min_max(pos2(rect.left() + 10.0, art.bottom() + 6.0), pos2(rect.right() - 10.0, rect.bottom()));
+    let text = Rect::from_min_max(pos2(rect.left() + pad, art.bottom() + 6.0), pos2(rect.right() - pad, rect.bottom()));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(egui::Layout::top_down(egui::Align::Min)));
-    c.add(egui::Label::new(RichText::new(&it.name).strong()).truncate());
-    c.add(egui::Label::new(RichText::new(&it.sub).small().weak()).truncate());
+    if look {
+        let lk = super::sp_look::SpLook::spotify(0.0);
+        c.add(egui::Label::new(RichText::new(&it.name).font(lk.font(lk.body)).color(lk.text)).truncate());
+        c.add(egui::Label::new(RichText::new(&it.sub).font(lk.font(lk.small)).color(lk.sub)).truncate());
+    } else {
+        c.add(egui::Label::new(RichText::new(&it.name).strong()).truncate());
+        c.add(egui::Label::new(RichText::new(&it.sub).small().weak()).truncate());
+    }
     if play.clicked() {
         acts.push(A::Card(it.clone()));
     } else if resp.clicked() {
@@ -424,6 +532,68 @@ fn card(ui: &mut Ui, m: &mut Model, it: &Item, w: f32, acts: &mut Vec<A>) {
 }
 
 // ── the pages ───────────────────────────────────────────────────────────
+
+/// The colour of the song's cover, darkened (worked out once per song).
+fn cover_color(ui: &Ui, m: &Model) -> Color32 {
+    let key = m.snap.as_ref().map(|s| s.key()).unwrap_or(0);
+    let id = egui::Id::unique(("sp-cover-color", key, m.cover.is_some()));
+    if let Some(c) = ui.data(|d| d.get_temp::<Color32>(id)) {
+        return c;
+    }
+    let c = m.cover.as_ref().map_or(Color32::from_rgb(0x30, 0x30, 0x30), |img| sp_img::dominant(&img.to_rgba8()));
+    ui.data_mut(|d| d.insert_temp(id, c));
+    c
+}
+
+/// Spotify's lyrics page: the whole page in the cover's colour, the lines big, bold and to the
+/// left; the line being sung white, the sung ones soft, the coming ones dark; a click seeks.
+fn lyrics_page(ui: &mut Ui, m: &mut Model) {
+    let bg = cover_color(ui, m);
+    let r = ui.max_rect().expand(ui.spacing().window_margin.left as f32 + 8.0);
+    ui.painter().rect_filled(r, 8.0, bg);
+    let Some(lines) = m.lines() else {
+        ui.add_space(60.0);
+        style::note(ui, "No lyrics for this song.");
+        return;
+    };
+    let active = m.active_line();
+    let times: Vec<f64> = m.synced().map(|l| l.iter().map(|x| x.0).collect()).unwrap_or_default();
+    let lk = super::sp_look::SpLook::spotify(0.0);
+    let size = (ui.available_width() / 26.0).clamp(24.0, 44.0);
+    let pad = (ui.available_width() * 0.07).clamp(24.0, 96.0);
+    let mut seek = None;
+    egui::ScrollArea::vertical().id_salt("sp-lyrics").auto_shrink([false, false]).show(ui, |ui| {
+        let margin = egui::Margin { left: pad as i8, right: 16, top: (pad * 1.2) as i8, bottom: 120 };
+        egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+            ui.set_max_width(ui.available_width().min(size * 24.0));
+            for (i, line) in lines.iter().enumerate() {
+                let text = m.shown_line(i).unwrap_or(line).to_string();
+                if text.trim().is_empty() {
+                    ui.add_space(size * 0.6);
+                    continue;
+                }
+                let color = match active {
+                    Some(a) if i == a => Color32::WHITE,
+                    Some(a) if i < a => Color32::from_rgba_unmultiplied(255, 255, 255, 170),
+                    Some(_) => Color32::from_black_alpha(170),
+                    None => Color32::WHITE,
+                };
+                let r = ui.add(egui::Label::new(RichText::new(&text).font(lk.bold(size)).color(color)).wrap().sense(Sense::click()));
+                if Some(i) == active {
+                    r.scroll_to_me(Some(egui::Align::Center));
+                }
+                if let Some(t) = times.get(i).filter(|_| r.clicked()) {
+                    seek = Some((*t - m.offset).max(0.0));
+                }
+                r.on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.add_space(size * 0.45);
+            }
+        });
+    });
+    if let Some(t) = seek {
+        m.seek(t);
+    }
+}
 
 fn list_page(ui: &mut Ui, m: &mut Model, page: &Page, acts: &mut Vec<A>) {
     let Some(d) = status(ui, m, page) else { return };
@@ -462,8 +632,21 @@ fn list_page(ui: &mut Ui, m: &mut Model, page: &Page, acts: &mut Vec<A>) {
 }
 
 fn home(ui: &mut Ui, m: &mut Model, acts: &mut Vec<A>) {
-    ui.add_space(8.0);
-    ui.label(RichText::new("Home").strong().size(30.0));
+    let look = super::sp_look::active(ui.ctx());
+    if look {
+        // the top of Home is tinted with the colour of what was played last, as in the app
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let first = m.spot.lib.tabs[0].items.first().map(|i| i.image.clone()).unwrap_or_default();
+        let top = ui.max_rect().top() - 8.0;
+        let rect = Rect::from_min_max(pos2(ui.max_rect().left() - 16.0, top), pos2(ui.max_rect().right() + 16.0, top + 320.0));
+        paint_fade(ui, slot, rect, tint(ui, m, &first), 150);
+        ui.add_space(12.0);
+        let recent: Vec<Item> = m.spot.lib.tabs[0].items.clone();
+        shortcuts(ui, m, &recent, acts);
+    } else {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Home").strong().size(30.0));
+    }
     let data = status(ui, m, &Page::Home);
     if let Some(d) = &data {
         for n in &d.notes {
@@ -475,26 +658,27 @@ fn home(ui: &mut Ui, m: &mut Model, acts: &mut Vec<A>) {
         style::note(ui, &format!("Recently played: {e}"));
     }
     if !recent.is_empty() {
-        section_title(ui, "Recently played");
-        cards(ui, m, &recent, true, acts);
+        shelf(ui, m, "Recently played", &recent, acts);
     }
     if let Some(d) = &data {
         for s in &d.sections {
-            section_title(ui, &s.title);
-            if !s.error.is_empty() {
-                style::note(ui, &s.error);
+            if s.items.is_empty() {
+                // nothing to show: the title and why
+                if !s.error.is_empty() {
+                    section_title(ui, &s.title);
+                    style::note(ui, &s.error);
+                }
+                continue;
             }
-            cards(ui, m, &s.items, true, acts);
+            shelf(ui, m, &s.title, &s.items, acts);
         }
         if !d.tracks.is_empty() {
-            section_title(ui, "Your top songs");
-            cards(ui, m, &d.tracks, true, acts);
+            shelf(ui, m, "Your top songs", &d.tracks, acts);
         }
     }
     let lists: Vec<Item> = m.spot.lib.tabs[1].items.clone();
     if !lists.is_empty() {
-        section_title(ui, "Your playlists");
-        cards(ui, m, &lists, true, acts);
+        shelf(ui, m, "Your playlists", &lists, acts);
     }
 }
 

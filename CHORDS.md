@@ -70,12 +70,15 @@ when the site changes. It is built to fail softly.
   can pass (no connection, 429, 5xx) is repeated once after a short pause; a page that still
   won't load does not end the lookup, the next candidate is tried.
 - Only "Chords" pages whose artist and title match are considered, ranked by rating × ln(votes).
+  When the search by the title alone finds nothing by the artist (a soundtrack: the player names
+  the cast, UG files the song under the show), a page whose title matches closely is taken from
+  any artist.
   Pages with fewer than 8 recognisable chords are rejected.
 - Found sheets are cached for good in `~/.cache/music_display/chords-ug-*.json` (readable
   ChordPro). "No sheet" is cached 2 days. Errors are never cached, and neither is a song whose
   pages would not load.
-- Three failures in a row (blocked, captcha, changed page) switch UG off for 10 minutes, then it
-  tries again. The footer says why; local sheets and cached songs keep working.
+- A failure (blocked, captcha, changed page) is an error for that song only; the footer says why
+  and the next song asks UG again. UG is never switched off by the program.
 - It sends a browser-like User-Agent because UG rejects unknown ones. Using it is at your own
   risk with respect to their terms of service, which is why it is opt-in.
 
@@ -143,7 +146,6 @@ sus4 and power chords on all 12 roots; anything else (dim, aug, 9ths, slash chor
 | `found, but there are no synced lyrics…` | lrclib has no synced lyrics for the track |
 | `HTTP 403 from ultimate-guitar` | UG blocked the request; wait, or use local sheets |
 | `page format not recognised` | UG changed its page or served a captcha; run `--chords-probe` |
-| `switched off after repeated failures` | three failures in a row; it tries again after 10 minutes |
 
 Diagnose a song:
 

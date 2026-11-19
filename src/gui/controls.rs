@@ -148,7 +148,12 @@ fn transport_row(ui: &mut Ui, m: &mut Model, shuffle: Option<Ctl>, trio: &[Ctl],
                     let (icon, tip) = if playing { (Icon::Pause, "pause") } else { (Icon::Play, "play") };
                     // `beat_pulse`: a glow behind the button that follows the music
                     let glow = super::fun::slot(ui);
-                    let button = style::icon_button(ui, icon).on_hover_text(tip);
+                    // the Spotify look: a white circle with a black sign
+                    let button = if super::sp_look::active(ui.ctx()) {
+                        style::round_button(ui, style::ICON_SIDE + 4.0, icon, egui::Color32::WHITE, egui::Color32::BLACK, tip)
+                    } else {
+                        style::icon_button(ui, icon).on_hover_text(tip)
+                    };
                     glow.fill(ui, button.rect, super::fun::pulse(ui.ctx(), m));
                     if button.clicked() {
                         m.play_pause();
@@ -255,16 +260,32 @@ fn progress(ui: &mut Ui, m: &mut Model, length: f64) {
 fn thin_bar(ui: &Ui, r: egui::Rect, frac: f32, hot: bool) {
     let mid = r.center().y;
     let p = ui.painter();
+    let x = r.left() + r.width() * frac.clamp(0.0, 1.0);
+    if super::sp_look::active(ui.ctx()) {
+        // Spotify: a 4 px grey track, filled white; green with a white dot under the pointer
+        let line = |a: f32, b: f32, c: egui::Color32| {
+            p.rect_filled(egui::Rect::from_min_max(egui::pos2(a, mid - 2.0), egui::pos2(b, mid + 2.0)), 2.0, c);
+        };
+        line(r.left(), r.right(), egui::Color32::from_rgb(0x4d, 0x4d, 0x4d));
+        line(r.left(), x, if hot { egui::Color32::from_rgb(0x1e, 0xd7, 0x60) } else { egui::Color32::WHITE });
+        if hot {
+            p.circle_filled(egui::pos2(x, mid), 6.0, egui::Color32::WHITE);
+        }
+        return;
+    }
     let w = if hot { 5.0 } else { 3.0 };
     p.line_segment([egui::pos2(r.left(), mid), egui::pos2(r.right(), mid)], Stroke::new(w, ui.visuals().widgets.inactive.bg_fill));
-    let x = r.left() + r.width() * frac.clamp(0.0, 1.0);
     p.line_segment([egui::pos2(r.left(), mid), egui::pos2(x, mid)], Stroke::new(w, accent(ui)));
     p.circle_filled(egui::pos2(x, mid), if hot { 7.0 } else { 5.0 }, accent(ui));
 }
 
 /// A time next to the progress bar, in the text font (weak, like the other secondary text).
 fn time_label(ui: &mut Ui, t: f64) {
-    ui.label(egui::RichText::new(fmt_time(t)).weak());
+    if super::sp_look::active(ui.ctx()) {
+        ui.label(egui::RichText::new(fmt_time(t)).weak().size(11.0));
+    } else {
+        ui.label(egui::RichText::new(fmt_time(t)).weak());
+    }
 }
 
 #[cfg(test)]

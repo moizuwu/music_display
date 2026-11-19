@@ -20,6 +20,7 @@ mod settings;
 mod sizewatch;
 mod sp_actions;
 mod sp_img;
+mod sp_look;
 mod sp_nav;
 mod sp_pages;
 mod sp_side;
@@ -70,7 +71,11 @@ pub fn run(args: Args, cfg_path: PathBuf, layout: Layout) -> Result<()> {
     }
     // the same pollers as the terminal front end
     tokio::spawn(model.ctl.clone().poll_loop(tx.clone()));
-    tokio::spawn(model.ctl.clone().follow_loop(tx));
+    tokio::spawn(model.ctl.clone().follow_loop(tx.clone()));
+    // Spotify Soloist (`player = "soloist"`): its WebSocket link stands in for the two above
+    tokio::spawn(model.ctl.clone().soloist_loop(tx));
+    // Spotify Soloist (`use_soloist`): the window holds it; stopped when the window goes
+    model.sync_soloist();
     // SIGTERM / SIGHUP close the window like its close button; spotifyd (use_spotifyd) is
     // stopped when `daemon` is dropped, whichever way the window ends
     window::close_on_signal(wake.clone());
@@ -273,7 +278,7 @@ impl Gui {
             PanelId::Lyrics => {
                 // cava docked under the lyrics
                 if self.m.cava_wanted() && self.m.layout.cava_under_lyrics && !self.is_popped(PanelId::Cava) {
-                    let r = egui::Panel::bottom("cava_under")
+                    let r = egui::Panel::bottom("cava_under").show_separator_line(false)
                         .default_size(self.inner_size("cava", 120.0))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| extras::cava_panel(ui, &self.m));
@@ -281,7 +286,7 @@ impl Gui {
                 }
                 // with the annotations column open the diagrams live in it (above the notes)
                 if self.m.show_diagrams && !self.m.annotations_shown() && !self.is_popped(PanelId::Chords) {
-                    let r = egui::Panel::right("diagrams")
+                    let r = egui::Panel::right("diagrams").show_separator_line(false)
                         .default_size(self.inner_size("diagrams", 280.0))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| view::diagrams(ui, &mut self.m));
@@ -294,7 +299,7 @@ impl Gui {
                 if self.m.show_diagrams && !self.is_popped(PanelId::Chords) {
                     // one column, two panels: the diagrams take the top half, the notes the rest
                     let half = ui.available_height() / 2.0;
-                    let r = egui::Panel::top("diagrams_stack")
+                    let r = egui::Panel::top("diagrams_stack").show_separator_line(false)
                         .default_size(self.inner_size("stack", half))
                         .resizable(!self.m.gui.lock_layout)
                         .show(ui, |ui| view::diagrams(ui, &mut self.m));
@@ -349,11 +354,14 @@ impl eframe::App for Gui {
             let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("look-extra"));
             backdrop::figure(&ui.ctx().layer_painter(layer), ui.ctx().content_rect(), g.opacity as f32 / 100.0);
         }
-        egui::Panel::top("top").frame(style::gutter(&g)).show(ui, |ui| {
+        egui::Panel::top("top").show_separator_line(false).frame(style::gutter(&g)).show(ui, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.strong("mdis");
-                // the library on the left, next to the name (Spotify's place for it)
-                library::library_button(ui, &mut self.m);
+                // the library on the left, next to the name (Spotify's place for it); the
+                // Spotify layout has it as a column already
+                if !g.spotify_layout {
+                    library::library_button(ui, &mut self.m);
+                }
                 // right to left: settings, keys, theme, windows read left to right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let side = style::ICON_SIDE;
@@ -377,10 +385,14 @@ impl eframe::App for Gui {
                     if style::tool(ui, side, style::Icon::Gear, self.m.ux.s.open, "Settings (s)") {
                         self.m.ux.s.open = !self.m.ux.s.open;
                     }
+                    // the Spotify layout's back / forward / home / search: one top bar, as in Spotify
+                    if g.spotify_layout && !self.m.x.minimal {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.top_strip(ui));
+                    }
                 });
             });
         });
-        egui::Panel::bottom("footer").frame(style::gutter(&g)).show(ui, |ui| footer::footer(ui, &mut self.m));
+        egui::Panel::bottom("footer").show_separator_line(false).frame(style::gutter(&g)).show(ui, |ui| footer::footer(ui, &mut self.m));
         // the terminal UI's keys (not while typing in a field)
         self.handle_keys(ui.ctx());
         if self.m.x.minimal {
@@ -390,6 +402,7 @@ impl eframe::App for Gui {
         }
         // experimental: arranged like the Spotify app
         self.m.spot.pg.active = g.spotify_layout;
+        sp_look::set_active(ui.ctx(), g.spotify_layout && g.spotify_look);
         if g.spotify_layout {
             self.spotify_view(ui, &g);
             self.popups(ui.ctx());
@@ -434,7 +447,7 @@ impl eframe::App for Gui {
         for (i, id) in rest.iter().enumerate() {
             let pct = self.m.layout.size_of(*id).map(f32::from).unwrap_or(if *id == PanelId::Metadata { 34.0 } else { 25.0 });
             let pid = format!("col{i}-{}", self.col_epoch);
-            let panel = if vertical { egui::Panel::top(pid) } else { egui::Panel::left(pid) };
+            let panel = if vertical { egui::Panel::top(pid).show_separator_line(false) } else { egui::Panel::left(pid).show_separator_line(false) };
             let panel = panel.frame(style::gutter(&g)).resizable(!g.lock_layout).default_size(total * pct / 100.0).min_size(if vertical { 80.0 } else { 160.0 });
             let resp = panel.show(ui, |ui| {
                 // square corners on the sides that touch a split (every column but the last has

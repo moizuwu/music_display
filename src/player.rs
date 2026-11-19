@@ -196,6 +196,65 @@ pub struct Ctl {
     /// player playerctl would pick first.
     #[cfg(unix)]
     shown: Arc<std::sync::RwLock<Option<String>>>,
+    /// `player = "soloist"`: Spotify Soloist's WebSocket API stands in for playerctl / the
+    /// media session (see `crate::soloist`); commands go to it over `solo_tx`.
+    solo: Arc<std::sync::atomic::AtomicBool>,
+    solo_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    solo_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>>>,
+}
+
+type SoloParts = (
+    Arc<std::sync::atomic::AtomicBool>,
+    tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>>>,
+);
+
+/// The Soloist parts of a new `Ctl`.
+fn solo_parts(player: &str) -> SoloParts {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (Arc::new(std::sync::atomic::AtomicBool::new(player == crate::soloist::PLAYER)), tx, Arc::new(std::sync::Mutex::new(Some(rx))))
+}
+
+/// What every platform shares: the Soloist switch.
+impl Ctl {
+    /// Is Soloist the player now?
+    pub fn soloist_on(&self) -> bool {
+        self.solo.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_soloist(&self, player: &str) {
+        self.solo.store(player == crate::soloist::PLAYER, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// With Soloist as the player, the command goes to it. True when it did.
+    fn solo_send(&self, args: &[&str]) -> bool {
+        if !self.soloist_on() {
+            return false;
+        }
+        let _ = self.solo_tx.send(args.iter().map(|a| a.to_string()).collect());
+        true
+    }
+
+    /// Make the Soloist device the active one ("play here" without the Web API).
+    pub fn soloist_activate(&self) {
+        let _ = self.solo_tx.send(vec!["activate".into()]);
+    }
+
+    /// The Soloist link (runs for the whole program; idle while another player is chosen).
+    pub async fn soloist_loop(self, tx: UnboundedSender<AppEvent>) {
+        let Some(rx) = self.solo_rx.lock().ok().and_then(|mut r| r.take()) else { return };
+        let on = self.solo.clone();
+        crate::soloist::run(tx, rx, move || on.load(std::sync::atomic::Ordering::Relaxed)).await;
+    }
+
+    /// The pollers sit still while Soloist is the player (its link sends the state).
+    async fn soloist_pause(&self) -> bool {
+        if self.soloist_on() {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return true;
+        }
+        false
+    }
 }
 
 /// Of several players' snapshots: the playing one, else the first one `wanted` lists (any
@@ -243,12 +302,13 @@ pub const PRESETS: &[&str] = &[
     "mpv",
     "rhythmbox",
     "local",
+    crate::soloist::PLAYER,
     "any",
 ];
 
 /// Windows: the names are matched against the app id of the media session.
 #[cfg(windows)]
-pub const PRESETS: &[&str] = &["spotify", "vlc", "chrome", "firefox", "msedge", "any"];
+pub const PRESETS: &[&str] = &["spotify", "vlc", "chrome", "firefox", "msedge", crate::soloist::PLAYER, "any"];
 
 /// What a menu name means to playerctl (`local` = any of the common local players).
 #[cfg(unix)]
@@ -262,7 +322,11 @@ pub fn expand(player: &str) -> String {
 #[cfg(unix)]
 impl Ctl {
     pub fn new(player: &str) -> Self {
+        let (solo, solo_tx, solo_rx) = solo_parts(player);
         Ctl {
+            solo,
+            solo_tx,
+            solo_rx,
             base: Arc::new(std::sync::RwLock::new(player_args(&expand(player)))),
             repoll: Arc::new(Notify::new()),
             switched: Arc::new(Notify::new()),
@@ -274,6 +338,7 @@ impl Ctl {
 
     /// Switch to another player (or priority list) without restarting the program.
     pub fn set_player(&self, player: &str) {
+        self.set_soloist(player);
         if let Ok(mut b) = self.base.write() {
             *b = player_args(&expand(player));
         }
@@ -305,6 +370,9 @@ impl Ctl {
 
     /// Fire-and-forget a playerctl command, then ask the poller for a fresh snapshot.
     pub fn send(&self, args: &[&str]) {
+        if self.solo_send(args) {
+            return;
+        }
         let mut c = self.target_cmd();
         c.args(args).stdout(Stdio::null());
         let notify = self.repoll.clone();
@@ -375,6 +443,9 @@ impl Ctl {
     pub async fn poll_loop(self, tx: UnboundedSender<AppEvent>) {
         let mut modes_at: Option<tokio::time::Instant> = None;
         loop {
+            if self.soloist_pause().await {
+                continue;
+            }
             if modes_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
                 self.refresh_modes().await;
                 modes_at = Some(tokio::time::Instant::now());
@@ -398,6 +469,9 @@ impl Ctl {
     /// instant track switches without hammering the poller.
     pub async fn follow_loop(self, tx: UnboundedSender<AppEvent>) {
         loop {
+            if self.soloist_pause().await {
+                continue;
+            }
             let mut restart = false;
             let child = self
                 .cmd()
@@ -444,13 +518,18 @@ impl Ctl {
 #[cfg(windows)]
 impl Ctl {
     pub fn new(player: &str) -> Self {
+        let (solo, solo_tx, solo_rx) = solo_parts(player);
         Ctl {
+            solo,
+            solo_tx,
+            solo_rx,
             name: Arc::new(std::sync::RwLock::new(player_name(player))),
             repoll: Arc::new(Notify::new()),
         }
     }
 
     pub fn set_player(&self, player: &str) {
+        self.set_soloist(player);
         if let Ok(mut n) = self.name.write() {
             *n = player_name(player);
         }
@@ -462,6 +541,9 @@ impl Ctl {
     }
 
     pub fn send(&self, args: &[&str]) {
+        if self.solo_send(args) {
+            return;
+        }
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let (name, notify) = (self.wanted(), self.repoll.clone());
         tokio::spawn(async move {
@@ -476,6 +558,9 @@ impl Ctl {
 
     pub async fn poll_loop(self, tx: UnboundedSender<AppEvent>) {
         loop {
+            if self.soloist_pause().await {
+                continue;
+            }
             let name = self.wanted();
             let snap = tokio::task::spawn_blocking(move || crate::smtc::snapshot(&name))
                 .await

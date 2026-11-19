@@ -218,6 +218,8 @@ pub struct App {
     pub lyric_hits: LyricHits,
     /// The spotifyd this program started (never one that was already running).
     pub spotifyd: Option<std::process::Child>,
+    /// Spotify Soloist (`use_soloist`): stopped when dropped, like spotifyd.
+    pub soloist: Option<crate::soloist::Daemon>,
     /// Player volume, 0..=1 (`None` until the player reports one).
     pub volume: Option<f64>,
     /// Last non-zero volume, restored when un-muting.
@@ -393,6 +395,7 @@ impl App {
             hits: Hits::default(),
             lyric_hits: LyricHits::default(),
             spotifyd: None,
+            soloist: None,
             volume: None,
             vol_last: 0.5,
             vol_hold: Instant::now() - Duration::from_secs(5),
@@ -1431,6 +1434,7 @@ impl App {
                 _ => self.args.spotify_device.clone(),
             },
             Setting::UseSpotifyd => onoff(self.args.use_spotifyd),
+            Setting::UseSoloist => onoff(self.args.use_soloist),
             Setting::KillSpotifyd => onoff(!self.args.no_kill_spotifyd),
             Setting::SpotifyButton => onoff(!self.args.no_spotify_button),
             Setting::SpotifyQueueTab => onoff(!self.args.no_spotify_queue_tab),
@@ -1651,6 +1655,12 @@ impl App {
                     self.spotifyd = crate::spotifyd::start();
                 }
                 // the running client matches "this PC" by this name: rebuild it
+                self.restart_spotify();
+            }
+            Setting::UseSoloist => {
+                self.args.use_soloist = !self.args.use_soloist;
+                self.sync_soloist();
+                // "this PC" now includes (or no longer) the Soloist device
                 self.restart_spotify();
             }
             Setting::KillSpotifyd => self.args.no_kill_spotifyd = !self.args.no_kill_spotifyd,

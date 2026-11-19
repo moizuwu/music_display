@@ -26,6 +26,8 @@ enum Slot {
 pub struct Images {
     map: HashMap<String, Slot>,
     order: VecDeque<String>,
+    /// The main colour of each picture (for the Spotify look's page headers), found on arrival.
+    colors: HashMap<String, egui::Color32>,
 }
 
 impl Images {
@@ -39,13 +41,22 @@ impl Images {
         self.put(url, Slot::Raw(Box::new(img)));
     }
 
+    /// The main colour of a picture that is here.
+    pub fn color(&self, url: &str) -> Option<egui::Color32> {
+        self.colors.get(url).copied()
+    }
+
     fn put(&mut self, url: &str, slot: Slot) {
+        if let Slot::Raw(img) = &slot {
+            self.colors.insert(url.to_string(), dominant(img));
+        }
         if self.map.insert(url.to_string(), slot).is_none() {
             self.order.push_back(url.to_string());
         }
         while self.order.len() > KEEP {
             if let Some(old) = self.order.pop_front() {
                 self.map.remove(&old);
+                self.colors.remove(&old);
             }
         }
     }
@@ -67,6 +78,27 @@ impl Images {
             Some(_) => Ok(None),
         }
     }
+}
+
+/// The main colour of a picture, the way Spotify tints a page header or the lyrics with it: the
+/// average of its colourful pixels (grey ones count little), made dark enough for white text.
+pub fn dominant(img: &image::RgbaImage) -> egui::Color32 {
+    let (mut sum, mut weight) = ([0.0f32; 3], 0.0f32);
+    let step = ((img.width() * img.height()) as usize / 4096).max(1);
+    for p in img.pixels().step_by(step) {
+        let [r, g, b] = [p[0], p[1], p[2]].map(|c| c as f32 / 255.0);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        // saturation, and not too dark or too light
+        let w = 0.05 + (max - min) * (1.0 - (2.0 * (max + min) / 2.0 - 1.0).abs());
+        sum = [sum[0] + r * w, sum[1] + g * w, sum[2] + b * w];
+        weight += w;
+    }
+    let avg = sum.map(|c| c / weight.max(1e-6));
+    // at most this bright, so white text on it stays readable
+    let lum = 0.2126 * avg[0] + 0.7152 * avg[1] + 0.0722 * avg[2];
+    let k = if lum > 0.32 { 0.32 / lum } else { 1.0 };
+    let [r, g, b] = avg.map(|c| ((c * k).clamp(0.0, 1.0) * 255.0).round() as u8);
+    egui::Color32::from_rgb(r, g, b)
 }
 
 impl Spot {
@@ -135,5 +167,27 @@ mod tests {
         }
         assert!(imgs.map.len() <= KEEP);
         assert!(!imgs.map.contains_key("u1"), "the oldest went");
+    }
+}
+
+#[cfg(test)]
+mod dominant_tests {
+    use super::*;
+
+    #[test]
+    fn the_colourful_part_wins_and_it_is_dark_enough_for_white_text() {
+        // mostly grey with a red block: red comes out
+        let mut img = image::RgbaImage::from_pixel(64, 64, image::Rgba([128, 128, 128, 255]));
+        for y in 0..24 {
+            for x in 0..64 {
+                img.put_pixel(x, y, image::Rgba([220, 30, 30, 255]));
+            }
+        }
+        let c = dominant(&img);
+        assert!(c.r() > c.g() * 2 && c.r() > c.b() * 2, "{c:?}");
+        // a bright yellow cover is darkened
+        let y = dominant(&image::RgbaImage::from_pixel(8, 8, image::Rgba([250, 230, 40, 255])));
+        let lum = 0.2126 * y.r() as f32 + 0.7152 * y.g() as f32 + 0.0722 * y.b() as f32;
+        assert!(lum <= 0.33 * 255.0, "{y:?}");
     }
 }

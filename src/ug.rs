@@ -4,22 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const BASE: &str = "https://www.ultimate-guitar.com";
 // UG answers non-browser agents with 403, so this looks like a normal browser.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 const NEG_TTL: u64 = 2 * 24 * 3600;
-const MAX_FAILS: u32 = 3;
-/// After `MAX_FAILS` hard failures in a row the provider rests this long, then tries again.
-const BREAKER_SECS: u64 = 10 * 60;
 const MIN_CHORDS: usize = 8;
 
-/// Consecutive hard failures (blocked / format changed / network). Three in a row
-/// switch the provider off for `BREAKER_SECS`, so a bad minute does not cost the whole session.
-static FAILS: AtomicU32 = AtomicU32::new(0);
-/// When the last of them happened (unix seconds).
-static LAST_FAIL: AtomicU64 = AtomicU64::new(0);
 /// `--chords-probe --probe-save DIR`: keep every page we fetch.
 pub static SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -116,7 +107,9 @@ pub struct Cand {
 
 /// Chord pages for this song, best first: rating × ln(votes), after checking that the
 /// title and artist really are the ones we asked for.
-pub fn candidates(store: &Value, artist: &str, title: &str) -> Vec<Cand> {
+/// `artist_must_match`: only pages by the artist; without it, any page whose title matches
+/// closely (stricter than with the artist).
+pub fn candidates(store: &Value, artist: &str, title: &str, artist_must_match: bool) -> Vec<Cand> {
     let Some(Value::Array(results)) = find_key(store, "results") else {
         return vec![];
     };
@@ -132,9 +125,9 @@ pub fn candidates(store: &Value, artist: &str, title: &str) -> Vec<Cand> {
             let song = r.get("song_name").and_then(Value::as_str).unwrap_or("").to_string();
             let art = r.get("artist_name").and_then(Value::as_str).unwrap_or("").to_string();
             let (st, sa) = (chords::norm(&crate::year::clean(&song)), chords::norm(&art));
-            let title_ok = chords::dice(&want_t, &st) >= 0.8;
+            let title_ok = chords::dice(&want_t, &st) >= if artist_must_match { 0.8 } else { 0.9 };
             let artist_ok = !want_a.is_empty() && !sa.is_empty() && (sa.contains(&want_a) || want_a.contains(&sa) || chords::dice(&want_a, &sa) >= 0.7);
-            if !title_ok || !artist_ok {
+            if !title_ok || (artist_must_match && !artist_ok) {
                 return None;
             }
             let rating = r.get("rating").and_then(Value::as_f64).unwrap_or(0.0);
@@ -248,33 +241,11 @@ fn cache_path(artist: &str, title: &str) -> PathBuf {
     cache_dir().join(format!("chords-ug-{:016x}.json", fnv1a(&format!("{artist}\0{title}"))))
 }
 
+/// A lookup that failed (blocked, a page that would not load): an error for this song only.
+/// There is no switch-off after a few of them: the next song simply asks again (a failure
+/// that can pass already gets one retry in `get`).
 fn fail(msg: String) -> Outcome {
-    FAILS.fetch_add(1, Ordering::Relaxed);
-    LAST_FAIL.store(now_secs(), Ordering::Relaxed);
     Outcome::Error(msg)
-}
-
-/// Switched off after repeated failures, until the rest period is over.
-pub fn disabled() -> bool {
-    if FAILS.load(Ordering::Relaxed) < MAX_FAILS {
-        return false;
-    }
-    if now_secs().saturating_sub(LAST_FAIL.load(Ordering::Relaxed)) >= BREAKER_SECS {
-        FAILS.store(0, Ordering::Relaxed);
-        return false;
-    }
-    true
-}
-
-#[doc(hidden)] // test hook, used by the binary's tests too
-pub fn reset_breaker() {
-    FAILS.store(0, Ordering::Relaxed);
-    LAST_FAIL.store(0, Ordering::Relaxed);
-}
-
-#[doc(hidden)]
-pub fn set_last_fail(secs: u64) {
-    LAST_FAIL.store(secs, Ordering::Relaxed);
 }
 
 /// Cache → search (twice at most) → fetch the best pages, 3 per search at most, and
@@ -294,10 +265,6 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
             }
         }
     }
-    if disabled() {
-        return Outcome::Error("ultimate-guitar switched off after repeated failures".into());
-    }
-
     // Search "artist title" first; when none of its chord pages is the song (or none has real
     // chords) search the title alone, since UG's ranking often buries a song under the artist
     // words. A page that fails to load does not end the lookup: the next one is tried.
@@ -326,7 +293,14 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
             page_error = Some("ultimate-guitar page format not recognised (blocked or changed)".into());
             break;
         };
-        for cand in candidates(&store, artist, title) {
+        // the title search may find the song under another artist name (a soundtrack: the
+        // player says the cast, UG files it under the show), so when nothing matches the artist
+        // a close title match from anyone is taken
+        let mut cands = candidates(&store, artist, title, true);
+        if cands.is_empty() && n > 0 {
+            cands = candidates(&store, artist, title, false);
+        }
+        for cand in cands {
             let url = if cand.url.starts_with('/') { format!("{base}{}", cand.url) } else { cand.url.clone() };
             if tried.contains(&url) {
                 continue;
@@ -355,7 +329,6 @@ pub async fn lookup(c: &reqwest::Client, base: &str, artist: &str, title: &str) 
             return fail(e);
         }
     }
-    FAILS.store(0, Ordering::Relaxed);
     let entry = match &sheet {
         Some(s) => CacheEntry { kind: "found".into(), chordpro: chords::to_chordpro(s), saved: now_secs() },
         None => CacheEntry { kind: "none".into(), chordpro: String::new(), saved: now_secs() },
@@ -427,7 +400,7 @@ pub async fn probe(c: &reqwest::Client, artist: &str, title: &str, save: Option<
         _ => 0,
     };
     println!("   js-store parsed; {all} results in total");
-    let cands = candidates(&store, artist, title);
+    let cands = candidates(&store, artist, title, true);
     if cands.is_empty() {
         return println!("   no chord pages matching this artist/title");
     }

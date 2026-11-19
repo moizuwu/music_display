@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 // and has no terminal code; re-imported here so the TUI modules keep addressing it as `crate::x`.
 use music_display::{
     AppEvent, ai, annotations, cava, chords, cli, color, config, cover, diagram, genius, lyrics, player, setup, shutdown, spotify,
-    spotifyd, tags, translate, ug, util, year, layout, genre, identity,
+    soloist, spotifyd, tags, translate, ug, util, year, layout, genre, identity,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -169,11 +169,15 @@ async fn main() -> Result<()> {
     // Player workers: periodic poll + instant change stream.
     tokio::spawn(app.ctl.clone().poll_loop(tx.clone()));
     tokio::spawn(app.ctl.clone().follow_loop(tx.clone()));
+    // Spotify Soloist (`player = "soloist"`): its WebSocket link stands in for the two above
+    tokio::spawn(app.ctl.clone().soloist_loop(tx.clone()));
     // Spotify Web API: playback on other devices, `local` / volume for this one.
     app.start_spotify();
     if app.args.use_spotifyd {
         app.spotifyd = spotifyd::start();
     }
+    // Spotify Soloist (`use_soloist`): the app holds it; stopped when the app goes
+    app.sync_soloist();
 
     let res = run(&mut terminal, app, rx).await;
 

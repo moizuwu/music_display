@@ -543,10 +543,25 @@ pub struct Args {
     #[arg(long)]
     pub use_spotifyd: bool,
 
-    /// Leave the spotifyd that this program started running when it quits (by default it is
-    /// stopped again) [config: kill_spotifyd_on_exit = false]
+    /// Leave the spotifyd (and Spotify Soloist) that this program started running when it quits
+    /// (by default they are stopped again) [config: kill_spotifyd_on_exit = false]
     #[arg(long)]
     pub no_kill_spotifyd: bool,
+
+    /// Start Spotify Soloist (Spotify's own headless Connect player) with the program, next to
+    /// or instead of spotifyd; its device then counts as "this PC". `--player soloist` reads and
+    /// controls it directly [config: use_soloist]
+    #[arg(long)]
+    pub use_soloist: bool,
+
+    /// Spotify Connect name of the Soloist this program starts [config: soloist_name]
+    #[arg(long, default_value = "mdis", value_name = "NAME")]
+    pub soloist_name: String,
+
+    /// The environment variable that holds the Soloist API key (from the Spotify for Developers
+    /// dashboard; the key itself is never written to the config) [config: soloist_key_env]
+    #[arg(long, default_value = "SOLOIST_API_KEY", value_name = "VAR")]
+    pub soloist_key_env: String,
 
     /// Hide the library button at the top left (it is only shown while Spotify is on; open the
     /// library with `o` instead) [config: spotify_button = false]

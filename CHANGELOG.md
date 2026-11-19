@@ -9,10 +9,14 @@ which turns the `Unreleased` section into that version.
 
 ### Fixed
 
+- Ultimate Guitar is no longer switched off for 10 minutes after three failed lookups; a failure only affects that song.
+- Chords for soundtrack songs (the player names the cast, Ultimate Guitar files them under the show): when the title search finds nothing by the artist, a page whose title matches closely is taken from any artist.
 - Window: the cava bars fill their panel however tall it is dragged; they stopped at 240 pixels, so a bigger cava panel looked as if its size had not been kept.
 
 ### Changed
 
+- Window: no more separator lines between panels and under the top bar, and the panel border is a soft edge instead of a hard line.
+- Spotify layout: back / forward / home / search sit in the one top bar (centred, as in Spotify) instead of a second strip, the library button is gone from it (the library is a column), the new-playlist + is in the library header, and the right column shows the song the way Spotify's Now playing does (title, artist, heart, then album / release / genre) instead of the metadata table.
 - Window: a panel's corners are square on the side where it meets a split (the draggable border between two columns); the window's outer corners stay rounded.
 - Window: the library button sits on the left of the top row, next to the name; settings, keys, light / dark and windows are on the right in that order; tooltips show at once. Like, devices and play here are centred under the play buttons, the volume centred under them, and the title no longer carries a heart (the like button does that).
 - The window's volume is the same thin bar with a dot as the progress bar, the times beside the progress bar use the normal font, the top row's name lines up with its buttons, and tooltips show after 0.12 s instead of half a second.
@@ -21,6 +25,8 @@ which turns the `Unreleased` section into that version.
 
 ### Added
 
+- `spotify_look` in `[gui]` (the built-in Spotify preset turns it on): with the Spotify layout, the window takes the Spotify app's own look, measured from screenshots of it. Black frame with rounded panels, Figtree as the font (bundled, SIL Open Font License), a round home button and a pill search field, a white play button and white bars, Home with shortcut tiles and shelves of borderless cards with "Show all", page headers and Home tinted with the cover's colour, the library's "+ Create" and pill chips, the queue as a panel in the right column, and lyrics on a page in the cover's colour.
+- Spotify Soloist support (Spotify's own headless Connect player), next to spotifyd: `use_soloist` starts it with the app (`soloist_name`, the API key from the environment variable `soloist_key_env`), its device counts as "this PC", and `player = "soloist"` reads and controls it through its local WebSocket API instead of MPRIS (no Web API needed). Settings menu row and window Spotify-tab rows.
 - Style presets in the window's Appearance tab: save the whole look and the panel layout under a name, apply it again later, update, rename or delete it (with a confirmation). They are kept in `presets.toml` next to `config.toml`. **Default** and **Spotify** (black, white text, green accent, Spotify layout) are built in.
 - `window_color`, `card_color`, `text_color` and `muted_color` in `[gui]`: own colours for the window, the panel cards and the text (empty = as before).
 - Editing from the window: a right-click menu on library rows (play, queue, add to playlist or a new one, like, save album, follow artist or playlist, remove from or move inside your own playlist, go to artist / album, copy link), a **+** that creates playlists with inline rename and delete, and, in the Spotify layout, a devices popup above the player bar. New Spotify requests for these (`Cmd::CreatePlaylist`, `EditPlaylist`, `DeletePlaylist`, `RemoveFromPlaylist`, `MoveInPlaylist`, `SaveAlbum`, `FollowArtist`, `FollowPlaylist`).

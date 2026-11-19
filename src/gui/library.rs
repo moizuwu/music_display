@@ -96,7 +96,10 @@ impl Spot {
     fn start(&mut self, args: &Args, client: reqwest::Client) {
         let id = args.spotify_client_id.clone().unwrap_or_default();
         let daemon = if args.use_spotifyd { args.spotify_device.as_str() } else { "" };
-        let api = Api::new(client, &id, daemon);
+        let mut api = Api::new(client, &id, daemon);
+        if args.use_soloist || args.player == music_display::soloist::PLAYER {
+            api = api.with_daemon(&args.soloist_name);
+        }
         self.status = (!spotify::logged_in()).then(|| "not logged in: run mdis --spotify-login".to_string());
         // the poller only runs in the real program: tests drive the client by hand
         #[cfg(not(test))]
@@ -790,7 +793,12 @@ pub fn connect_buttons(ui: &mut Ui, m: &mut Model) {
         m.spot.open_devices();
     }
     if toggle_button(ui, Icon::PlayHere, false).on_hover_text("Play here: move playback to this computer").clicked() {
-        m.spot.cmd(Cmd::Transfer);
+        if m.ctl.soloist_on() {
+            // Soloist takes over itself: no Web API call, no device search
+            m.ctl.soloist_activate();
+        } else {
+            m.spot.cmd(Cmd::Transfer);
+        }
     }
     m.take_spot_note();
 }
@@ -871,7 +879,7 @@ fn library_window(ctx: &egui::Context, m: &mut Model, look: &mut super::style::L
     let mut open = true;
     let g = m.gui.clone();
     super::floating::window(ctx, look, &g, "library", "Spotify library", [480.0, 560.0], &mut open, |ui, _| {
-        super::sp_actions::playlist_tools(ui, m);
+        super::sp_actions::playlist_tools(ui, m, true);
         library_body(ui, m);
     });
     if !open {

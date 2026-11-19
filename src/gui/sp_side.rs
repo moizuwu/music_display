@@ -48,34 +48,49 @@ enum Act {
 pub fn library_column(ui: &mut Ui, m: &mut Model) {
     let mut act: Option<Act> = None;
     ui.horizontal(|ui| {
-        ui.add(egui::Label::new(RichText::new("Your Library").strong().size(16.0)).truncate());
+        let title = if super::sp_look::active(ui.ctx()) {
+            let lk = super::sp_look::SpLook::spotify(0.0);
+            RichText::new("Your Library").font(lk.bold(lk.body)).color(lk.text)
+        } else {
+            RichText::new("Your Library").strong().size(16.0)
+        };
+        ui.add(egui::Label::new(title).truncate());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if m.spot.on() && style::tool(ui, style::ROW_SIDE, Icon::Refresh, false, "Reload the library") {
                 for t in wanted_tabs(&[false; 3]) {
                     m.spot.load_tab(t, true);
                 }
             }
+            // "+": a new playlist, in the header like Spotify's "Create"
+            super::sp_actions::new_playlist_button(ui, m);
         });
     });
     if !m.spot.on() {
         style::note(ui, "Spotify is off. Turn it on in the settings (Spotify tab) to see your library here.");
         return;
     }
-    // new playlist (and rename / delete the one on screen), under the header like Spotify's "Create"
-    super::sp_actions::playlist_tools(ui, m);
-    {
+    // why the lists may be empty or old, before them
+    if let Some(e) = m.spot.limited().or_else(|| m.spot.status.clone()) {
+        style::note(ui, &e);
     }
+    // the name field of a new playlist; rename / delete for the playlist on screen
+    super::sp_actions::playlist_tools(ui, m, false);
     ui.horizontal_wrapped(|ui| {
         for (i, (name, _)) in CHIPS.iter().enumerate() {
             let on = m.spot.pg.chips[i];
-            if ui.add(egui::Button::new(*name).selected(on).corner_radius(16.0)).clicked() {
+            let b = if super::sp_look::active(ui.ctx()) {
+                // Spotify's chips: grey pills, white with black text when on
+                let lk = super::sp_look::SpLook::spotify(0.0);
+                let text = RichText::new(*name).font(lk.font(lk.small)).color(if on { egui::Color32::BLACK } else { lk.text });
+                egui::Button::new(text).fill(if on { lk.text } else { lk.chip }).corner_radius(16.0).min_size(Vec2::new(0.0, 28.0))
+            } else {
+                egui::Button::new(*name).selected(on).corner_radius(16.0)
+            };
+            if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 m.spot.pg.chips[i] = !on;
             }
         }
     });
-    if let Some(e) = m.spot.limited().or_else(|| m.spot.status.clone()) {
-        ui.label(RichText::new(e).small().weak());
-    }
     // the lists load when they are shown (not again after a failure: Reload asks)
     let tabs = wanted_tabs(&m.spot.pg.chips);
     for t in &tabs {
@@ -114,34 +129,50 @@ pub fn library_column(ui: &mut Ui, m: &mut Model) {
 /// One row: picture, name, type and owner; a click opens its page, the play sign on the picture
 /// (shown under the pointer) plays it.
 fn row(ui: &mut Ui, m: &mut Model, it: &Item, cur: &Page, act: &mut Option<Act>) {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
+    let look = super::sp_look::active(ui.ctx());
+    // Spotify's rows are tighter, with 40 px pictures
+    let (row_h, thumb_side) = if look { (50.0, 40.0) } else { (ROW_H, THUMB) };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
     super::sp_actions::item_menu(&resp, m, it, None);
     let hovered = ui.rect_contains_pointer(rect);
     if hovered || is_page(it, cur) {
-        let a = if hovered { 0.10 } else { 0.06 };
-        ui.painter().rect_filled(rect, 6.0, ui.visuals().widgets.hovered.fg_stroke.color.gamma_multiply(a));
+        let fill = if look {
+            egui::Color32::from_white_alpha(if hovered { 16 } else { 10 })
+        } else {
+            ui.visuals().widgets.hovered.fg_stroke.color.gamma_multiply(if hovered { 0.10 } else { 0.06 })
+        };
+        ui.painter().rect_filled(rect, 6.0, fill);
     }
-    let thumb = Rect::from_min_size(rect.left_top() + Vec2::new(6.0, (ROW_H - THUMB) / 2.0), Vec2::splat(THUMB));
+    let thumb = Rect::from_min_size(rect.left_top() + Vec2::new(6.0, (row_h - thumb_side) / 2.0), Vec2::splat(thumb_side));
     if it.kind == "liked" {
-        let fill = accent(ui).gamma_multiply(0.85);
+        // Spotify's Liked Songs tile is purple
+        let fill = if look { egui::Color32::from_rgb(0x5a, 0x3c, 0xd8) } else { accent(ui).gamma_multiply(0.85) };
         ui.painter().rect_filled(thumb, 4.0, fill);
-        style::icon_at(ui.painter(), thumb.center(), THUMB * 0.6, Icon::Heart(true), ui.visuals().strong_text_color());
+        style::icon_at(ui.painter(), thumb.center(), thumb_side * 0.6, Icon::Heart(true), ui.visuals().strong_text_color());
     } else {
         sp_img::paint_art(ui, &mut m.spot, &it.image, thumb, it.kind == "artist");
     }
     let play = ui.interact(thumb, resp.id.with("play"), Sense::click());
     if hovered {
-        ui.painter().rect_filled(thumb, if it.kind == "artist" { THUMB / 2.0 } else { 4.0 }, egui::Color32::from_black_alpha(130));
-        style::icon_at(ui.painter(), thumb.center(), THUMB * 0.7, Icon::PlayRow, egui::Color32::WHITE);
+        ui.painter().rect_filled(thumb, if it.kind == "artist" { thumb_side / 2.0 } else { 4.0 }, egui::Color32::from_black_alpha(130));
+        style::icon_at(ui.painter(), thumb.center(), thumb_side * 0.7, Icon::PlayRow, egui::Color32::WHITE);
         play.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
     }
     let text = Rect::from_min_max(thumb.right_top() + Vec2::new(10.0, 0.0), rect.right_bottom() - Vec2::new(4.0, 0.0));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(egui::Layout::top_down(egui::Align::Min)));
     c.add_space(5.0);
     let playing_here = is_page(it, cur);
-    let name = RichText::new(&it.name);
-    c.add(egui::Label::new(if playing_here { name.color(accent(&c)) } else { name }).truncate());
-    c.add(egui::Label::new(RichText::new(sub_line(it)).small().weak()).truncate());
+    if look {
+        let lk = super::sp_look::SpLook::spotify(0.0);
+        c.add_space(4.0);
+        let name = RichText::new(&it.name).font(lk.font(lk.body)).color(if playing_here { lk.green } else { lk.text });
+        c.add(egui::Label::new(name).truncate());
+        c.add(egui::Label::new(RichText::new(sub_line(it)).font(lk.font(lk.small)).color(lk.sub)).truncate());
+    } else {
+        let name = RichText::new(&it.name);
+        c.add(egui::Label::new(if playing_here { name.color(accent(&c)) } else { name }).truncate());
+        c.add(egui::Label::new(RichText::new(sub_line(it)).small().weak()).truncate());
+    }
     if play.clicked() {
         *act = Some(Act::Play(it.clone()));
     } else if resp.clicked() {

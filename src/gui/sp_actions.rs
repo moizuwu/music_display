@@ -265,9 +265,36 @@ fn open_own_playlist(m: &Model) -> Option<(String, String)> {
     (l.uri.starts_with("spotify:playlist:") && own_playlist(m, &l.uri)).then(|| (l.uri.clone(), l.title.clone()))
 }
 
+/// The "+" of [`playlist_tools`] on its own, for a header row: opens the name field below.
+pub fn new_playlist_button(ui: &mut Ui, m: &Model) {
+    if !m.spot.on() {
+        return;
+    }
+    let id = Id::unique("sp-playlist-tools");
+    let mode: Mode = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let creating = matches!(mode, Mode::Create(_));
+    let clicked = if super::sp_look::active(ui.ctx()) {
+        // Spotify's "+ Create" pill
+        let lk = super::sp_look::SpLook::spotify(0.0);
+        let text = egui::RichText::new("+  Create").font(lk.bold(lk.body)).color(lk.text);
+        ui.add(egui::Button::new(text).fill(if creating { lk.chip } else { lk.raised }).corner_radius(16.0).min_size(egui::vec2(0.0, 30.0)))
+            .on_hover_text("New playlist")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    } else {
+        tool(ui, ROW_SIDE, Icon::Plus, creating, "New playlist")
+    };
+    if clicked {
+        let next = if creating { Mode::Idle } else { Mode::Create(String::new()) };
+        ui.data_mut(|d| d.insert_temp(id, next));
+    }
+}
+
 /// A "+" that creates a playlist and, inside one of your own playlists, rename and delete, each
 /// with its inline field or question (no dialogs of the system).
-pub fn playlist_tools(ui: &mut Ui, m: &mut Model) {
+/// `plus`: draw the "+" here (false when the caller has put it in a header with
+/// [`new_playlist_button`]).
+pub fn playlist_tools(ui: &mut Ui, m: &mut Model, plus: bool) {
     if !m.spot.on() {
         return;
     }
@@ -280,19 +307,22 @@ pub fn playlist_tools(ui: &mut Ui, m: &mut Model) {
         (Mode::Rename(..) | Mode::Delete(_), None) => mode = Mode::Idle,
         _ => {}
     }
-    ui.horizontal(|ui| {
-        if tool(ui, ROW_SIDE, Icon::Plus, matches!(mode, Mode::Create(_)), "New playlist") {
-            mode = if matches!(mode, Mode::Create(_)) { Mode::Idle } else { Mode::Create(String::new()) };
-        }
-        if let Some((uri, name)) = &open {
+    // (nothing to show on this row: no row at all)
+    if plus || open.is_some() {
+        ui.horizontal(|ui| {
+            if plus && tool(ui, ROW_SIDE, Icon::Plus, matches!(mode, Mode::Create(_)), "New playlist") {
+                mode = if matches!(mode, Mode::Create(_)) { Mode::Idle } else { Mode::Create(String::new()) };
+            }
+            if let Some((uri, name)) = &open {
             if tool(ui, ROW_SIDE, Icon::Edit, matches!(mode, Mode::Rename(..)), "Rename this playlist") {
                 mode = Mode::Rename(uri.clone(), name.clone());
             }
             if tool(ui, ROW_SIDE, Icon::Trash, matches!(mode, Mode::Delete(_)), "Delete this playlist") {
                 mode = Mode::Delete(uri.clone());
             }
-        }
-    });
+            }
+        });
+    }
     let mut done = false;
     let creating = matches!(mode, Mode::Create(_));
     let mut submit = None;

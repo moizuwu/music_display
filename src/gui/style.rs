@@ -10,7 +10,7 @@ use music_display::color::{self, luminance, Rgb};
 use music_display::guiconf::{ColorsFrom, Effects, Fx, Accent, Align as LAlign, Animation, Background, GuiConf, Preset, Theme, Weight};
 
 /// The family the active line uses when `active_weight` is medium or bold.
-const BOLD: &str = "md-bold";
+pub const BOLD: &str = "md-bold";
 
 /// What the window has applied so far, so the (costly) restyle only runs when something changed.
 #[derive(Default)]
@@ -209,7 +209,10 @@ impl Look {
         if self.fonts_for.as_ref() != Some(&(family_now.clone(), g.active_weight)) {
             // the bold family must exist at once (the active line asks for it); the real fonts
             // replace this when the scan is done
-            if self.fonts_for.is_none() {
+            // a family the program carries (Figtree for the Spotify look) is there at once: no scan
+            if let Some(d) = carried_fonts(&family_now, g.active_weight) {
+                ctx.set_fonts(d);
+            } else if self.fonts_for.is_none() {
                 ctx.set_fonts(base_fonts());
             }
             let (family, weight, c) = (family_now.clone(), g.active_weight, ctx.clone());
@@ -373,6 +376,21 @@ fn base_fonts() -> egui::FontDefinitions {
 pub const BUILT_IN_FAMILY: &str = "Mountains of Christmas";
 static BUILT_IN_REGULAR: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Regular.ttf");
 static BUILT_IN_BOLD: &[u8] = include_bytes!("../../assets/fonts/MountainsofChristmas-Bold.ttf");
+/// Figtree, the Spotify look's font (assets/fonts/Figtree-OFL.txt): used when it is not installed.
+static FIGTREE_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Figtree-Regular.ttf");
+static FIGTREE_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Figtree-SemiBold.ttf");
+static FIGTREE_BOLD: &[u8] = include_bytes!("../../assets/fonts/Figtree-Bold.ttf");
+
+/// The faces the program carries for a family name: (regular, medium, bold).
+fn carried(family: &str) -> Option<(&'static [u8], &'static [u8], &'static [u8])> {
+    if family.eq_ignore_ascii_case(BUILT_IN_FAMILY) {
+        Some((BUILT_IN_REGULAR, BUILT_IN_BOLD, BUILT_IN_BOLD))
+    } else if family.eq_ignore_ascii_case(music_display::guiconf::FIGTREE) {
+        Some((FIGTREE_REGULAR, FIGTREE_SEMIBOLD, FIGTREE_BOLD))
+    } else {
+        None
+    }
+}
 
 /// The font family in use: the chosen one, or that of the look when none is chosen (so a look
 /// set in the config file by name has it too, not only one picked in the Appearance tab).
@@ -383,7 +401,7 @@ fn font_of(g: &GuiConf) -> &str {
 fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
     use egui::{FontData, FontDefinitions};
     use fontique::{Attributes, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, QueryFamily, QueryStatus, SourceCache, SourceCacheOptions};
-    let mut defs = FontDefinitions::default();
+    let defs = FontDefinitions::default();
     let mut c = Collection::new(CollectionOptions { shared: false, system_fonts: true });
     let mut cache = SourceCache::new(SourceCacheOptions::default());
     let mut pick = |name: &str, weight: FontWeight| {
@@ -404,11 +422,23 @@ fn fonts(family: &str, weight: Weight) -> egui::FontDefinitions {
             FontData::from_blob(blob, f.index)
         })
     };
-    let built_in = family.eq_ignore_ascii_case(BUILT_IN_FAMILY);
+    let own = carried(family);
     let normal = if family.is_empty() { None } else { pick(family, FontWeight::NORMAL) }
-        .or_else(|| built_in.then(|| FontData::from_static(BUILT_IN_REGULAR)));
+        .or_else(|| own.map(|(r, _, _)| FontData::from_static(r)));
     let bold = pick(family, if weight == Weight::Medium { FontWeight::MEDIUM } else { FontWeight::BOLD })
-        .or_else(|| built_in.then(|| FontData::from_static(BUILT_IN_BOLD)));
+        .or_else(|| own.map(|(_, m, b)| FontData::from_static(if weight == Weight::Medium { m } else { b })));
+    with_faces(defs, normal, bold)
+}
+
+/// The fonts of a family the program carries, without looking at the installed ones.
+fn carried_fonts(family: &str, weight: Weight) -> Option<egui::FontDefinitions> {
+    let (r, m, b) = carried(family)?;
+    let d = egui::FontData::from_static;
+    Some(with_faces(egui::FontDefinitions::default(), Some(d(r)), Some(d(if weight == Weight::Medium { m } else { b }))))
+}
+
+/// egui's fonts with `normal` in front of the proportional family and `bold` as the bold one.
+fn with_faces(mut defs: egui::FontDefinitions, normal: Option<egui::FontData>, bold: Option<egui::FontData>) -> egui::FontDefinitions {
     let prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut bold_list = Vec::new();
     if let Some(d) = bold {
@@ -487,7 +517,8 @@ pub fn card_at<R>(ui: &mut Ui, g: &GuiConf, split: Split, add: impl FnOnce(&mut 
     Frame::new()
         .fill(with_alpha(fill, alpha))
         .corner_radius(split.corners(g.corner_radius))
-        .stroke(if g.panel_borders { Stroke::new(1.0, line) } else { Stroke::NONE })
+        // a soft edge: the full line colour made every card look outlined in pencil
+        .stroke(if g.panel_borders { Stroke::new(1.0, with_alpha(line, 0.35)) } else { Stroke::NONE })
         .inner_margin(Margin::same(margin))
         .show(ui, |ui| {
             ui.set_min_height((h - 2.0 * margin as f32 - 2.0).max(0.0));
@@ -600,6 +631,30 @@ pub fn tool(ui: &mut Ui, side: f32, icon: Icon, on: bool, tip: &str) -> bool {
 pub fn tool_response(ui: &mut Ui, side: f32, icon: Icon, on: bool, tip: &str) -> Response {
     let ink = if on { super::view::accent(ui) } else { ui.visuals().text_color() };
     paint_button(ui, icon, ink, on, side).on_hover_text(tip)
+}
+
+/// Just the drawing of an icon, `side` big, centred on `c` (for icons inside other things, like
+/// the magnifier in the search field).
+pub fn paint_icon(p: &egui::Painter, c: Pos2, side: f32, icon: Icon, ink: Color32) {
+    draw_icon(p, c, side * 0.2, icon, ink);
+}
+
+/// An icon in a colour of its own (no "on" dot): the Spotify look's green "saved" check.
+pub fn icon_ink(ui: &mut Ui, side: f32, icon: Icon, ink: Color32, tip: &str) -> bool {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    let ink = if resp.hovered() && ink == ui.visuals().weak_text_color() { ui.visuals().strong_text_color() } else { ink };
+    draw_icon(ui.painter(), r.center(), side * 0.2, icon, ink);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked()
+}
+
+/// A round button filled with `fill` and its icon in `ink` (Spotify's white play button, its
+/// round home button); a little bigger under the pointer.
+pub fn round_button(ui: &mut Ui, side: f32, icon: Icon, fill: Color32, ink: Color32, tip: &str) -> Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    let grow = if resp.hovered() { 1.04 } else { 1.0 };
+    ui.painter().circle_filled(r.center(), side / 2.0 * grow, fill);
+    draw_icon(ui.painter(), r.center(), side * 0.2 * grow, icon, ink);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 fn paint_button(ui: &mut Ui, icon: Icon, mut ink: Color32, dot: bool, side: f32) -> Response {
@@ -1023,6 +1078,9 @@ pub fn appearance(ui: &mut Ui, m: &mut Model, look: &mut Look) {
     changed |= ui.checkbox(&mut g.decorations, "Window title bar and borders").changed();
     changed |= ui.checkbox(&mut g.always_on_top, "Keep the window on top").changed();
     changed |= ui.checkbox(&mut g.spotify_layout, "Spotify layout (experimental): library left, lyrics middle, song right, player bar at the bottom").changed();
+    ui.add_enabled_ui(g.spotify_layout, |ui| {
+        changed |= ui.checkbox(&mut g.spotify_look, "Spotify look as well: its sizes, Figtree, cover-coloured headers, queue panel, lyrics page").changed();
+    });
     changed |= super::spotify_view::bar_settings(ui, g);
     changed |= ui.checkbox(&mut g.float_windows, "Open the extra windows floating (Hyprland, sway, niri)").changed();
     changed |= ui.checkbox(&mut g.remember_window, "Remember window size and position (next start)").changed();

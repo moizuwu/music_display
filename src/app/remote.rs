@@ -31,7 +31,7 @@ impl App {
         Some(s)
     }
 
-    pub(super) fn set_note(&mut self, msg: impl Into<String>) {
+    pub fn set_note(&mut self, msg: impl Into<String>) {
         self.note = Some((msg.into(), Instant::now()));
         self.dirty = true;
     }
@@ -64,7 +64,10 @@ impl App {
         let id = self.args.spotify_client_id.clone().unwrap_or_default();
         // spotifyd's Connect name only counts as "this PC" when spotifyd is in use
         let daemon = if self.args.use_spotifyd { self.args.spotify_device.as_str() } else { "" };
-        let api = spotify::Api::new(self.client.clone(), &id, daemon);
+        let mut api = spotify::Api::new(self.client.clone(), &id, daemon);
+        if self.args.use_soloist || self.args.player == music_display::soloist::PLAYER {
+            api = api.with_daemon(&self.args.soloist_name);
+        }
         api.mpris.store(self.mpris_present, std::sync::atomic::Ordering::Relaxed);
         self.spot_status = (!spotify::logged_in())
             .then(|| "not logged in: Settings (s) › Log in, or run music_display --spotify-login".to_string());
@@ -109,6 +112,23 @@ impl App {
     }
 
     /// Rebuild the client (new Client ID, device name, token).
+    /// Start or stop Spotify Soloist to match `use_soloist`; why it could not start goes to the note.
+    pub fn sync_soloist(&mut self) {
+        if !self.args.use_soloist {
+            if let Some(mut d) = self.soloist.take() {
+                d.stop();
+            }
+            return;
+        }
+        if self.soloist.is_none() {
+            let d = crate::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, !self.args.no_kill_spotifyd);
+            if let Some(e) = &d.error {
+                self.set_note(e.clone());
+            }
+            self.soloist = Some(d);
+        }
+    }
+
     pub(super) fn stop_spotifyd(&mut self) {
         if let Some(mut c) = self.spotifyd.take() {
             crate::spotifyd::stop(&mut c);

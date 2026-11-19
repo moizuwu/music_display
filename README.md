@@ -181,7 +181,10 @@ spotify_device = ""            # only if you run spotifyd: its `device_name` (e.
 use_spotifyd = false           # spotifyd is the player on this PC (set up with --setup): `spotify_device` then
                                # counts as "this PC"; off = only the Spotify app on this computer does.
                                # While on, spotifyd is started with the app (if not already running)
-kill_spotifyd_on_exit = true   # stop the spotifyd this app started when it quits (never one that was already running)
+kill_spotifyd_on_exit = true   # stop the spotifyd / Soloist this app started when it quits (never one that was already running)
+use_soloist = false            # start Spotify Soloist with the app (see "Spotify Soloist"); its device counts as "this PC"
+soloist_name = "mdis"          # the Spotify Connect name of that Soloist
+soloist_key_env = "SOLOIST_API_KEY"  # the environment variable holding the Soloist API key (the key is never stored here)
 spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
 spotify_queue_tab = true       # the Queue tab in the library browser
 # [keys]                       # must come last in the file; see "Remapping keys" below
@@ -245,6 +248,9 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--spotify-client-id ID` | Client ID of your Spotify developer app; only the login needs it (it is saved with the token). |
 | `--spotify-device NAME` | only if you run spotifyd: its Spotify Connect name (the `device_name` in its config, say `Living Room PC`), so it counts as "this PC". Default: empty, which matches only the Spotify app on this computer (named after the host name) and devices of type "Computer". |
 | `--use-spotifyd` | spotifyd is the player on this PC: the `spotify_device` name then counts as "this PC" (for `H`, play and the device list). Off, only the Spotify app on this computer does. While on, `spotifyd --no-daemon` is started together with the app unless one is already running. `--setup` turns it on for you (see "Setup (spotifyd)" below); also a row in the settings menu. |
+| `--use-soloist` | start Spotify Soloist with the app (unless one already runs), next to or instead of spotifyd; its device counts as "this PC". Config: `use_soloist`; also a row in the settings menu and the window's Spotify tab. See "Spotify Soloist" below. |
+| `--soloist-name NAME` | the Spotify Connect name of the Soloist this app starts (default `mdis`). Config: `soloist_name`. |
+| `--soloist-key-env VAR` | the environment variable that holds the Soloist API key (default `SOLOIST_API_KEY`); the key itself is never written to the config. Config: `soloist_key_env`. |
 | `--no-kill-spotifyd` | leave the spotifyd that this app started running when it quits (by default it is stopped again; a spotifyd that was already running is never touched). Config: `kill_spotifyd_on_exit = false`; also the *Stop spotifyd on exit* row in the settings menu. |
 | `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
@@ -373,6 +379,7 @@ remember_window = true   # reopen at the last size and place (applies from the n
 always_on_top = false
 decorations = true       # false = no title bar or border
 spotify_layout = false   # experimental: arrange the window like the Spotify app (library left, lyrics middle, song right, player bar at the bottom)
+spotify_look = false     # with spotify_layout: Spotify's own look too (sizes, Figtree font, cover-coloured headers, queue panel, lyrics page); the built-in Spotify preset turns it on
 vinyl = false            # fun: the cover spins like a record while the song plays (redraws about 30 times a second)
 confetti = false         # fun: liking a song bursts confetti and hearts from the heart button
 beat_pulse = false       # fun: the play button glows with the music (starts cava; redraws while it moves)
@@ -623,6 +630,16 @@ Optional. [spotifyd](https://github.com/Spotifyd/spotifyd) turns this PC into a 
 5. Checks that spotifyd is running and that the device shows up in your Spotify devices, and says which of the two is missing if not.
 
 An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes (the default is no), and is copied to `<name>.bak-<timestamp>` first. If you say no, the lines to add by hand are printed. Neither file holds a token or password: spotifyd keeps its credentials in its own cache and the login token stays in `~/.local/state/music_display/spotify/`. `--setup` never starts spotifyd itself, but with `use_spotifyd` on the app does: it runs `spotifyd --no-daemon` at startup unless spotifyd is already running (for example as a service) and stops that one again when it quits; turn *Stop spotifyd on exit* (`kill_spotifyd_on_exit`) off to leave it running. `use_spotifyd` (also in the settings menu) says spotifyd is the player on this PC, so `spotify_device` counts as "this PC"; leave it off if you only use the Spotify app or other devices.
+
+## Spotify Soloist
+
+[Spotify Soloist](https://developer.spotify.com/documentation/soloist) is Spotify's own headless Spotify Connect player (Linux, Apple Silicon Mac, Windows). It works next to spotifyd, or instead of it: both are Connect devices on this PC.
+
+1. Install Soloist so `soloist` is on your PATH, create a Soloist API key in the Spotify for Developers dashboard (the account needs Premium to set it up) and put it in an environment variable, `SOLOIST_API_KEY` by default (`soloist_key_env` names another one).
+2. Turn on `use_soloist` (or `--use-soloist`, the settings menu, the window's Spotify tab): the app starts `soloist --device-name <soloist_name> --api-key … --ws 127.0.0.1:0` unless a Soloist already runs (one started as a service is left alone and never stopped), and stops the one it started when it quits (`kill_spotifyd_on_exit` covers both daemons).
+3. Pair it once from the Spotify app (it shows up as a device named `soloist_name`).
+
+**`player = "soloist"`** (`--player soloist`, or pick *soloist* in the settings) reads and controls Soloist directly through its local WebSocket API instead of an MPRIS player: song, cover, position, volume, shuffle and repeat arrive as events, and play / pause / next / previous / seek / volume / shuffle / repeat go straight to it, so the display works without the Web API, its login or its rate limits (and for Free accounts once Soloist is set up). The Soloist device also counts as "this PC" for play here and the device list, and with Soloist as the player **play here** makes it the active device itself. The app finds Soloist through the `ws.addr` / `ws.port` files it writes in its data directory (`~/.local/share/soloist` on Linux, or `$XDG_DATA_HOME/soloist` / `$STATE_DIRECTORY`). The WebSocket API has no authentication, so it is only ever bound to `127.0.0.1`.
 
 ## Local files
 

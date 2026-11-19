@@ -29,6 +29,8 @@ pub struct Ux {
     pub saved: Option<(String, Instant)>,
     /// spotifyd started by this window (`use_spotifyd`).
     pub spotifyd: Option<std::process::Child>,
+    /// Spotify Soloist started by this window (`use_soloist`); stopped when dropped.
+    pub soloist: Option<music_display::soloist::Daemon>,
     logged_in: Option<(bool, Instant)>,
 }
 
@@ -47,6 +49,7 @@ impl Ux {
             dark_now: true,
             saved: None,
             spotifyd: None,
+            soloist: None,
             logged_in: None,
         }
     }

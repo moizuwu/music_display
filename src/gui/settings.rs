@@ -383,6 +383,42 @@ impl Model {
         self.persist("Use spotifyd", &[("use_spotifyd", on.into())]);
     }
 
+    /// Start or stop Spotify Soloist to match `use_soloist`; why it could not start is said.
+    pub fn sync_soloist(&mut self) {
+        if !self.args.use_soloist {
+            if let Some(mut d) = self.ux.soloist.take() {
+                d.stop();
+            }
+            return;
+        }
+        if self.ux.soloist.is_none() {
+            let d = music_display::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, !self.args.no_kill_spotifyd);
+            if let Some(e) = &d.error {
+                self.say(e.clone());
+            }
+            self.ux.soloist = Some(d);
+        }
+    }
+
+    pub fn set_use_soloist(&mut self, on: bool) {
+        self.args.use_soloist = on;
+        self.sync_soloist();
+        // "this PC" includes the Soloist device only while it is in use
+        self.rebuild_spotify();
+        self.persist("Use Spotify Soloist", &[("use_soloist", on.into())]);
+    }
+
+    pub fn set_soloist_name(&mut self, name: &str) {
+        self.args.soloist_name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("mdis").to_string();
+        self.rebuild_spotify();
+        self.persist("Soloist device name", &[("soloist_name", self.args.soloist_name.clone().into())]);
+    }
+
+    pub fn set_soloist_key_env(&mut self, var: &str) {
+        self.args.soloist_key_env = Some(var.trim()).filter(|n| !n.is_empty()).unwrap_or("SOLOIST_API_KEY").to_string();
+        self.persist("Soloist key variable", &[("soloist_key_env", self.args.soloist_key_env.clone().into())]);
+    }
+
     pub fn set_kill_spotifyd(&mut self, on: bool) {
         self.args.no_kill_spotifyd = !on;
         self.persist("Stop spotifyd on exit", &[("kill_spotifyd_on_exit", on.into())]);
@@ -943,7 +979,21 @@ fn spotify(ui: &mut Ui, m: &mut Model) {
     if let Some(v) = check(ui, "Use spotifyd as the player on this PC", m.args.use_spotifyd) {
         m.set_use_spotifyd(v);
     }
-    if let Some(v) = check(ui, "Stop spotifyd when the window closes", !m.args.no_kill_spotifyd) {
+    ui.separator();
+    // Spotify Soloist: Spotify's own headless Connect player, next to or instead of spotifyd
+    if let Some(v) = check(ui, "Use Spotify Soloist as a player on this PC", m.args.use_soloist) {
+        m.set_use_soloist(v);
+    }
+    let name = m.args.soloist_name.clone();
+    if let Some(t) = text_row(ui, &mut m.ux.s.edits, "soloist_name", "Soloist device name", &name, "mdis", false) {
+        m.set_soloist_name(&t);
+    }
+    let var = m.args.soloist_key_env.clone();
+    if let Some(t) = text_row(ui, &mut m.ux.s.edits, "soloist_key_env", "Soloist API key variable", &var, "SOLOIST_API_KEY", false) {
+        m.set_soloist_key_env(&t);
+    }
+    weak(ui, "The key itself stays in that environment variable, never in the config. Pick \"soloist\" as the player (General tab) to read and control Soloist directly, without the Web API.");
+    if let Some(v) = check(ui, "Stop spotifyd and Soloist when the window closes", !m.args.no_kill_spotifyd) {
         m.set_kill_spotifyd(v);
     }
     ui.separator();
