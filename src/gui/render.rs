@@ -157,6 +157,34 @@ mod tests {
         let style = music_display::presets::built_in("Spotify").expect("built-in preset");
         (m.gui, m.layout) = (style.gui, style.layout);
         render(m, rx, &out.replace(".png", "-spotify-preset.png"));
+        // Spotify Soloist as the player: its own queue in the panel, Smart Shuffle on
+        let (mut m, rx) = fake_model(true);
+        let layout = m.layout.clone();
+        m.gui = music_display::presets::built_in("Spotify").expect("built-in preset").gui;
+        m.layout = layout;
+        m.ctl.set_player(music_display::soloist::PLAYER);
+        if let Some(s) = m.snap.as_mut() {
+            s.smart_shuffle = true;
+            s.shuffle = Some(true);
+        }
+        let entry = |t: &str, by: &str, source: &str, art: u32| music_display::soloist::QueueEntry {
+            uri: format!("spotify:track:{t}"),
+            kind: "track".into(),
+            title: t.into(),
+            by: by.into(),
+            cover: format!("fake:{art}"),
+            duration_ms: 200_000.0,
+            source: source.into(),
+        };
+        m.solo_queue = vec![
+            entry("Radio Low", "The Example Band", "queue", 2),
+            entry("Morning Drive", "The Example Band, Lena Park", "context", 1),
+            entry("Windows Down", "The Example Band", "context", 1),
+            entry("Blue Hour", "Night Owls", "autoplay", 9),
+            entry("Static", "Lena Park", "autoplay", 4),
+        ];
+        m.spot.pg.go(Page::Queue);
+        render(m, rx, &out.replace(".png", "-soloist-queue.png"));
     }
 
     /// A picture made up for a fake URL: a diagonal gradient of its own colour.

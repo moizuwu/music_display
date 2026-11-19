@@ -85,6 +85,7 @@ pub const KEYS: &[Key] = &[
     k!("use_soloist", Kind::Bool, "use_soloist"),
     k!("soloist_name", Kind::Str, "soloist_name"),
     k!("soloist_key_env", Kind::Str, "soloist_key_env"),
+    k!("soloist_output", Kind::Text, "soloist_output"),
     k!("spotify_device", Kind::Text, "spotify_device"),
     k!("spotify_button", Kind::Bool, "no_spotify_button"),
     k!("spotify_queue_tab", Kind::Bool, "no_spotify_queue_tab"),
@@ -202,6 +203,7 @@ fn set(args: &mut Args, name: &str, v: &toml::Value) {
         "use_soloist" => args.use_soloist = b(),
         "soloist_name" => args.soloist_name = st(),
         "soloist_key_env" => args.soloist_key_env = st(),
+        "soloist_output" => args.soloist_output = st(),
         "spotify_button" => args.no_spotify_button = !b(),
         "spotify_queue_tab" => args.no_spotify_queue_tab = !b(),
         _ => {}
@@ -481,6 +483,7 @@ pub fn render(args: &Args, path: &Path, found: bool) -> String {
     line("use_soloist", args.use_soloist.to_string());
     line("soloist_name", q(&args.soloist_name));
     line("soloist_key_env", q(&args.soloist_key_env));
+    line("soloist_output", q(&args.soloist_output));
     line("spotify_button", (!args.no_spotify_button).to_string());
     line("spotify_queue_tab", (!args.no_spotify_queue_tab).to_string());
     // (the API key is never here: only the name of the environment variable that holds it)

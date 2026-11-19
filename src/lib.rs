@@ -42,6 +42,8 @@ pub mod identity;
 /// with the track they were requested for, so stale ones can be dropped.
 pub enum AppEvent {
     Player(Option<player::Snapshot>),
+    /// Spotify Soloist's queue (`player = "soloist"`): what plays next, autoplay included.
+    SoloistQueue(Vec<soloist::QueueEntry>),
     Year {
         key: u64,
         year: Option<String>,

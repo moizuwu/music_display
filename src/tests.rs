@@ -581,6 +581,7 @@ fn snap(artist: &str, title: &str, album: &str) -> player::Snapshot {
         player: String::new(),
         shuffle: None,
         repeat: None,
+        smart_shuffle: false,
     }
 }
 

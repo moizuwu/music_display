@@ -84,13 +84,38 @@ pub fn running() -> bool {
 
 /// The command line that starts Soloist as a Connect device named `name`, with the WebSocket
 /// API on a free local port (it writes the port to its data directory).
-pub fn args(name: &str, key: &str) -> Vec<String> {
-    ["--device-name", name, "--api-key", key, "--ws", "127.0.0.1:0"].iter().map(|s| s.to_string()).collect()
+/// `output`: a PipeWire node name or id to play on (empty = the system's default output; a
+/// network speaker set up as a PipeWire sink is chosen the same way).
+pub fn args(name: &str, key: &str, output: &str) -> Vec<String> {
+    let mut a: Vec<String> = ["--device-name", name, "--api-key", key, "--ws", "127.0.0.1:0"].iter().map(|s| s.to_string()).collect();
+    if !output.trim().is_empty() {
+        a.extend(["--pipewire-device".to_string(), output.trim().to_string()]);
+    }
+    a
+}
+
+/// The audio outputs to offer for `soloist_output`: the sinks `pactl` lists (PipeWire's pulse
+/// layer and PulseAudio both answer it; their names are PipeWire node names under PipeWire).
+pub fn outputs() -> Vec<String> {
+    if crate::util::testing() {
+        return Vec::new();
+    }
+    Command::new("pactl")
+        .args(["list", "short", "sinks"])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| parse_sinks(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+}
+
+/// `pactl list short sinks` → the sink names (the second column).
+pub fn parse_sinks(out: &str) -> Vec<String> {
+    out.lines().filter_map(|l| l.split('\t').nth(1)).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()
 }
 
 /// Start Soloist when `on`. `Err` says why not (no key, not installed); `Ok(None)` when one is
 /// already running (it is left alone and never killed) or in tests.
-pub fn start(name: &str, key_env: &str) -> Result<Option<Child>, String> {
+pub fn start(name: &str, key_env: &str, output: &str) -> Result<Option<Child>, String> {
     if crate::util::testing() || running() {
         return Ok(None);
     }
@@ -99,7 +124,7 @@ pub fn start(name: &str, key_env: &str) -> Result<Option<Child>, String> {
         return Err(format!("Soloist needs an API key: set the environment variable {key_env} (Spotify for Developers dashboard)"));
     }
     Command::new("soloist")
-        .args(args(name, key.trim()))
+        .args(args(name, key.trim(), output))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -118,11 +143,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn start(on: bool, name: &str, key_env: &str, kill_on_exit: bool) -> Self {
+    pub fn start(on: bool, name: &str, key_env: &str, output: &str, kill_on_exit: bool) -> Self {
         if !on {
             return Daemon { child: None, kill: kill_on_exit, error: None };
         }
-        match start(name, key_env) {
+        match start(name, key_env, output) {
             Ok(child) => Daemon { child, kill: kill_on_exit, error: None },
             Err(e) => Daemon { child: None, kill: kill_on_exit, error: Some(e) },
         }
@@ -172,7 +197,43 @@ pub struct State {
     pub volume: Option<f64>,
     pub shuffle: Option<bool>,
     pub repeat: Option<Loop>,
+    /// Smart Shuffle (`options.modes.context_enhancement` = `RECOMMENDATION`).
+    pub smart: bool,
     pub logged_in: bool,
+    /// What plays next, as Soloist's `queue_changed` says (its own queue, autoplay included).
+    pub queue: Vec<QueueEntry>,
+}
+
+/// One entry of Soloist's queue.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueueEntry {
+    pub uri: String,
+    /// `track`, `episode`…
+    pub kind: String,
+    pub title: String,
+    /// The artists of a song, the show of an episode.
+    pub by: String,
+    pub cover: String,
+    pub duration_ms: f64,
+    /// `context`, `queue` (added by hand) or `autoplay` (Spotify's own continuation).
+    pub source: String,
+}
+
+impl QueueEntry {
+    fn from(entry: &Value) -> Option<QueueEntry> {
+        let item = &entry["item"];
+        let mut st = State::default();
+        st.set_item(item);
+        (!st.uri.is_empty() || !st.title.is_empty()).then(|| QueueEntry {
+            uri: st.uri,
+            kind: item["entity_type"].as_str().unwrap_or("track").to_string(),
+            title: st.title,
+            by: if st.artists.is_empty() { st.album } else { st.artists.join(", ") },
+            cover: st.cover,
+            duration_ms: st.duration_ms,
+            source: entry["source"].as_str().unwrap_or("context").to_string(),
+        })
+    }
 }
 
 fn name_of(e: &Value) -> String {
@@ -205,6 +266,11 @@ impl State {
         if self.cover.is_empty() {
             self.cover = best_cover(album);
         }
+        // a podcast episode (or an audiobook chapter) has its show as the parent and often no
+        // creators: the show stands in for the artist, as in the Spotify app
+        if self.artists.is_empty() && !self.album.is_empty() {
+            self.artists = vec![self.album.clone()];
+        }
         self.duration_ms = d["playback"]["duration_ms"].as_f64().unwrap_or(0.0);
     }
 
@@ -219,6 +285,9 @@ impl State {
     fn set_options(&mut self, o: &Value) {
         if let Some(s) = o["shuffle"].as_bool() {
             self.shuffle = Some(s);
+        }
+        if let Some(m) = o["modes"]["context_enhancement"].as_str() {
+            self.smart = m == "RECOMMENDATION";
         }
         self.repeat = match o["repeat"].as_str() {
             Some("off") => Some(Loop::None),
@@ -249,6 +318,9 @@ impl State {
             "volume_changed" => self.volume = ev["volume"].as_f64(),
             "options_changed" => self.set_options(&ev["options"]),
             "auth_state" => self.logged_in = ev["logged_in"].as_bool().unwrap_or(false),
+            "queue_changed" => {
+                self.queue = ev["upcoming"].as_array().into_iter().flatten().filter_map(QueueEntry::from).collect();
+            }
             _ => {}
         }
         *self != before
@@ -290,6 +362,7 @@ impl State {
             player: PLAYER.into(),
             shuffle: self.shuffle,
             repeat: self.repeat,
+            smart_shuffle: self.smart,
         })
     }
 }
@@ -421,6 +494,13 @@ pub async fn run_at(
         let mut keep = tokio::time::interval(Duration::from_secs(1));
         let text = |v: Value| tokio_tungstenite::tungstenite::Message::text(v.to_string());
         let _ = out.send(text(cmd("get_state"))).await;
+        // its whole queue (the pushed updates carry only the next 10)
+        let ask_queue = || {
+            let mut q = cmd("get_queue");
+            q["limit"] = json!(80);
+            q
+        };
+        let _ = out.send(text(ask_queue())).await;
         loop {
             tokio::select! {
                 msg = inp.next() => {
@@ -432,6 +512,18 @@ pub async fn run_at(
                     }
                     if st.apply(&ev) && tx.send(AppEvent::Player(st.snapshot(now_ms()))).is_err() {
                         return;
+                    }
+                    match ev["type"].as_str() {
+                        Some("queue_changed") => {
+                            if tx.send(AppEvent::SoloistQueue(st.queue.clone())).is_err() {
+                                return;
+                            }
+                        }
+                        // a new song: the whole queue again
+                        Some("track_changed") => {
+                            let _ = out.send(text(ask_queue())).await;
+                        }
+                        _ => {}
                     }
                 }
                 c = cmds.recv() => {
@@ -532,6 +624,30 @@ mod tests {
     }
 
     #[test]
+    fn an_episode_shows_its_show_and_smart_shuffle_is_told() {
+        let episode = json!({
+            "uri": "spotify:episode:e1", "entity_type": "episode",
+            "decorations": {
+                "identity": { "name": "Episode 12" },
+                "parent": { "entity": { "uri": "spotify:show:s", "entity_type": "show", "decorations": {
+                    "identity": { "name": "The Daily Thing" },
+                    "visual_identity": { "cover": [ { "url": "https://i/show", "size": "large" } ] }
+                } } },
+                "playback": { "duration_ms": 1800000 }
+            }
+        });
+        let mut st = State::default();
+        st.apply(&json!({ "type": "playback_state", "status": "playing", "item": episode, "position": {},
+            "options": { "shuffle": true, "repeat": "off", "modes": { "context_enhancement": "RECOMMENDATION" } } }));
+        let s = st.snapshot(0.0).unwrap();
+        assert_eq!((s.title.as_str(), s.artist.as_str(), s.album.as_str()), ("Episode 12", "The Daily Thing", "The Daily Thing"), "the show stands in for the artist");
+        assert_eq!(s.art_url, "https://i/show", "the show's picture when the episode has none");
+        assert!(s.smart_shuffle);
+        st.apply(&json!({ "type": "options_changed", "options": { "shuffle": true, "modes": { "context_enhancement": "NONE" } } }));
+        assert!(!st.snapshot(0.0).unwrap().smart_shuffle);
+    }
+
+    #[test]
     fn player_words_become_soloist_commands() {
         let mut st = State::default();
         st.apply(&state_event());
@@ -587,6 +703,11 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
             ws.send(tokio_tungstenite::tungstenite::Message::text(state_event().to_string())).await.unwrap();
+            let queue = json!({ "type": "queue_changed", "previous": [], "upcoming": [
+                { "uid": "a", "source": "queue", "item": track() },
+                { "uid": "b", "source": "autoplay", "item": track() }
+            ] });
+            ws.send(tokio_tungstenite::tungstenite::Message::text(queue.to_string())).await.unwrap();
             while let Some(Ok(m)) = ws.next().await {
                 if let Ok(t) = m.to_text() {
                     let v: Value = serde_json::from_str(t).unwrap();
@@ -599,15 +720,21 @@ mod tests {
         let d = dir.clone();
         tokio::spawn(async move { run_at(&d, tx, crx, || true).await });
         let five = std::time::Duration::from_secs(5);
-        // first it asks for the state, then shows what came
+        // first it asks for the state and the whole queue, then shows what came
         assert_eq!(tokio::time::timeout(five, seen.recv()).await.unwrap().as_deref(), Some("get_state"));
-        let snap = loop {
+        assert_eq!(tokio::time::timeout(five, seen.recv()).await.unwrap().as_deref(), Some("get_queue"));
+        let (mut snap, mut queue) = (None, None);
+        while snap.is_none() || queue.is_none() {
             match tokio::time::timeout(five, rx.recv()).await.unwrap() {
-                Some(AppEvent::Player(Some(s))) => break s,
+                Some(AppEvent::Player(Some(s))) => snap = Some(s),
+                Some(AppEvent::SoloistQueue(q)) => queue = Some(q),
                 _ => continue,
             }
-        };
+        }
+        let snap = snap.unwrap();
         assert_eq!((snap.title.as_str(), snap.player.as_str()), ("City Lights", PLAYER));
+        let queue = queue.unwrap();
+        assert_eq!(queue.iter().map(|e| e.source.as_str()).collect::<Vec<_>>(), ["queue", "autoplay"], "the queue reaches the app, with where each song comes from");
         // a player word goes out as the Soloist command
         ctx.send(vec!["next".into()]).unwrap();
         assert_eq!(tokio::time::timeout(five, seen.recv()).await.unwrap().as_deref(), Some("skip_next"));
@@ -617,8 +744,18 @@ mod tests {
     #[test]
     fn the_daemon_needs_a_key_and_is_never_started_in_tests() {
         crate::util::enter_test_mode();
-        assert!(!Daemon::start(true, "mdis", "MDIS_NO_SUCH_VAR", true).started());
-        assert!(!Daemon::start(false, "mdis", "X", true).started());
-        assert_eq!(args("Kitchen", "k")[..4], ["--device-name", "Kitchen", "--api-key", "k"]);
+        assert!(!Daemon::start(true, "mdis", "MDIS_NO_SUCH_VAR", "", true).started());
+        assert!(!Daemon::start(false, "mdis", "X", "", true).started());
+        assert_eq!(args("Kitchen", "k", "")[..4], ["--device-name", "Kitchen", "--api-key", "k"]);
+        assert!(!args("Kitchen", "k", "").iter().any(|a| a == "--pipewire-device"), "no output: the default one");
+        assert_eq!(args("Kitchen", "k", " alsa_output.usb-dac ")[6..], ["--pipewire-device", "alsa_output.usb-dac"]);
+    }
+
+    #[test]
+    fn the_outputs_are_the_sink_names() {
+        let out = "47\talsa_output.pci-0000_00_1f.3.analog-stereo\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n\
+                   52\traop_sink.living-room.local\tPipeWire\ts16le 2ch 44100Hz\tIDLE\n";
+        assert_eq!(parse_sinks(out), ["alsa_output.pci-0000_00_1f.3.analog-stereo", "raop_sink.living-room.local"]);
+        assert!(parse_sinks("").is_empty());
     }
 }

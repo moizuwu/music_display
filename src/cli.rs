@@ -563,6 +563,12 @@ pub struct Args {
     #[arg(long, default_value = "SOLOIST_API_KEY", value_name = "VAR")]
     pub soloist_key_env: String,
 
+    /// The audio output Spotify Soloist plays on: a PipeWire node name or id (a sink from
+    /// `pactl list short sinks`, network speakers set up in PipeWire included); empty = the
+    /// default output [config: soloist_output]
+    #[arg(long, default_value = "", value_name = "NODE")]
+    pub soloist_output: String,
+
     /// Hide the library button at the top left (it is only shown while Spotify is on; open the
     /// library with `o` instead) [config: spotify_button = false]
     #[arg(long)]

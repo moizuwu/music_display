@@ -53,7 +53,8 @@ impl super::Gui {
                 sp_side::library_column(ui, &mut self.m);
             });
         });
-        let queue = lk.on && queue_open(ui.ctx()) && self.m.spot.on();
+        // Soloist has a queue of its own, so the panel works without the Web API too
+        let queue = lk.on && queue_open(ui.ctx()) && (self.m.spot.on() || self.m.ctl.soloist_on());
         if queue {
             self.m.spot.load_tab(crate::browser::TAB_QUEUE, false);
             self.m.spot.load_tab(0, false);
@@ -139,6 +140,11 @@ impl super::Gui {
             });
         });
         ui.add_space(14.0);
+        // Soloist as the player: its own queue, grouped the way the app groups it
+        if !recent && self.m.ctl.soloist_on() {
+            self.soloist_queue(ui, lk);
+            return;
+        }
         let tab = if recent { 0 } else { crate::browser::TAB_QUEUE };
         let items: Vec<music_display::spotify::Item> = self.m.spot.lib.tabs[tab].items.clone();
         if items.is_empty() {
@@ -164,6 +170,39 @@ impl super::Gui {
         }
         for it in rest {
             self.queue_row(ui, lk, it, false);
+        }
+    }
+
+    /// Soloist's queue: the song playing, then "Next in queue" (added by hand), "Next from: …"
+    /// (the album or playlist) and "Autoplay" (what Spotify adds after it).
+    fn soloist_queue(&mut self, ui: &mut Ui, lk: &SpLook) {
+        let head = |ui: &mut Ui, t: &str| {
+            ui.add_space(8.0);
+            ui.label(RichText::new(t).font(lk.bold(lk.body + 2.0)).color(lk.text));
+            ui.add_space(6.0);
+        };
+        if let Some(s) = self.m.snap.clone() {
+            head(ui, "Now playing");
+            let now = music_display::spotify::Item { kind: "track".into(), uri: s.track_id.clone(), name: s.title.clone(), sub: s.artist.clone(), image: s.art_url.clone(), ..Default::default() };
+            self.queue_row(ui, lk, &now, true);
+            ui.add_space(6.0);
+        }
+        let q = self.m.solo_queue.clone();
+        if q.is_empty() {
+            style::note(ui, "Nothing queued.");
+            return;
+        }
+        let from = self.m.snap.as_ref().map(|s| s.album.clone()).filter(|a| !a.is_empty());
+        for (source, title) in [("queue", "Next in queue".to_string()), ("context", from.map_or("Next up".into(), |a| format!("Next from: {a}"))), ("autoplay", "Autoplay".into())] {
+            let rows: Vec<_> = q.iter().filter(|e| e.source == source).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            head(ui, &title);
+            for e in rows {
+                let it = music_display::spotify::Item { kind: e.kind.clone(), uri: e.uri.clone(), name: e.title.clone(), sub: e.by.clone(), image: e.cover.clone(), duration: e.duration_ms / 1000.0, ..Default::default() };
+                self.queue_row(ui, lk, &it, false);
+            }
         }
     }
 
@@ -327,29 +366,54 @@ impl super::Gui {
         }
     }
 
-    /// The player bar, right part: the queue and the lyrics, then devices, play here and volume.
+    /// The player bar, right part, all on one centre line: lyrics, the queue, the "Now playing"
+    /// column, then devices, play here and the volume (Spotify's order, lyrics first).
     fn bar_right(&mut self, ui: &mut egui::Ui) {
         let cur = self.m.spot.pg.nav.current().clone();
-        ui.horizontal_centered(|ui| {
-            // (right to left would reverse the order of the buttons: space first, then the rest)
-            let vol_w = controls::bar_right_width(ui, &self.m);
-            let mine = style::ICON_SIDE * 2.0 + ui.spacing().item_spacing.x * 2.0;
-            ui.add_space((ui.available_width() - vol_w - mine).max(0.0));
+        let look = super::sp_look::active(ui.ctx());
+        let spot = self.m.spot.on() || self.m.ctl.soloist_on();
+        let q_on = if look { queue_open(ui.ctx()) } else { cur == Page::Queue };
+        let np_on = self.m.gui.spotify_now_playing && !(look && q_on);
+        let side = style::ICON_SIDE;
+        let gap = ui.spacing().item_spacing.x;
+        let mine = (if spot { 3.0 } else { 2.0 }) * (side + gap);
+        let w = mine + controls::bar_right_width(ui, &self.m);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_height(ui.available_height());
+            // (right to left would reverse the buttons' order: the space first, then the rest)
+            ui.add_space((ui.available_width() - w).max(0.0));
+            // the same switches as devices and play here: grey, white under the pointer, green
+            // with a dot when on
+            let switch = |ui: &mut Ui, icon: Icon, on: bool, tip: &str| style::toggle_button(ui, icon, on).on_hover_text(tip).clicked();
+            if switch(ui, Icon::Lyrics, cur == Page::Lyrics, "Lyrics") {
+                self.toggle_page(Page::Lyrics);
+            }
             // with the Spotify look the queue is a panel on the right (as in the app), else a page
-            let look = super::sp_look::active(ui.ctx());
-            let q_on = if look { queue_open(ui.ctx()) } else { cur == Page::Queue };
-            if self.m.spot.on() && style::tool(ui, style::ICON_SIDE, Icon::Queue, q_on, "Queue") {
+            if spot && switch(ui, Icon::Queue, q_on, "Queue") {
                 if look {
                     set_queue_open(ui.ctx(), !q_on);
                 } else {
                     self.toggle_page(Page::Queue);
                 }
             }
-            if style::tool(ui, style::ICON_SIDE, Icon::Lyrics, cur == Page::Lyrics, "Lyrics") {
-                self.toggle_page(Page::Lyrics);
+            if switch(ui, Icon::NowPlaying, np_on, "Now playing view") {
+                self.toggle_now_playing(ui.ctx(), q_on && look);
             }
-            controls::bar_right(ui, &mut self.m);
+            controls::bar_right_inline(ui, &mut self.m);
         });
+    }
+
+    /// The "Now playing" button: shows or hides the column (saved in `[gui]`); over an open queue
+    /// it brings the column back in the queue's place.
+    fn toggle_now_playing(&mut self, ctx: &egui::Context, queue_open_now: bool) {
+        if queue_open_now {
+            set_queue_open(ctx, false);
+            self.m.gui.spotify_now_playing = true;
+        } else {
+            self.m.gui.spotify_now_playing = !self.m.gui.spotify_now_playing;
+        }
+        let t = self.m.gui.write();
+        self.m.save_settings(&[("gui", toml::Value::Table(t))]);
     }
 
     /// A page's button: open it, or go back to where it was opened from.

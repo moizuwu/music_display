@@ -445,6 +445,13 @@ pub fn image(images: &Value, want: u64) -> String {
 
 /// The `spotify:track:` URI behind an MPRIS track id (`spotify:track:…`,
 /// `/com/spotify/track/…`, spotifyd's `/spotify/track/…`).
+/// Download and decode a picture (a cover: no login needed, so Soloist's covers come this way too).
+pub async fn fetch_image(http: &reqwest::Client, url: &str) -> Option<image::RgbaImage> {
+    let r = http.get(url).send().await.ok()?.error_for_status().ok()?;
+    let bytes = r.bytes().await.ok()?;
+    tokio::task::spawn_blocking(move || decode_image(&bytes)).await.ok()?
+}
+
 pub fn track_uri(track_id: &str) -> Option<String> {
     if track_id.starts_with("spotify:track:") {
         return Some(track_id.to_string());
@@ -549,6 +556,7 @@ pub fn parse_state(p: &Value, is_local: impl Fn(&str) -> bool) -> Option<Remote>
             Some("context") => Loop::Playlist,
             _ => Loop::None,
         }),
+        smart_shuffle: p["smart_shuffle"].as_bool().unwrap_or(false),
     };
     let artist_uris = t["artists"].as_array().into_iter().flatten().map(|a| s(&a["uri"])).filter(|u| !u.is_empty()).collect();
     Some(Remote { snap, local: is_local(&device), device, album_uri: s(&album["uri"]), artist_uris })
@@ -1589,9 +1597,7 @@ fn decode_image(bytes: &[u8]) -> Option<image::RgbaImage> {
 impl Api {
     /// A cover or picture from Spotify's image server, decoded; `None` when it could not be had.
     pub async fn fetch_image(&self, url: &str) -> Option<image::RgbaImage> {
-        let r = self.http.get(url).send().await.ok()?.error_for_status().ok()?;
-        let bytes = r.bytes().await.ok()?;
-        tokio::task::spawn_blocking(move || decode_image(&bytes)).await.ok()?
+        fetch_image(&self.http, url).await
     }
 
     pub async fn page_album(&self, uri: &str) -> Res<PageData> {

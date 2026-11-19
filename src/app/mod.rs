@@ -508,6 +508,8 @@ impl App {
     // ── background events ──────────────────────────────────────────────
     pub fn apply(&mut self, ev: AppEvent) {
         match ev {
+            // (the terminal UI has no queue panel of its own for it)
+            AppEvent::SoloistQueue(_) => {}
             AppEvent::Player(None) => {
                 self.set_mpris(false);
                 // No MPRIS player: show what the Spotify API says plays (the phone…)

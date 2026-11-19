@@ -39,6 +39,8 @@ pub struct Model {
     /// The `[gui]` look; the window loads it from the config file.
     pub gui: music_display::guiconf::GuiConf,
     pub ctl: Ctl,
+    /// Spotify Soloist's own queue (`player = "soloist"`), newest from its link.
+    pub solo_queue: Vec<music_display::soloist::QueueEntry>,
     pub tx: UnboundedSender<AppEvent>,
     pub client: reqwest::Client,
     pub snap: Option<Snapshot>,
@@ -143,6 +145,7 @@ impl Model {
             lines_hash: 0,
             browse: Browse::default(),
             line_anim: Default::default(),
+            solo_queue: Vec::new(),
             lyric_dims: (0.0, 0.0),
             seek_preview: None,
             player_seen: Instant::now() - Duration::from_secs(10),
@@ -210,6 +213,7 @@ impl Model {
                 self.on_snapshot(s);
                 self.spot.check_liked(self.playing_uri());
             }
+            AppEvent::SoloistQueue(q) => self.solo_queue = q,
             AppEvent::Player(None) => {
                 self.spot.set_mpris(false);
                 // no MPRIS player: show what the Spotify API says plays (the phone…)

@@ -414,7 +414,8 @@ fn delete_locally(m: &mut Model, uri: &str) {
 /// and moves playback to the one clicked. The `d` key opens it too.
 pub fn device_button(ui: &mut Ui, m: &mut Model) {
     let open_now = m.spot.devices.is_some();
-    let r = style::tool_response(ui, style::ICON_SIDE, Icon::Devices, open_now, "Devices: move playback to another Spotify Connect device");
+    // grey like the other switches of the bar, green with a dot while the list is open
+    let r = style::toggle_button(ui, Icon::Devices, open_now).on_hover_text("Devices: move playback to another Spotify Connect device");
     let popup = egui::Popup::menu(&r).align(RectAlign::TOP_END).align_alternatives(&[RectAlign::TOP_START]).gap(6.0).width(300.0);
     let (id, ctx) = (popup.get_id(), ui.ctx().clone());
     let was_open = egui::Popup::is_id_open(&ctx, id);

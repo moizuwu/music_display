@@ -121,7 +121,7 @@ impl App {
             return;
         }
         if self.soloist.is_none() {
-            let d = crate::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, !self.args.no_kill_spotifyd);
+            let d = crate::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, &self.args.soloist_output, !self.args.no_kill_spotifyd);
             if let Some(e) = &d.error {
                 self.set_note(e.clone());
             }

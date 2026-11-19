@@ -540,6 +540,8 @@ pub enum Icon {
     Prev,
     Next,
     Shuffle,
+    /// Spotify's Smart Shuffle: the shuffle arrows with a small sparkle.
+    SmartShuffle,
     Repeat,
     /// Repeat with the "1" of repeating the song.
     RepeatOne,
@@ -580,6 +582,8 @@ pub enum Icon {
     Edit,
     Trash,
     Check,
+    /// Spotify's "Now playing view": a window with its right-hand column filled.
+    NowPlaying,
     /// A device that is a speaker, a computer or a phone.
     Speaker,
     Computer,
@@ -745,6 +749,25 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
         Icon::Next => {
             p.rect_filled(bar(c.x + u * 0.95), 1.0, ink);
             p.add(egui::Shape::convex_polygon(tri(c.x - u * 0.1, 1.0), ink, Stroke::NONE));
+        }
+        Icon::SmartShuffle => {
+            // the shuffle arrows, a little smaller and lower, with a four-pointed sparkle above
+            let sh = |x: f32, y: f32| (x * 0.85, y * 0.85 + 2.6);
+            let (a, b, c, d) = (sh(1.0, 4.25), sh(6.5, 4.25), sh(6.5, 11.75), sh(12.0, 11.75));
+            stroke(&bez(a, b, c, d, 0.0, 1.0));
+            let (a2, b2, c2, d2) = (sh(1.0, 11.75), sh(6.5, 11.75), sh(6.5, 4.25), sh(12.0, 4.25));
+            stroke(&bez(a2, b2, c2, d2, 0.0, 0.40));
+            stroke(&bez(a2, b2, c2, d2, 0.60, 1.0));
+            let (hx, hy1) = sh(14.6, 11.75);
+            let (_, hy2) = sh(14.6, 4.25);
+            head(hx, hy1, 1.0);
+            head(hx, hy2, 1.0);
+            let (sx, sy) = (12.6, 2.6);
+            p.add(egui::Shape::convex_polygon(
+                vec![at(sx, sy - 2.2), at(sx + 0.6, sy - 0.6), at(sx + 2.2, sy), at(sx + 0.6, sy + 0.6), at(sx, sy + 2.2), at(sx - 0.6, sy + 0.6), at(sx - 2.2, sy), at(sx - 0.6, sy - 0.6)],
+                ink,
+                Stroke::NONE,
+            ));
         }
         Icon::Shuffle => {
             // two arrows that cross; the one coming from below has a gap where it passes under
@@ -929,6 +952,10 @@ fn draw_icon(p: &egui::Painter, c: Pos2, u: f32, icon: Icon, ink: Color32) {
             stroke(&[at(4.2, 4.2), at(5.0, 13.5), at(11.0, 13.5), at(11.8, 4.2)]);
             stroke(&[at(6.6, 6.6), at(6.8, 11.2)]);
             stroke(&[at(9.4, 6.6), at(9.2, 11.2)]);
+        }
+        Icon::NowPlaying => {
+            p.rect_stroke(Rect::from_min_max(at(1.5, 2.5), at(14.5, 13.5)), 2.0 * k, Stroke::new(w, ink), egui::StrokeKind::Middle);
+            p.rect_filled(Rect::from_min_max(at(9.5, 4.5), at(12.5, 11.5)), 1.0 * k, ink);
         }
         Icon::Check => stroke(&[at(2.8, 8.6), at(6.4, 12.2), at(13.2, 4.6)]),
         Icon::Speaker => {

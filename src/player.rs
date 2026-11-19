@@ -101,6 +101,9 @@ pub struct Snapshot {
     /// poller from the last `playerctl shuffle` / `loop` read, not by [`parse`].
     pub shuffle: Option<bool>,
     pub repeat: Option<Loop>,
+    /// Spotify's Smart Shuffle (recommended songs mixed in) is on: told by Spotify Soloist and by
+    /// the Web API, never by an MPRIS player. It is switched in the Spotify app.
+    pub smart_shuffle: bool,
 }
 
 impl Snapshot {
@@ -166,6 +169,7 @@ pub fn parse(line: &str) -> Option<Snapshot> {
         player: f.get(13).map_or("", |v| v.trim()).to_string(),
         shuffle: None,
         repeat: None,
+        smart_shuffle: false,
     })
 }
 

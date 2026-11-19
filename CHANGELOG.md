@@ -15,6 +15,7 @@ which turns the `Unreleased` section into that version.
 
 ### Changed
 
+- Spotify layout's player bar: lyrics, queue, devices, play here and the volume sit on one centre line in the same grey style (green with a dot when on), lyrics first; a new "Now playing view" button shows or hides the right column (`spotify_now_playing`, saved), and brings it back in place of an open queue.
 - Window: no more separator lines between panels and under the top bar, and the panel border is a soft edge instead of a hard line.
 - Spotify layout: back / forward / home / search sit in the one top bar (centred, as in Spotify) instead of a second strip, the library button is gone from it (the library is a column), the new-playlist + is in the library header, and the right column shows the song the way Spotify's Now playing does (title, artist, heart, then album / release / genre) instead of the metadata table.
 - Window: a panel's corners are square on the side where it meets a split (the draggable border between two columns); the window's outer corners stay rounded.
@@ -25,6 +26,7 @@ which turns the `Unreleased` section into that version.
 
 ### Added
 
+- Spotify Soloist: `soloist_output` (`--soloist-output`, a list in the window's Spotify tab) picks the audio output (a PipeWire node, network speakers set up in PipeWire included); with `player = "soloist"` the queue panel shows Soloist's own queue with "Next in queue" / "Next from" / "Autoplay", episodes show their show, and Smart Shuffle is shown on the shuffle button (also from the Web API). Covers load without a Web API login. Audio quality, crossfade, normalisation, Smart Shuffle, Autoplay and Jam are set in the Spotify app (Soloist has no switch for them); the README says so.
 - `spotify_look` in `[gui]` (the built-in Spotify preset turns it on): with the Spotify layout, the window takes the Spotify app's own look, measured from screenshots of it. Black frame with rounded panels, Figtree as the font (bundled, SIL Open Font License), a round home button and a pill search field, a white play button and white bars, Home with shortcut tiles and shelves of borderless cards with "Show all", page headers and Home tinted with the cover's colour, the library's "+ Create" and pill chips, the queue as a panel in the right column, and lyrics on a page in the cover's colour.
 - Spotify Soloist support (Spotify's own headless Connect player), next to spotifyd: `use_soloist` starts it with the app (`soloist_name`, the API key from the environment variable `soloist_key_env`), its device counts as "this PC", and `player = "soloist"` reads and controls it through its local WebSocket API instead of MPRIS (no Web API needed). Settings menu row and window Spotify-tab rows.
 - Style presets in the window's Appearance tab: save the whole look and the panel layout under a name, apply it again later, update, rename or delete it (with a confirmation). They are kept in `presets.toml` next to `config.toml`. **Default** and **Spotify** (black, white text, green accent, Spotify layout) are built in.

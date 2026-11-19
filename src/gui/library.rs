@@ -29,7 +29,7 @@ pub struct Spot {
     /// A message for the note line, taken by the model.
     pub note: Option<String>,
     pub(super) tx: UnboundedSender<AppEvent>,
-    client: reqwest::Client,
+    pub(super) client: reqwest::Client,
     /// The poller of `/me/player`, stopped when Spotify is switched off or rebuilt.
     task: Option<tokio::task::JoinHandle<()>>,
     /// A browser login in progress, what it last said, and the link to open by hand.

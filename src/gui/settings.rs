@@ -392,7 +392,7 @@ impl Model {
             return;
         }
         if self.ux.soloist.is_none() {
-            let d = music_display::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, !self.args.no_kill_spotifyd);
+            let d = music_display::soloist::Daemon::start(true, &self.args.soloist_name, &self.args.soloist_key_env, &self.args.soloist_output, !self.args.no_kill_spotifyd);
             if let Some(e) = &d.error {
                 self.say(e.clone());
             }
@@ -412,6 +412,18 @@ impl Model {
         self.args.soloist_name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("mdis").to_string();
         self.rebuild_spotify();
         self.persist("Soloist device name", &[("soloist_name", self.args.soloist_name.clone().into())]);
+    }
+
+    /// Soloist's audio output; a running Soloist this window started is restarted on it.
+    pub fn set_soloist_output(&mut self, node: &str) {
+        self.args.soloist_output = node.trim().to_string();
+        if self.ux.soloist.as_ref().is_some_and(|d| d.started()) {
+            if let Some(mut d) = self.ux.soloist.take() {
+                d.stop();
+            }
+            self.sync_soloist();
+        }
+        self.persist("Soloist output", &[("soloist_output", self.args.soloist_output.clone().into())]);
     }
 
     pub fn set_soloist_key_env(&mut self, var: &str) {
@@ -992,7 +1004,27 @@ fn spotify(ui: &mut Ui, m: &mut Model) {
     if let Some(t) = text_row(ui, &mut m.ux.s.edits, "soloist_key_env", "Soloist API key variable", &var, "SOLOIST_API_KEY", false) {
         m.set_soloist_key_env(&t);
     }
-    weak(ui, "The key itself stays in that environment variable, never in the config. Pick \"soloist\" as the player (General tab) to read and control Soloist directly, without the Web API.");
+    // the audio output: the default one, or a sink (a network speaker set up in PipeWire too)
+    ui.horizontal(|ui| {
+        ui.label("Soloist audio output");
+        let cur = m.args.soloist_output.clone();
+        let shown = if cur.is_empty() { "Default output".to_string() } else { cur.clone() };
+        let mut pick: Option<String> = None;
+        egui::ComboBox::from_id_salt("soloist_output").selected_text(shown).width(280.0).show_ui(ui, |ui| {
+            if ui.selectable_label(cur.is_empty(), "Default output").clicked() {
+                pick = Some(String::new());
+            }
+            for o in music_display::soloist::outputs() {
+                if ui.selectable_label(o == cur, &o).clicked() {
+                    pick = Some(o);
+                }
+            }
+        });
+        if let Some(o) = pick {
+            m.set_soloist_output(&o);
+        }
+    });
+    weak(ui, "The key itself stays in that environment variable, never in the config. Pick \"soloist\" as the player (General tab) to read and control Soloist directly, without the Web API. Audio quality (lossless), crossfade, automix, normalisation, Smart Shuffle, Autoplay and Jam are set in the Spotify app: Soloist offers no switch for them, it plays the way the account and the app say.");
     if let Some(v) = check(ui, "Stop spotifyd and Soloist when the window closes", !m.args.no_kill_spotifyd) {
         m.set_kill_spotifyd(v);
     }

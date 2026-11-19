@@ -185,6 +185,7 @@ kill_spotifyd_on_exit = true   # stop the spotifyd / Soloist this app started wh
 use_soloist = false            # start Spotify Soloist with the app (see "Spotify Soloist"); its device counts as "this PC"
 soloist_name = "mdis"          # the Spotify Connect name of that Soloist
 soloist_key_env = "SOLOIST_API_KEY"  # the environment variable holding the Soloist API key (the key is never stored here)
+soloist_output = ""            # the audio output Soloist plays on: a PipeWire node / sink name (empty = the default output)
 spotify_button = true          # the [ library ] button at the top left (only shown while Spotify is on)
 spotify_queue_tab = true       # the Queue tab in the library browser
 # [keys]                       # must come last in the file; see "Remapping keys" below
@@ -251,6 +252,7 @@ spotify_queue_tab = true       # the Queue tab in the library browser
 | `--use-soloist` | start Spotify Soloist with the app (unless one already runs), next to or instead of spotifyd; its device counts as "this PC". Config: `use_soloist`; also a row in the settings menu and the window's Spotify tab. See "Spotify Soloist" below. |
 | `--soloist-name NAME` | the Spotify Connect name of the Soloist this app starts (default `mdis`). Config: `soloist_name`. |
 | `--soloist-key-env VAR` | the environment variable that holds the Soloist API key (default `SOLOIST_API_KEY`); the key itself is never written to the config. Config: `soloist_key_env`. |
+| `--soloist-output NODE` | the audio output Soloist plays on: a PipeWire node name or id, as `pactl list short sinks` lists them (a network speaker set up as a PipeWire sink, such as AirPlay / RAOP or Snapcast, is chosen the same way); empty = the default output. Config: `soloist_output`; a list to pick from in the window's Spotify tab. |
 | `--no-kill-spotifyd` | leave the spotifyd that this app started running when it quits (by default it is stopped again; a spotifyd that was already running is never touched). Config: `kill_spotifyd_on_exit = false`; also the *Stop spotifyd on exit* row in the settings menu. |
 | `--setup` | guided one-time setup of spotifyd and the Spotify login, then exit (see "Setup (spotifyd)" below). |
 | `--no-spotify-button` | hide the `[ library ]` button at the top left (config `spotify_button = false`; also in the settings menu). It only exists while Spotify is on; `o` opens the library either way. |
@@ -380,6 +382,7 @@ always_on_top = false
 decorations = true       # false = no title bar or border
 spotify_layout = false   # experimental: arrange the window like the Spotify app (library left, lyrics middle, song right, player bar at the bottom)
 spotify_look = false     # with spotify_layout: Spotify's own look too (sizes, Figtree font, cover-coloured headers, queue panel, lyrics page); the built-in Spotify preset turns it on
+                         # the player bar has lyrics, queue and "Now playing view" buttons (the last shows or hides the right column, `spotify_now_playing`)
 vinyl = false            # fun: the cover spins like a record while the song plays (redraws about 30 times a second)
 confetti = false         # fun: liking a song bursts confetti and hearts from the heart button
 beat_pulse = false       # fun: the play button glows with the music (starts cava; redraws while it moves)
@@ -640,6 +643,15 @@ An existing `spotifyd.conf` or `config.toml` is only replaced if you answer yes 
 3. Pair it once from the Spotify app (it shows up as a device named `soloist_name`).
 
 **`player = "soloist"`** (`--player soloist`, or pick *soloist* in the settings) reads and controls Soloist directly through its local WebSocket API instead of an MPRIS player: song, cover, position, volume, shuffle and repeat arrive as events, and play / pause / next / previous / seek / volume / shuffle / repeat go straight to it, so the display works without the Web API, its login or its rate limits (and for Free accounts once Soloist is set up). The Soloist device also counts as "this PC" for play here and the device list, and with Soloist as the player **play here** makes it the active device itself. The app finds Soloist through the `ws.addr` / `ws.port` files it writes in its data directory (`~/.local/share/soloist` on Linux, or `$XDG_DATA_HOME/soloist` / `$STATE_DIRECTORY`). The WebSocket API has no authentication, so it is only ever bound to `127.0.0.1`.
+
+**What works with Soloist, and where it is set:**
+
+- **Music, podcasts and audiobooks** play on it like on any Connect device. With `player = "soloist"` an episode shows its show as the artist and the show's picture.
+- **Spotify Connect:** it is a Connect device; mdis starts it, shows it, and **play here** makes it the active one.
+- **The queue:** with `player = "soloist"` the Spotify layout's queue panel shows Soloist's own queue (no Web API needed), grouped as "Next in queue", "Next from: …" and **Autoplay** (the songs Spotify adds itself).
+- **Smart Shuffle:** shown on the shuffle button (the arrows with a sparkle, green) when it is on.
+- **Audio output:** `soloist_output` picks the PipeWire node (or the default); on Linux Soloist uses PipeWire and falls back to PulseAudio, on macOS Core Audio, on Windows WASAPI.
+- **Set in the Spotify app, not in mdis:** audio quality (lossless up to 24-bit / 44.1 kHz on Premium), crossfade and automix, loudness normalisation, switching Smart Shuffle and Autoplay on or off, and Jam. Soloist has no command-line option or API command for any of them: it plays the way the account and the app say, and mdis cannot change them.
 
 ## Local files
 

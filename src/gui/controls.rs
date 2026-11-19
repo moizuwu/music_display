@@ -97,23 +97,20 @@ pub fn bar_center(ui: &mut Ui, m: &mut Model) {
     progress(ui, m, length);
 }
 
-/// The player bar, right part: devices, play here and the volume, against the right edge.
-pub fn bar_right(ui: &mut Ui, m: &mut Model) {
-    let vol = bar_volume(m);
-    ui.horizontal(|ui| {
-        ui.add_space((ui.available_width() - bar_right_width(ui, m)).max(0.0));
-        super::library::connect_buttons(ui, m);
-        if let Some(v) = vol {
-            volume(ui, m, v);
-        }
-    });
+/// Devices, play here and the volume, added to the row the caller is drawing (so they share its
+/// centre line with the buttons before them).
+pub fn bar_right_inline(ui: &mut Ui, m: &mut Model) {
+    super::library::connect_buttons(ui, m);
+    if let Some(v) = bar_volume(m) {
+        volume(ui, m, v);
+    }
 }
 
 fn bar_volume(m: &Model) -> Option<f64> {
     m.snap.as_ref().and_then(|s| plan(&m.layout.buttons, s).into_iter().find_map(|c| if let Ctl::Volume(v) = c { Some(v) } else { None }))
 }
 
-/// How wide [`bar_right`] draws.
+/// How wide [`bar_right_inline`] draws.
 pub fn bar_right_width(ui: &Ui, m: &Model) -> f32 {
     let connect = if m.spot.on() { 2 } else { 0 };
     let gap = ui.spacing().item_spacing.x;
@@ -132,8 +129,15 @@ fn transport_row(ui: &mut Ui, m: &mut Model, shuffle: Option<Ctl>, trio: &[Ctl],
         let width = n * style::ICON_SIDE + (n - 1.0) * ui.spacing().item_spacing.x;
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
         if let Some(Ctl::Shuffle(on)) = shuffle {
-            let tip = if on { "shuffle: on" } else { "shuffle: off" };
-            if style::toggle_button(ui, Icon::Shuffle, on).on_hover_text(tip).clicked() {
+            // Smart Shuffle (Spotify, Soloist) can only be switched in the Spotify app; it shows
+            // here, and a click toggles plain shuffle as always
+            let smart = m.snap.as_ref().is_some_and(|s| s.smart_shuffle);
+            let (icon, tip) = match (smart, on) {
+                (true, _) => (Icon::SmartShuffle, "Smart Shuffle: on (switched in the Spotify app)"),
+                (false, true) => (Icon::Shuffle, "Shuffle: on"),
+                (false, false) => (Icon::Shuffle, "Shuffle: off"),
+            };
+            if style::toggle_button(ui, icon, on || smart).on_hover_text(tip).clicked() {
                 m.toggle_shuffle();
             }
         }

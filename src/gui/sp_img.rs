@@ -110,10 +110,11 @@ impl Spot {
         match self.pg.images.texture(ctx, url) {
             Ok(t) => t,
             Err(_) => {
-                if let (Some(api), false) = (self.api.clone(), url.starts_with("fake:")) {
-                    let (tx, url) = (self.tx.clone(), url.to_string());
+                // covers need no login: the plain client fetches them (Soloist's queue without the Web API)
+                if !url.starts_with("fake:") {
+                    let (tx, url, http) = (self.tx.clone(), url.to_string(), self.client.clone());
                     tokio::spawn(async move {
-                        let img = api.fetch_image(&url).await.map(Box::new);
+                        let img = music_display::spotify::fetch_image(&http, &url).await.map(Box::new);
                         let _ = tx.send(AppEvent::Spotify(Reply::Image { url, img }));
                     });
                 }
